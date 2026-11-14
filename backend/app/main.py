@@ -105,8 +105,9 @@ def orders(store:str='',marketplace:str='',status:str='',fulfilled_by:str='',q:s
         from .order_estimates import enrich
         estimates=enrich(db,rows,by_order)
         from .order_presentation import decorate_items
+        from .order_sync_progress import progress
         decorate_items(db,rows,by_order)
-        return {'total':total,'page':page,'page_size':page_size,'orders':[dict(order_json(o),items=by_order.get(o.id,[]),estimate=estimates[o.id]) for o in rows],'summary':{'statuses':statuses,'amounts':sums,'units':db.scalar(select(func.coalesce(func.sum(Order.quantity),0)).where(*filters)),'last_synced':latest}}
+        return {'sync_progress':progress(db,store),'total':total,'page':page,'page_size':page_size,'orders':[dict(order_json(o),items=by_order.get(o.id,[]),estimate=estimates[o.id]) for o in rows],'summary':{'statuses':statuses,'amounts':sums,'units':db.scalar(select(func.coalesce(func.sum(Order.quantity),0)).where(*filters)),'last_synced':latest}}
 @app.get('/api/order-overview')
 def order_overview(store:str='',marketplace:str='',currency:str='EUR'):
     from .models import now

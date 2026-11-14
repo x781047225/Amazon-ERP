@@ -37,6 +37,7 @@ async function openSettlement(row:any){settlementTarget.value={...row,nonce:Date
 async function openShipment(row:any){fbaTarget.value={...row,nonce:Date.now()};await navigate('fba')}
 const currentStore=ref(session.value!.current_store)
 const canAccessAds=computed(()=>can('advertising'))
+const mobileMenuOpen=ref(false)
 const tab=ref('home'),loading=ref(false),syncing=ref(false),error=ref(''),drawer=ref(false),syncDialog=ref(false)
 const productPanel=ref<{canLeave:()=>Promise<boolean>,refresh:()=>void}|null>(null)
 const listingPanel=ref<{canLeave:()=>Promise<boolean>}|null>(null)
@@ -48,7 +49,7 @@ if(!can(tab.value)&&!tab.value.startsWith('sta-')&&!tab.value.startsWith('produc
 watch([opened,tab],()=>{try{sessionStorage.setItem(tabStorageKey,JSON.stringify({tabs:opened.value,active:tab.value}))}catch{}},{deep:true})
 const compactPage=computed(()=>tab.value.startsWith('product-')||['orders','logistics','settings','fba','shipping','listing','finance','users','products','warehouse','procurement'].includes(tab.value))
 const hasTab=(key:string)=>opened.value.some(x=>x.key===key)
-async function navigate(next:string){if(!can(next))return;if(!hasTab(next))opened.value.push({key:next});tab.value=next;nextTick(()=>window.scrollTo({top:0}));if(next==='orders'&&!orders.value.length)fetchOrders()}
+async function navigate(next:string){if(!can(next))return;mobileMenuOpen.value=false;if(!hasTab(next))opened.value.push({key:next});tab.value=next;nextTick(()=>window.scrollTo({top:0}));if(next==='orders'&&!orders.value.length)fetchOrders()}
 function openSta(data:{shippingId?:number,taskId?:string}){let found=opened.value.find(x=>(data.taskId&&x.taskId===data.taskId)||(data.shippingId&&x.shippingId===data.shippingId));if(!found){found={key:'sta-'+(data.taskId||data.shippingId),title:'STA 入库计划',...data};opened.value.push(found)}tab.value=found.key}
 function staCreated(entry:WorkTab,data:{id:string,name:string}){entry.taskId=data.id;entry.title='STA · '+data.name}
 const productEditors=new Map<string,any>()
@@ -77,7 +78,7 @@ const tabTitle=(key:string)=>opened.value.find(x=>x.key===key)?.title||titles[ke
 const options=reactive({stores:[] as string[],markets:[] as string[],auto_sync:false})
 const filters=reactive({store:currentStore.value,marketplace:'',status:'',fulfilled_by:'',q:''})
 const orderDays=ref(1),orderSort=ref('date'),page=ref(1),pageSize=ref(25),total=ref(0),orders=ref<Order[]>([]),jobs=ref<Job[]>([]),selected=ref<Order|null>(null)
-const todayOverview=ref<any>(null)
+const todayOverview=ref<any>(null),orderSync=ref<any>(null)
 const summary=ref({statuses:{} as Record<string,number>,amounts:[] as {currency:string,amount:string}[],units:0,last_synced:null as string|null})
 const form=reactive({stores:[] as string[],markets:['DE','UK'],days:7,mode:'incremental'})
 const names:Record<string,string>={DE:'德国',UK:'英国',FR:'法国',IT:'意大利',ES:'西班牙',NL:'荷兰',BE:'比利时',PL:'波兰',SE:'瑞典',IE:'爱尔兰',AE:'阿联酋',SA:'沙特'}
@@ -106,7 +107,7 @@ async function loadOrders(background=false){
   if(id!==requestId)return
   if(JSON.stringify(todayOverview.value)!==JSON.stringify(today))todayOverview.value=today
   if(JSON.stringify(orders.value)!==JSON.stringify(data.orders))orders.value=data.orders
-  total.value=data.total
+  total.value=data.total;orderSync.value=data.sync_progress
   if(JSON.stringify(summary.value)!==JSON.stringify(data.summary))summary.value=data.summary
  }catch(e){if(id===requestId&&!background)error.value=(e as Error).message}
  finally{orderRequests--;if(id===requestId&&!background)loading.value=false}
@@ -125,7 +126,7 @@ async function retry(job:Job){try{await api('/sync/jobs/'+job.id+'/retry',{});El
 async function toggleAuto(value:string|number|boolean){try{await api('/sync/automatic',{enabled:!!value});options.auto_sync=!!value;ElMessage.success(value?'已开启每 5 分钟增量同步（全部店铺、已配置订单站点）':'已关闭自动同步；当前任务仍继续')}catch(e){options.auto_sync=!value;ElMessage.error((e as Error).message)}}
 function openSync(){form.stores=filters.store?[filters.store]:[...options.stores];form.markets=filters.marketplace?[filters.marketplace]:['DE','UK'];syncDialog.value=true}
 let timer:ReturnType<typeof setInterval>,polling=false
-onMounted(async()=>{try{const o=await api('/options');Object.assign(options,o,{markets:o.order_markets||o.markets});form.stores=[...options.stores]}catch(e){error.value=(e as Error).message}await refresh();timer=setInterval(async()=>{if(polling)return;polling=true;try{const wasActive=activeJobs.value.length>0;await fetchJobs();if(activeJobs.value.length||wasActive||(tab.value==='orders'&&orders.value.some(o=>o.estimate?.pending)))await loadOrders(true)}finally{polling=false}},8000)})
+onMounted(async()=>{try{const o=await api('/options');Object.assign(options,o,{markets:o.order_markets||o.markets});form.stores=[...options.stores]}catch(e){error.value=(e as Error).message}await refresh();timer=setInterval(async()=>{if(polling)return;polling=true;try{const wasActive=activeJobs.value.length>0;await fetchJobs();if(activeJobs.value.length||wasActive||(tab.value==='orders'&&(orderSync.value?.active||orders.value.some(o=>o.estimate?.pending))))await loadOrders(true)}finally{polling=false}},8000)})
 onUnmounted(()=>clearInterval(timer))
 
 const titles:Record<string,string>={home:'首页',orders:'订单中心',listing:'Listing',fba:'FBA 货件',finance:'利润结算',users:'用户管理',products:'产品管理',warehouse:'仓库',logistics:'物流中心',settings:'设置',procurement:'采购管理',shipping:'发货计划',replenishment:'补货建议',advertising:'广告活动'}
@@ -138,7 +139,9 @@ async function logout(){try{await ElMessageBox.confirm('退出会清除本次会
 
 <template>
 <OrderIncomeDialog :order="calculatorOrder" @close="calculatorOrder=null"/><div class="shell">
- <aside class="sidebar">
+ <button v-if="mobileMenuOpen" class="sidebar-backdrop" aria-label="关闭导航菜单" @click="mobileMenuOpen=false"/>
+ <aside id="workspace-navigation" class="sidebar" :class="{'mobile-open':mobileMenuOpen}" aria-label="业务导航" @keydown.esc="mobileMenuOpen=false">
+  <button class="mobile-nav-close" aria-label="收起导航菜单" @click="mobileMenuOpen=false">关闭菜单 ×</button>
   <div class="brand"><div class="brand-icon"><el-icon><Box/></el-icon></div><div>Amazon ERP<small>你的跨境业务工作台</small></div></div>
   <div class="workspace workspace-switch"><div class="workspace-caption"><div class="avatar">{{session?.username.slice(0,1).toUpperCase()}}</div><div>我的工作空间<small>{{session?.username}} · 主营 {{session?.default_store}}</small></div></div><el-select :model-value="currentStore" aria-label="当前店铺" @change="switchStore"><el-option v-for="s in session?.stores" :key="s" :value="s" :label="s"/></el-select></div>
   <div class="nav-label">业务管理</div>
@@ -159,7 +162,7 @@ async function logout(){try{await ElMessageBox.confirm('退出会清除本次会
   <div class="sidebar-bottom"><div class="secure-dot"></div><span>数据存储在本机<small>Amazon-ERP / data</small></span><span class="version">v0.5</span></div>
  </aside>
  <main class="main">
-  <header class="topbar"><div class="breadcrumb">工作空间 <el-icon><ArrowRight/></el-icon><b>{{tabTitle(tab)}}</b></div><div class="top-right"><el-dropdown trigger="click" @command="accountAction"><button class="account-avatar" :aria-label="session?.username+' 账户菜单'" :title="session?.username">{{session?.username.slice(0,1).toUpperCase()}}</button><template #dropdown><el-dropdown-menu><el-dropdown-item disabled>{{session?.username}}</el-dropdown-item><el-dropdown-item command="password" divided>修改密码</el-dropdown-item><el-dropdown-item command="logout">退出登录</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></header>
+  <header class="topbar"><button class="mobile-nav-toggle" aria-label="展开导航菜单" aria-controls="workspace-navigation" :aria-expanded="mobileMenuOpen" @click="mobileMenuOpen=!mobileMenuOpen">☰ 菜单</button><div class="breadcrumb">工作空间 <el-icon><ArrowRight/></el-icon><b>{{tabTitle(tab)}}</b></div><div class="top-right"><el-dropdown trigger="click" @command="accountAction"><button class="account-avatar" :aria-label="session?.username+' 账户菜单'" :title="session?.username">{{session?.username.slice(0,1).toUpperCase()}}</button><template #dropdown><el-dropdown-menu><el-dropdown-item disabled>{{session?.username}}</el-dropdown-item><el-dropdown-item command="password" divided>修改密码</el-dropdown-item><el-dropdown-item command="logout">退出登录</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></header>
   <nav class="work-tabs" aria-label="已打开页面"><div v-for="t in opened" :key="t.key" :data-tab-key="t.key" draggable="true" @dragstart="startTabDrag($event,t.key)" @dragover.prevent="dragOver=t.key" @drop.prevent="dropTab(t.key)" @dragend="dragging='';dragOver=''" :class="{active:tab===t.key,dragging:dragging===t.key,'drag-over':dragOver===t.key&&dragging!==t.key}" @contextmenu.prevent="tabMenu={key:t.key,x:$event.clientX,y:$event.clientY}"><button @click="tab=t.key" :title="tabTitle(t.key)">{{tabTitle(t.key)}}</button><button class="tab-close" :aria-label="'关闭'+tabTitle(t.key)" @click.stop="closeTab(t.key)">×</button></div></nav>
   <div v-if="tabMenu" class="tab-menu-mask" @click="tabMenu=null"><div class="tab-menu" :style="{left:tabMenu.x+'px',top:tabMenu.y+'px'}" @click.stop><button @click="closeTabs('others')">关闭其他</button><button @click="closeTabs('left')">关闭左边</button><button @click="closeTabs('right')">关闭右边</button></div></div>
   <div class="content" :class="{'shipping-content':tab==='shipping','compact-content':compactPage}">
@@ -170,7 +173,13 @@ async function logout(){try{await ElMessageBox.confirm('退出会清除本次会
    <template v-if="tab==='orders'">
     <div class="stats-grid order-today-stats compact-order-today"><div class="stat-card"><div class="stat-top">今日订单量</div><div class="stat-value">{{todayOverview?.orders?.toLocaleString()??'—'}}<small>笔</small></div><div class="stat-foot">按所选店铺、站点当地日期 · 不含取消订单</div></div><div class="stat-card"><div class="stat-top">今日订单金额 · {{displayCurrency}}</div><div class="stat-value">{{money(todayOverview?.converted?.amount??null,displayCurrency)}}</div><div class="stat-foot">按首页所选币种换算<span v-if="todayOverview?.unknown_amount_orders"> · {{todayOverview.unknown_amount_orders}} 笔金额待返回</span></div></div></div>
     <section class="panel">
-     <div class="panel-head"><div><h2>全部订单 <span class="count-badge">{{total.toLocaleString()}}</span></h2><span class="muted">{{summary.units.toLocaleString()}} 件商品</span></div><span class="last-sync">最近成功同步：{{time(latestSuccess?.finished_at||null)}}</span></div>
+     <el-alert v-if="orderSync?.active" type="info" :closable="false" show-icon style="margin-bottom:12px">
+      <template #title>订单同步仍在进行，已入库 {{orderSync.stored_orders.toLocaleString()}} 笔；当前筛选最近 {{orderDays}} 天。</template>
+      <div v-for="r in orderSync.runs" :key="r.store">{{r.store}} · {{r.mode==='initialize'?'初始化':'定时同步'}}（{{dateOnly(r.start_at)}} 至 {{dateOnly(r.end_at)}}）：已完成 {{r.completed}} / {{r.total}} 段，全部分段完成后更新整次同步时间。</div>
+      <div v-for="r in orderSync.segments" :key="r.store">正在处理 {{dateOnly(r.start_at)}} 至 {{dateOnly(r.end_at)}}，已读取 {{r.processed}} 笔。</div>
+      <div v-if="!total&&orderSync.stored_orders">当前日期范围暂无订单。已入库日期：{{dateOnly(orderSync.oldest_order_at)}} 至 {{dateOnly(orderSync.newest_order_at)}}，可调整日期范围查看。</div>
+     </el-alert>
+     <div class="panel-head"><div><h2>全部订单 <span class="count-badge">{{total.toLocaleString()}}</span></h2><span class="muted">{{summary.units.toLocaleString()}} 件商品</span></div><span class="last-sync">最近整次同步完成：{{time(orderSync?.last_success_at||null)}}<br v-if="orderSync?.last_segment_at"/><span v-if="orderSync?.last_segment_at">最近分段完成：{{time(orderSync.last_segment_at)}}</span></span></div>
      <form class="filters order-filters" @submit.prevent="search">
       <el-input v-model="filters.q" placeholder="搜索订单号 / SKU / ASIN / 商品名" :prefix-icon="Search" clearable class="keyword" @clear="search"/>
       <el-select v-model="filters.store" placeholder="全部店铺" clearable><el-option v-for="s in options.stores" :key="s" :label="s" :value="s"/></el-select>

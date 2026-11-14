@@ -91,3 +91,18 @@
 
 /* Navigation stays visually separate from business tables. */
 .sidebar{background:#182433;color:#e6edf5;border-right:1px solid #101b28}.sidebar .brand{color:#fff}.sidebar .brand-icon{background:#2a9a83;color:#fff}.sidebar .workspace{border-color:#354458;background:#223247;color:#e0e8f2}.sidebar .nav-label,.sidebar .workspace small,.sidebar .brand small{color:#9aadc3}.sidebar .nav-item{color:#c5d1df}.sidebar .nav-item:hover{background:#2c4058;color:#fff}.sidebar .nav-item.active{background:#247b69;color:white;box-shadow:inset 3px 0 #94ead4}.sidebar .sidebar-bottom{border-color:#354458;color:#adc0d2}.topbar{background:#f8fafc;border-bottom-color:#d8e0e9}.breadcrumb{color:#7b899a}.breadcrumb b{color:#263548}
+
+/* Keep navigation reachable when the viewport is short or zoomed in. */
+.sidebar{height:100vh;height:100dvh;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;scrollbar-width:thin;scrollbar-color:#73869d #182433}
+.sidebar>*{flex-shrink:0}
+.sidebar .nav-item{min-height:45px}
+.sidebar-bottom{min-height:64px}
+.mobile-nav-toggle,.mobile-nav-close,.sidebar-backdrop{display:none}
+@media(max-width:760px){
+ .mobile-nav-toggle,.mobile-nav-close{display:block;border:1px solid #52677e;border-radius:6px;padding:8px 10px;background:#263548;color:white;flex-shrink:0}
+ .mobile-nav-close{align-self:flex-end;margin-bottom:16px}
+ .topbar{gap:12px}.topbar .breadcrumb{margin-right:auto;gap:8px}
+ .sidebar{display:flex;width:min(270px,85vw);z-index:31;visibility:hidden;transform:translateX(-100%)}
+ .sidebar.mobile-open{visibility:visible;transform:translateX(0)}
+ .sidebar-backdrop{display:block;position:fixed;inset:0;z-index:30;border:0;background:#0006}
+}

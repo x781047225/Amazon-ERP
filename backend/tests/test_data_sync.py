@@ -91,14 +91,14 @@ def test_launch_exact_range_idempotency(kind,model):
 def test_progress_resume_and_watermark_only_after_all_segments(gate):
  r=run('orders',90);sync.advance(r.id)
  with Session() as db:
-  j=db.get(Run,r.id);assert len(j.plans)==3 and j.plans[0]['status']=='queued';first=j.plans[0]['id']
+  j=db.get(Run,r.id);assert len(j.plans)==3 and j.plans[-1]['status']=='queued';first=j.plans[-1]['id']
   assert db.get(Config,('DemoStoreB','orders')) is None
  with Session.begin() as db:db.get(SyncJob,first).status='succeeded'
  sync.advance(r.id)
  with Session() as db:second=db.get(Run,r.id).plans[1]['id']
  with Session.begin() as db:db.get(SyncJob,second).status='failed';db.get(SyncJob,second).error='测试接口失败'
  sync.advance(r.id)
- with Session() as db:third=db.get(Run,r.id).plans[2]['id']
+ with Session() as db:third=db.get(Run,r.id).plans[0]['id']
  with Session.begin() as db:db.get(SyncJob,third).status='succeeded'
  sync.advance(r.id)
  with Session() as db:
@@ -200,3 +200,55 @@ def test_order_updated_time_query_captures_old_order_cancellation(monkeypatch):
  with Session() as db:
   rows=list(db.scalars(select(Order)))
   assert len(rows)==1 and rows[0].status=='CANCELLED' and rows[0].purchased_at<start
+
+
+def test_order_priority_preserves_started_segment_and_then_latest(gate):
+ r=run('orders',90)
+ plans=sync.make_plans(r)
+ first=sync.launch(r,plans[0]);plans[0].update(id=first,status='queued')
+ with Session.begin() as db:db.get(Run,r.id).plans=plans
+ sync.advance(r.id)
+ with Session() as db:
+  assert len(list(db.scalars(select(SyncJob))))==1
+  assert db.get(Run,r.id).plans[0]['id']==first
+ with Session.begin() as db:db.get(SyncJob,first).status='succeeded'
+ sync.advance(r.id)
+ with Session() as db:
+  p=db.get(Run,r.id).plans
+  assert p[2]['id'] and not p[1].get('id')
+  assert db.get(SyncJob,p[2]['id']).end_at==r.end_at
+
+
+def test_order_progress_is_separate_from_recent_filters_and_full_completion(gate,monkeypatch):
+ from app.models import Order
+ from app import auth
+ r=run('orders',90);sync.advance(r.id)
+ stamp=now()-timedelta(minutes=2)
+ with Session.begin() as db:
+  j=db.get(Run,r.id);child=db.get(SyncJob,j.plans[-1]['id']);child.status='succeeded';child.finished_at=stamp
+  db.add(Order(store='DemoStoreB',order_id='progress-test',marketplace='DE',purchased_at=now()-timedelta(days=60),updated_at=now(),status='SHIPPED'))
+ sync.advance(r.id)
+ data=client.get('/api/orders?store=DemoStoreB&days=1').json()
+ assert data['total']==0
+ p=data['sync_progress'];assert p['stored_orders']==1 and p['active'] and p['runs'][0]['completed']==1
+ assert p['last_segment_at'] and p['last_success_at'] is None
+ row=next(x for x in client.get(BASE+'?store=DemoStoreB').json()['rows'] if x['kind']=='orders')
+ assert row['active'] and row['latest']['status']=='running' and row['progress']['stored_orders']==1
+ # A different store must not inherit this store's progress or timestamps.
+ other=client.get('/api/orders?store=DemoStoreA&days=1').json()['sync_progress']
+ assert not other['active'] and other['stored_orders']==0 and other['last_segment_at'] is None
+ from app.order_sync_progress import progress
+ token=auth.principal.set({'stores':['DemoStoreA']})
+ try:
+  with Session() as db:assert progress(db,'DemoStoreB')['runs']==[]
+ finally:auth.principal.reset(token)
+
+
+def test_finished_initialization_can_be_started_again(gate):
+ r=run('orders',1);sync.advance(r.id)
+ with Session.begin() as db:
+  child=db.get(Run,r.id).plans[0]['id'];db.get(SyncJob,child).status='succeeded'
+ sync.advance(r.id)
+ row=next(x for x in client.get(BASE+'?store=DemoStoreB').json()['rows'] if x['kind']=='orders')
+ assert row['latest']['status']=='succeeded' and not row['active'] and row['last_success_at']
+ assert post('/DemoStoreB/orders/initialize',{'days':1}).status_code==200
