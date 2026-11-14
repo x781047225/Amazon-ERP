@@ -1,0 +1,29 @@
+import {chromium,expect} from '@playwright/test';
+const root=new URL('../',import.meta.url).pathname,browser=await chromium.launch({executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
+try{
+ const context=await browser.newContext({viewport:{width:1440,height:1000},locale:'zh-CN'}),page=await context.newPage(),errors=[],pending=[],posts=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ const all=await(await page.request.get('http://127.0.0.1:8787/api/listings')).json(),row=all.listings[0],d=await(await page.request.get('http://127.0.0.1:8787/api/listings/'+row.id)).json();
+ await page.route('**/api/**',async route=>{
+  const r=route.request();if(r.method()==='GET')return route.continue();posts.push(r.url());
+  if(!r.url().endsWith('/preview'))throw new Error('Unexpected write blocked');
+  const req=r.postDataJSON();let release;const gate=new Promise(resolve=>release=resolve);pending.push({req,release});const mode=await gate;
+  if(mode==='error')return route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({detail:'该字段已在外部修改，请同步后核对。'})});
+  const diff=Object.entries(req.changes).map(([key,after])=>{const f=d.edit_fields.find(x=>x.key===key);return {key,label:f.label,before:f.value,after,schema:f.schema}});
+  return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({preview_id:'22222222-2222-4222-8222-222222222222',can_submit:true,expires_at:new Date(Date.now()+900000).toISOString(),store:d.store,marketplace:d.marketplace,sku:d.sku,diff,counts:{},warnings:[],issues:[]})});
+ });
+ await page.goto('http://127.0.0.1:8787');await page.locator('button.nav-item').filter({hasText:'Listing'}).click();await page.getByRole('button',{name:row.sku,exact:true}).click();
+ const title=page.locator('[data-field="item_name"] input').first(),old=await title.inputValue();await title.fill(old+'x');await expect(page.locator('[data-field="item_name"]')).toHaveClass(/modified/);await title.fill(old);await expect(page.locator('[data-field="item_name"]')).not.toHaveClass(/modified/);
+ const bullets=page.locator('[data-field="bullet_point"] textarea'),oldBullet=await bullets.nth(1).inputValue();await bullets.nth(1).fill(oldBullet+'x');await expect(page.locator('[data-field="bullet_point"] .editor-control.modified')).toHaveCount(1);await expect(page.locator('[data-input-path="bullet_point.1.value"]')).toHaveClass(/modified/);await bullets.nth(1).fill(oldBullet);
+ const length=page.locator('[data-input-path="item_package_dimensions.0.length.value"] input'),oldLength=await length.inputValue();await length.fill('123');await length.blur();await expect(page.locator('[data-field="item_package_dimensions"] .editor-control.modified')).toHaveCount(1);await length.fill(oldLength);await length.blur();
+ await page.getByRole('tab',{name:'安全与合规',exact:true}).click();const battery=page.locator('[data-input-path="batteries_required.0.value"]'),batteryField=d.edit_fields.find(f=>f.key==='batteries_required');
+ const valSchema=batteryField.schema.items.properties.value,oldBool=batteryField.value[0].value,choices=valSchema.enum||[true,false],names=valSchema.enumNames||['是','否'];await battery.locator('.el-select').click();await page.getByRole('option',{name:names[choices.indexOf(!oldBool)],exact:true}).click();await expect(battery).toHaveClass(/modified/);await battery.locator('.el-select').click();await page.getByRole('option',{name:names[choices.indexOf(oldBool)],exact:true}).click();await expect(battery).not.toHaveClass(/modified/);
+ await page.getByRole('tab',{name:'基本信息',exact:true}).click();const highlight=page.locator('[data-field="title_differentiation"] textarea').first();await highlight.fill('Changed highlight for browser-only test');await highlight.scrollIntoViewIfNeeded();await page.screenshot({path:root+'docs/listing-modified-field.png'});
+ const start=Date.now();await page.getByRole('button',{name:'提交预览',exact:true}).click();const dialog=page.getByRole('dialog',{name:'提交预览',exact:true});await expect(dialog).toBeVisible();const displayed=Date.now()-start;await expect(dialog).toContainText('正在核对亚马逊');await expect(dialog.getByRole('button',{name:'正在校验…',exact:true})).toBeDisabled();await expect(dialog).toContainText('Changed highlight for browser-only test');await expect.poll(()=>pending.length).toBe(1);expect(Object.keys(pending[0].req.changes)).toEqual(['title_differentiation']);await page.waitForTimeout(350);await page.screenshot({path:root+'docs/listing-instant-preview.png'});
+ // Late successful response after closing must never reopen the preview.
+ await dialog.getByRole('button',{name:'返回编辑',exact:true}).click();pending[0].release('ok');await expect(dialog).toBeHidden();await expect(highlight).toHaveValue('Changed highlight for browser-only test');
+ await page.getByRole('button',{name:'提交预览',exact:true}).click();await expect.poll(()=>pending.length).toBe(2);pending[1].release('error');await expect(dialog).toContainText('已在外部修改');await expect(dialog.getByRole('button',{name:'确认提交',exact:true})).toBeDisabled();
+ await dialog.getByRole('button',{name:'返回编辑',exact:true}).click();await page.getByRole('button',{name:'提交预览',exact:true}).click();await expect.poll(()=>pending.length).toBe(3);await expect(dialog.getByRole('button',{name:'正在校验…',exact:true})).toBeDisabled();pending[2].release('ok');await expect(dialog.getByRole('button',{name:'确认提交',exact:true})).toBeEnabled();
+ expect(errors).toEqual([]);expect(posts.every(u=>u.endsWith('/preview'))).toBe(true);
+ console.log(JSON.stringify({previewVisibleBeforeNetworkResponseMs:displayed,checks:['text revert removes marker','only changed bullet marked','nested numeric and boolean markers','immediate diff while response held','changed attribute only','pending and error cannot submit','late result cannot reopen','validated result enables confirmation'],pageErrors:errors,amazonWrites:0}));
+}finally{await browser.close()}

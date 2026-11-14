@@ -1,0 +1,128 @@
+from datetime import date,timedelta
+from sqlalchemy import select
+from app.models import AdsDay,AdsChange,AdsEntity,Listing,LocalProduct,ProductLink
+from app.db import Session
+from app.ads_workspace import persist_days,daily_body
+from app.ads_client import AdsError,AdsUnknown
+from test_advertising import seed,PID,client,save_entities
+import pytest
+HEAD={'x-erp-client':'web'}
+def query(**kw):return client.get('/api/advertising/workspace',params={'profile_id':PID,'start':'2026-10-24','end':'2026-10-30',**kw})
+def fake(monkeypatch,changed=False,unknown=False):
+ from app import ads_workspace as w
+ calls=[]
+ class Fake:
+  def __init__(self,*args):pass
+  def list(self,kind,filters=None):
+   calls.append(('read',kind))
+   if kind=='adgroup':return [{'adGroupId':'3','campaignId':'1','state':'ENABLED','name':'橙色广告组','defaultBid':.2}]
+   if kind=='ad':return [{'adId':'4','campaignId':'1','adGroupId':'3','state':'PAUSED' if changed else 'ENABLED'}]
+   return []
+  def update_one(self,kind,payload,create=False):
+   calls.append(('write',kind,payload,create))
+   if unknown:raise AdsUnknown('提交结果待核对')
+   return {'keywordId':'new-id'}
+  def close(self):pass
+ monkeypatch.setattr(w,'Client',Fake);return calls
+
+def preview(**kw):return client.post('/api/advertising/edit/preview',headers=HEAD,json={'profile_id':PID,'kind':'ad','entity_id':'4','changes':{'state':'PAUSED'},**kw})
+def confirm(id):return client.post('/api/advertising/edit/confirm',headers=HEAD,json={'id':id})
+def test_long_period_coverage_and_atomic_replacement():
+ seed();d=date(2026,10,24)
+ persist_days(PID,'ad',d,d+timedelta(days=1),[{'date':str(d),'adId':'4','cost':3,'sales7d':10,'clicks':2,'impressions':100}])
+ persist_days(PID,'ad',d,d,[{'date':str(d),'adId':'4','cost':5,'sales7d':10,'clicks':2,'impressions':100}])
+ r=query(level='ad',start='2026-01-01').json();assert r['coverage']['days']==2 and not r['coverage']['complete'];assert r['summary']['cost']==5;assert len(r['trend'])==2 and r['trend'][1]['cost']==0
+ assert query(start='2024-01-01').status_code==422
+ with pytest.raises(AdsError):persist_days(PID,'ad',d,d,[{'date':'2026-10-26'}])
+ assert query(level='ad').json()['summary']['cost']==5
+
+def test_child_search_and_names_across_hierarchy():
+ seed();assert query(q='FX-test').json()['total']==1
+ assert query(level='adgroup',q='B0TEST0003',search_type='asin').json()['total']==1
+ assert query(level='ad',q='橙色广告组',search_type='name').json()['total']==1
+ assert query(level='ad',q='FX',search_type='fnsku').json()['total']==0
+ assert query(search_type='bad').status_code==422
+
+def test_targets_negatives_and_search_terms():
+ seed();save_entities(PID,'target',[{'targetId':'5','campaignId':'1','adGroupId':'3','state':'ENABLED','bid':.3,'expressionType':'AUTO','expression':[{'type':'QUERY_HIGH_REL_MATCHES'}]}])
+ assert query(level='target').json()['rows'][0]['name']=='紧密匹配'
+ save_entities(PID,'negative_keyword',[{'keywordId':'6','campaignId':'1','adGroupId':'3','state':'ENABLED','keywordText':'不要','matchType':'NEGATIVE_EXACT'}]);assert query(level='negative').json()['rows'][0]['name']=='不要'
+ d=date(2026,10,24);persist_days(PID,'search',d,d,[{'date':str(d),'campaignId':'1','adGroupId':'3','keywordId':'5','searchTerm':'orange bag','cost':1,'clicks':2,'sales7d':5,'impressions':20}])
+ r=query(level='search',q='FX-Test',search_type='sku').json();assert r['total']==1 and r['summary']['acos']==20
+ assert query(level='search',adgroup_id='other').json()['total']==0
+
+def test_preview_does_not_write_and_confirm_once(monkeypatch):
+ seed();calls=fake(monkeypatch);r=preview();assert r.status_code==200;assert not any(c[0]=='write' for c in calls)
+ id=r.json()['id'];assert confirm(id).json()['status']=='succeeded';assert confirm(id).status_code==409
+ assert len([c for c in calls if c[0]=='write'])==1
+ with Session() as db:assert db.get(AdsEntity,(PID,'ad','4')).state=='PAUSED';assert db.get(AdsChange,id).status=='succeeded'
+
+def test_remote_conflict_and_unknown_do_not_retry(monkeypatch):
+ seed();fake(monkeypatch);id=preview().json()['id'];calls=fake(monkeypatch,changed=True);assert confirm(id).json()['status']=='failed';assert not any(c[0]=='write' for c in calls)
+ fake(monkeypatch);id=preview().json()['id'];calls=fake(monkeypatch,unknown=True);assert confirm(id).json()['status']=='unknown';assert confirm(id).status_code==409;assert len([c for c in calls if c[0]=='write'])==1
+
+def test_validation_permissions_expiration(monkeypatch):
+ seed();calls=fake(monkeypatch)
+ for changes in [{'budget':5},{'state':'ARCHIVED'},{'state':True}]:assert preview(changes=changes).status_code==422
+ assert preview(kind='target',changes={'bid':-2}).status_code==422
+ assert preview(kind='adgroup',entity_id='3',changes={'defaultBid':0}).status_code==422
+ id=preview().json()['id']
+ with Session.begin() as db:db.get(AdsChange,id).created_at-=timedelta(minutes=16)
+ assert confirm(id).status_code==409
+ from app import auth
+ monkeypatch.setattr(auth,'resolve_session',lambda r:{'id':4,'username':'limited','is_admin':False,'stores':['DemoStoreA'],'default_store':'DemoStoreA'})
+ assert query().status_code==403;assert preview().status_code==403;assert confirm(id).status_code==403
+
+def test_create_negative_only_on_confirmation(monkeypatch):
+ seed();calls=fake(monkeypatch)
+ r=preview(create=True,kind='negative_keyword',entity_id='',adgroup_id='3',changes={'keywordText':'orange','matchType':'NEGATIVE_EXACT'});assert r.status_code==200
+ assert confirm(r.json()['id']).json()['status']=='succeeded'
+ write=[c for c in calls if c[0]=='write'][0];assert write[2]=={'campaignId':'1','adGroupId':'3','state':'ENABLED','keywordText':'orange','matchType':'NEGATIVE_EXACT'}
+ with Session() as db:assert db.get(AdsEntity,(PID,'negative_keyword','new-id')) is not None
+
+def test_daily_report_shapes():
+ for level in ['campaign','adgroup','ad','target','search']:
+  c=daily_body(level,'2026-10-24','2026-10-30')['configuration'];assert c['timeUnit']=='DAILY' and 'date' in c['columns'] and 'startDate' not in c['columns']
+ assert daily_body('search','a','b')['configuration']['groupBy']==['searchTerm']
+
+def test_client_write_restricted_and_timeout_is_unknown():
+ import requests
+ from app.ads_client import Client
+ c=Client.__new__(Client)
+ with pytest.raises(AdsError):c.update_one('campaign',{'budget':1})
+ with pytest.raises(AdsError):c.update_one('ad',{'adId':'4','budget':2})
+ c.endpoint='https://advertising-api-eu.amazon.com';c.profile=PID;c.credentials={'client_id':'test'};c.token=lambda:'fake'
+ class FakeSession:
+  def request(self,*a,**kw):raise requests.Timeout()
+ c.session=FakeSession()
+ with pytest.raises(AdsUnknown):c.update_one('ad',{'adId':'4','state':'PAUSED'})
+
+
+def test_currency_float_representation_is_not_a_change():
+ from app.ads_workspace import equal_value
+ assert equal_value('bid',.1599999964237213,.16)
+ assert not equal_value('bid',.16,.17)
+
+
+def test_target_report_uses_keyword_id_for_auto_and_keyword_targets():
+ seed()
+ save_entities(PID,'target',[{'targetId':'5','campaignId':'1','adGroupId':'3','state':'ENABLED','bid':.3,'expression':[{'type':'QUERY_HIGH_REL_MATCHES'}]}])
+ save_entities(PID,'keyword',[{'keywordId':'6','campaignId':'1','adGroupId':'3','state':'ENABLED','bid':.2,'keywordText':'bag'}])
+ day=date(2026,10,24)
+ persist_days(PID,'target',day,day,[{'date':str(day),'keywordId':5,'cost':2,'clicks':2,'impressions':100},{'date':str(day),'keywordId':6,'cost':3,'clicks':3,'impressions':200}])
+ r=query(level='target').json();assert r['summary']['cost']==5
+ assert {x['id']:x['metrics']['cost'] for x in r['rows']}=={'5':2,'6':3}
+
+
+def test_history_plan_includes_live_retention_boundary_and_search():
+ from app.ads_workspace import build_daily_plans
+ from datetime import timedelta
+ plans=build_daily_plans(date(2025,11,3),date(2026,11,2),date(2026,11,2))
+ for level in ['campaign','adgroup','ad','target','search']:
+  chunks=[p for p in plans if p['level']==level]
+  assert chunks[0]['start']=='2026-07-30'
+  assert chunks[-1]['end']=='2026-11-02'
+  for i,p in enumerate(chunks):
+   assert (date.fromisoformat(p['end'])-date.fromisoformat(p['start'])).days<=30
+   if i:assert date.fromisoformat(p['start'])==date.fromisoformat(chunks[i-1]['end'])+timedelta(days=1)
+ assert not build_daily_plans(date(2025,11,3),date(2025,11,30),date(2026,11,2))

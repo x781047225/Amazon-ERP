@@ -1,0 +1,33 @@
+import {chromium,expect} from '@playwright/test';
+import {writeFile} from 'node:fs/promises';
+const root=new URL('../',import.meta.url).pathname;
+const browser=await chromium.launch({executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
+try{
+ const context=await browser.newContext({viewport:{width:1440,height:1000},locale:'zh-CN'}),page=await context.newPage(),errors=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ await page.route('**/api/**',async route=>route.request().method()==='GET'?route.continue():route.abort());
+ const url='http://127.0.0.1:8787';
+ const all=await(await page.request.get(url+'/api/listings?store=DemoStoreA')).json();
+ expect(all.total).toBe(2803);expect(all.listings.length).toBe(20);
+ await page.goto(url);await page.locator('button.nav-item').filter({hasText:'Listing'}).click();
+ await expect(page.locator('.listing-stats')).toContainText('2803');
+ await expect(page.locator('.listing-table .el-table__body-wrapper tbody tr')).toHaveCount(20);
+ await expect(page.locator('.nav-pill').filter({hasText:'TEST'})).toHaveCount(0);
+ const firstSku=all.listings[0].sku;
+ await page.locator('.listing-pagination .btn-next').click();
+ await expect(page.locator('.listing-pagination .el-pager .is-active')).toHaveText('2');
+ await expect.poll(async()=>page.locator('.listing-table .order-link').first().getAttribute('title')).not.toBe(firstSku);
+ await page.locator('.el-select').filter({has:page.getByRole('combobox',{name:'站点筛选'})}).click();await page.getByRole('option',{name:'德国 · DE',exact:true}).click();
+ await expect(page.locator('.listing-stats')).toContainText('376');
+ await expect(page.locator('.listing-pagination .el-pager .is-active')).toHaveText('1');
+ await page.locator('.listing-table .order-link').first().click();
+ await expect(page.getByRole('tab',{name:'基本信息',exact:true})).toBeVisible();
+ await expect(page.getByRole('button',{name:'提交预览',exact:true})).toBeDisabled();
+ await page.getByRole('button',{name:'返回列表',exact:true}).click();
+ await page.screenshot({path:root+'docs/listing-full-import.png'});
+ await page.getByPlaceholder('搜索 SKU / ASIN / 标题').fill('NO_SUCH_SKU_TEST');await page.getByRole('button',{name:'查询',exact:true}).click();
+ await expect(page.getByText('没有匹配的 Listing', {exact:true})).toBeVisible();
+ expect(errors).toEqual([]);
+ const report={total:all.total,pageSize:20,checks:['pagination','DE filter 376','detail','empty state','no TEST label'],pageErrors:errors,amazonWrites:0};
+ await writeFile(root+'docs/listing-full-import-browser.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report));
+}finally{await browser.close()}
