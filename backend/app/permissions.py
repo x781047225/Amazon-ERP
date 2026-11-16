@@ -15,7 +15,7 @@ MENU={
  'advertising':('广告活动',{'ad':'广告','target':'投放','negative':'否定投放','search':'搜索词','logs':'操作记录'}),
  'users':('用户管理',{'users':'用户管理','roles':'角色管理','mcp':'MCP'}),
  'logistics':('物流中心',{'channels':'物流渠道','settlements':'结算中心','invoice':'发票中心','declaration':'报关单'}),
- 'settings':('设置',{'warehouses':'仓库管理','stores':'店铺授权管理','addresses':'FBA发货地址','profiles':'合规信息','clearance':'清关编码','declaration':'报关编码','sync-data':'同步数据'})}
+ 'settings':('设置',{'warehouses':'仓库管理','stores':'店铺授权管理','addresses':'FBA发货地址','profiles':'合规信息','clearance':'清关编码','declaration':'报关编码','sync-data':'同步数据','mail':'绩效邮件'})}
 CATALOG=[{'key':key,'menu':label,'tab':'菜单','parent':None} for key,(label,tabs) in MENU.items()]
 for key,(label,tabs) in MENU.items():CATALOG.extend({'key':key+'.'+t,'menu':label,'tab':name,'parent':key} for t,name in tabs.items())
 KEYS={r['key'] for r in CATALOG}
@@ -51,6 +51,8 @@ def route_keys(path,query,body,method):
   if read and leaf=='roles':return ['users.users','users.roles']
   if read and leaf=='catalog':return ['users.roles']
   return ['users.'+{'roles':'roles','catalog':'roles','tokens':'mcp','audit':'mcp'}.get(leaf,'users')]
+ if path.startswith('/api/mail/'):
+  return ['settings.mail'] if path.split('/')[3] in ('messages','message') else ['settings.stores']
  if path.startswith('/api/users'):return ['users.users']
  if path=='/api/integration/capabilities':return ['listing','orders','fba.list','warehouse']
  if path.startswith('/api/customs/choices'):return ['products.products','products.declaration','products.clearance']

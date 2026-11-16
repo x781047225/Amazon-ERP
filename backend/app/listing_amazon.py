@@ -4,7 +4,9 @@ from urllib.parse import quote,urlsplit
 import requests
 from .amazon import token,redis,AmazonError,STORES,MARKETS,build_request_proxies,_tokens
 from .fba_amazon import LIMIT
+# API presentation language (schema labels and issue messages), not attribute language_tag.
 LOCALES={'DE':'de_DE','UK':'en_GB','FR':'fr_FR','ES':'es_ES','IT':'it_IT','NL':'nl_NL','BE':'fr_FR','PL':'pl_PL','SE':'sv_SE','IE':'en_GB'}
+ATTRIBUTE_LANGUAGES={**LOCALES,'BE':'fr_BE'}
 
 def get_json(store,path,params=None,operation='detail',schema_url=False):
     config=STORES[store];key='erp:listing:rate:'+store+':'+operation
@@ -34,6 +36,9 @@ def get_json(store,path,params=None,operation='detail',schema_url=False):
             return data
         code=response.status_code if response is not None else 0
         if code==401 and not schema_url:_tokens.pop(store,None)
+        elif code==404:
+            resource='目录 ASIN' if path.startswith('/catalog/') else '店铺 SKU' if path.startswith('/listings/') else '请求资源'
+            raise AmazonError(f'{resource}读取返回 HTTP 404（未找到资源）；请核对站点、商品标识及接口可用性，已保留本地数据。')
         elif code not in (0,429,500,502,503,504):raise AmazonError(f'商品读取失败（HTTP {code}），请检查代理或商品读取权限。')
         if attempt==2:raise AmazonError(f'商品读取暂时失败（HTTP {code}），已保留本地数据。')
         time.sleep(2**attempt*2)

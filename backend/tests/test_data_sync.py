@@ -23,7 +23,7 @@ def gate(monkeypatch):
 
 def test_defaults_ranges_and_readiness():
  r=client.get(BASE+'?store=DemoStoreB');assert r.status_code==200
- d=r.json();assert len(d['rows'])==7 and d['days']==[1,7,14,30,90,180,365]
+ d=r.json();assert len(d['rows'])==8 and d['days']==[1,7,14,30,90,180,365]
  assert d['intervals']==[1440,720,360,60,30,10,5]
  assert not any(x['enabled'] for x in d['rows'])
  assert next(x for x in d['rows'] if x['kind']=='advertising')['ready'] is False

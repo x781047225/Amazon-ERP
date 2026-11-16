@@ -17,13 +17,14 @@ from .store_credentials import get
 from .products import audit
 from .amazon import redis
 router=APIRouter(prefix='/api/settings/sync-data')
-KINDS={'listing':'Listing','orders':'订单','inventory':'库存','shipments':'货件','finance':'利润结算','advertising':'广告活动','sta':'STA任务'}
+KINDS={'listing':'Listing','orders':'订单','inventory':'库存','shipments':'货件','finance':'利润结算','advertising':'广告活动','sta':'STA任务','mail':'绩效邮件'}
 DAYS=[1,7,14,30,90,180,365]
 INTERVALS=[1440,720,360,60,30,10,5]
 ACTIVE=['queued','running']
 NOTES={'listing': '同步当前全部 Listing：SKU、ASIN、FNSKU、标题、品牌、主图、商品类型、属性（含亮点和关键词）、售价/促销报价、销售状态、问题提示、变体关系及配送可用量。初始化和定时任务均重新扫描当前全量，不按创建日期排除旧商品；库存详细数量由库存任务更新。API 未返回的商品保留本地旧记录，不据此删除。', 'orders': '同步订单号、下单/更新时间、状态、配送方式、金额/币种，以及商品 SKU、ASIN、名称、数量和金额。初始化按下单时间分段回溯，优先同步最近日期，再补齐历史；全部分段完成前显示整体进度，已入库订单可按日期范围查看。定时按最后更新时间同步，并重读前 48 小时，更新已有订单。下午下单、晚上取消也会更新，取消订单不计销量。全部分页成功后才推进同步位置，重复订单按编号更新。', 'inventory': '每次读取各站点当前完整 FBA 库存：SKU、ASIN、FNSKU、品相、可售、预留/处理中、不可售、在途、待发及接收中数量和总量。初始化和定时任务均为当前快照，不生成历史库存，也不改动本地仓库出入库。返回不完整或失败时保留旧值并提示。', 'shipments': '同步 FBA 货件编号、名称、状态、收货仓/国家，以及商品 SKU、FNSKU、申报和已接收数量、箱内数量，并计算未接收/超收。初始化按所选范围的最近更新时间发现货件；定时重新扫描接口可返回的全部状态货件及明细，包含已关闭、取消的货件。不会只读取新货件；本地维护的物流信息保留。', 'finance': '同步亚马逊入账交易：交易编号、订单关联、入账时间、状态、币种、销售回款、退款及各项费用明细；据此更新利润结算。初始化按时间范围分段读取，定时从成功位置往前重读 1 天，按交易编号更新去重。到账金额不等于利润，利润还需本地采购/头程成本和广告费用。', 'advertising': '每次发现广告账户并刷新当前 SP 广告活动、广告组、广告商品、关键词、投放和否定规则等资料（含状态、预算及竞价）；另同步按天的展示、点击、花费、归因订单和销售额。定时重读至少最近 14 天日报，以更新延迟归因。历史报表受接口回溯期限限制；SB/SD 仅展示支持的概览数据，不等同于完整同步。'}
 NOTES['sta']='同步亚马逊可返回的历史 STA 入库计划：计划编号、名称、状态、创建/更新时间、关联货件号、收货仓和商品 SKU/ASIN/FNSKU/数量。初始化按最近更新时间筛选所选天数；定时重新读取全部状态。已关闭/作废计划保留。历史记录只供查看，不创建本地发货单或重复提交亚马逊；旧版或接口不提供的计划无法补造。'
-Kind=Literal['listing','orders','inventory','shipments','finance','advertising','sta']
+Kind=Literal['listing','orders','inventory','shipments','finance','advertising','sta','mail']
+NOTES['mail']='读取已授权微软邮箱中所选时间范围的亚马逊邮件（各邮件文件夹），保存主题、发件人、收件时间和纯文本正文；不下载附件、不改变已读状态、不删除邮箱邮件。绩效分类为关键词初筛，请核对原文。定时从最近成功位置重读48小时，按邮箱及邮件编号去重；全部分页成功才更新最近同步时间。授权被撤销后需重新连接。'
 class Body(BaseModel):model_config=ConfigDict(extra='forbid')
 class Schedule(Body):
  days:Literal[1,7,14,30,90,180,365]=30
@@ -33,6 +34,9 @@ class Schedule(Body):
 class Start(Body):days:Literal[1,7,14,30,90,180,365]=30
 
 def readiness(store,kind):
+ if kind=='mail':
+  from .mail import readiness as mail_readiness
+  return mail_readiness(store)
  try:d=get(store)
  except KeyError:return False,'请先维护店铺授权'
  keys=['ads_client_id','ads_client_secret','ads_refresh_token','ads_api_url'] if kind=='advertising' else ['seller_id','client_id','client_secret','refresh_token']
@@ -41,7 +45,7 @@ def public(r):
  return {k:getattr(r,k) for k in ['id','store','kind','mode','days','status','start_at','end_at','created_at','finished_at','actor','warning','error']}|{'steps':[{k:v for k,v in p.items() if k not in ('cursor','seen','pending')} for p in r.plans],'completed':sum(p.get('status')=='succeeded' for p in r.plans),'total':len(r.plans)}
 def lock(db,store,kind):db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:k))'),{'k':'data-sync:'+store+':'+kind})
 def legacy_active(db,store,kind):
- if kind=='sta':return False
+ if kind in ('sta','mail'):return False
  model={'listing':ListingSyncJob,'orders':SyncJob,'shipments':FbaJob,'finance':FinanceJob,'inventory':StoreInventory}.get(kind)
  if model:return db.scalar(select(model).where(model.store==store,model.status.in_(ACTIVE))) is not None
  return db.scalar(select(AdsSync.id).join(AdsProfile,AdsProfile.id==AdsSync.profile_id).where(AdsProfile.account==store,AdsSync.status.in_(ACTIVE+['waiting']))) is not None
@@ -75,7 +79,7 @@ def create(db,store,kind,days,mode,actor):
  if legacy_active(db,store,kind):raise HTTPException(409,'原同步任务仍在运行，完成后再操作')
  c=db.get(Config,(store,kind));end=now()-timedelta(minutes=3);start=end-timedelta(days=days)
  if mode=='incremental' and c and c.watermark:
-  overlap=timedelta(days=14 if kind=='advertising' else 2 if kind=='orders' else 1 if kind in ('shipments','finance') else 0,minutes=0 if kind=='orders' else 10)
+  overlap=timedelta(days=14 if kind=='advertising' else 2 if kind in ('orders','mail') else 1 if kind in ('shipments','finance') else 0,minutes=0 if kind=='orders' else 10)
   start=min(c.watermark-overlap,end)
  if mode=='incremental' and kind=='advertising':start=min(start,end-timedelta(days=14))
  r=Run(id=str(uuid4()),store=store,kind=kind,days=days,mode=mode,start_at=start,end_at=end,actor=actor,plans=[])
@@ -184,6 +188,9 @@ def advance(rid):
    r=db.get(Run,rid)
    if not r or r.status not in ACTIVE:return
    r.status='running'
+  if r.kind=='mail':
+   from .mail import advance as advance_mail
+   advance_mail(r);return
   if r.kind=='sta':
    from .sta_history import advance as advance_history
    if not advance_history(r):return
@@ -217,7 +224,8 @@ def advance(rid):
  except Exception as e:
   from .ads_client import AdsError
   from .sta_amazon import StaError
-  message=e.detail if isinstance(e,HTTPException) else str(e) if isinstance(e,(AdsError,StaError)) else '同步准备中断，请检查授权或重新初始化；已保存的数据保留'
+  from .mail import MailError
+  message=e.detail if isinstance(e,HTTPException) else str(e) if isinstance(e,(AdsError,StaError,MailError)) else '同步准备中断，请检查授权或重新初始化；已保存的数据保留'
   with Session.begin() as db:
    r=db.get(Run,rid)
    if r:

@@ -109,6 +109,7 @@ def prepare(pk,body,kind='attributes'):
     valid=validation['status']=='VALID' and not any(i.get('severity')=='ERROR' for i in issues)
     uid=str(uuid4());expires=now()+timedelta(minutes=15)
     data={'owner':preview_owner(),'id':uid,'listing_pk':row.id,'kind':kind,'store':row.store,'marketplace':row.marketplace,'sku':row.sku,'asin':row.asin,'product_type':row.product_type,'before':before,'proposed':final,'patches':patches,'expires_at':expires.isoformat(),'valid':valid}
+    if kind=='attributes':data['attribute_language']=listing_amazon.ATTRIBUTE_LANGUAGES[row.marketplace]
     if kind=='price':data['price_fingerprint']=p['fingerprint']
     if valid:redis.set(PREFIX+uid,as_json(data),ex=900)
     return {'preview_id':uid if valid else None,'can_submit':valid,'expires_at':expires,'store':row.store,'marketplace':row.marketplace,'sku':row.sku,'diff':diff,'counts':counts,'warnings':warnings,'issues':issues}
@@ -128,6 +129,8 @@ def submit(pk,preview_id):
     if p.get('owner')!=preview_owner():raise EditError('此预览不属于当前用户或 Token，请重新预览。')
     if p['listing_pk']!=pk or not p['valid']:raise EditError('预览与当前商品不一致。')
     row,_=context(pk)
+    if p['kind']=='attributes' and row.marketplace=='BE' and p.get('attribute_language')!=listing_amazon.ATTRIBUTE_LANGUAGES['BE']:
+        redis.delete(PREFIX+preview_id);raise EditConflict('比利时站文字语言已修正，请刷新编辑页面后重新预览。')
     lock=redis.lock('erp:listing:write:'+str(pk),timeout=600,blocking_timeout=0,thread_local=False)
     if not lock.acquire(blocking=False):raise EditConflict('此商品有提交或核对正在进行，请稍候。')
     try:

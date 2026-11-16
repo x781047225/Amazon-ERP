@@ -233,3 +233,6 @@ from .access import router as access_router
 app.include_router(access_router)
 from .integration import router as integration_router
 app.include_router(integration_router)
+
+from .mail import router as mail_router
+app.include_router(mail_router)

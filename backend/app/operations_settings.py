@@ -24,7 +24,11 @@ def public_store(row):
  return {'name':row.name,**{k:v for k,v in d.items() if k not in SECRET_FIELDS and k!='upstream_proxy'},'upstream_proxy':d.get('upstream_proxy',''),'configured':{k:bool(d.get(k)) for k in SECRET_FIELDS},'authorized':all(d.get(k) for k in ['seller_id','client_id','client_secret','refresh_token']),'ads_authorized':all(d.get('ads_'+k) for k in ['client_id','client_secret','refresh_token','api_url']),'proxy_configured':bool(d.get('proxy_host'))}
 @router.get('/stores')
 def stores():
- with Session() as db:return [public_store(row) for row in db.scalars(select(StoreCredential).where(StoreCredential.name.in_(allowed_stores())).order_by(StoreCredential.name))]
+ from .mail_models import MailConnection
+ from .mail import info
+ with Session() as db:
+  connections={r.store:r for r in db.scalars(select(MailConnection).where(MailConnection.store.in_(allowed_stores())))}
+  return [{**public_store(row),'mail':info(connections.get(row.name))} for row in db.scalars(select(StoreCredential).where(StoreCredential.name.in_(allowed_stores())).order_by(StoreCredential.name))]
 class Authorization(Body):
  seller_id:str=Field(default='',max_length=100)
  client_id:str=Field(default='',max_length=255)

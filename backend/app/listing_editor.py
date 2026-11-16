@@ -2,7 +2,7 @@
 import copy,html,re,math
 from jsonschema import Draft201909Validator,validators,ValidationError
 from .settings import MARKETS
-from .listing_amazon import LOCALES
+from .listing_amazon import ATTRIBUTE_LANGUAGES
 FIELDS={
 'item_name':'标题','title_differentiation':'亮点','bullet_point':'五点','product_description':'长描述','generic_keyword':'关键词','color':'颜色','material':'材质','model_number':'型号','model_name':'型号名称','item_dimensions':'产品长宽高','item_length_width_height':'产品长宽高','item_length_width':'产品长宽（品类尺寸）','item_width_height':'产品宽高（品类尺寸）','item_display_dimensions':'产品展示尺寸','item_weight':'产品重量（不含包装）','item_package_dimensions':'运输包装长宽高','item_package_weight':'运输包装重量','unit_count':'单位计数及类型','included_components':'包装组成','country_of_origin':'产地','batteries_required':'是否需要电池','supplier_declared_dg_hz_regulation':'危险商品规管','gpsr_safety_attestation':'GPSR 安全认证','dsa_responsible_party_address':'负责人的电子邮件或电子地址','gpsr_manufacturer_reference':'GPSR 制造商参考'}
 COMPLIANCE={'country_of_origin','batteries_required','supplier_declared_dg_hz_regulation','gpsr_safety_attestation','dsa_responsible_party_address','gpsr_manufacturer_reference'}
@@ -45,14 +45,14 @@ def blank(n,market):
         result={}
         for k,v in n.get('properties',{}).items():
             if k=='marketplace_id':result[k]=MARKETS[market]
-            elif k=='language_tag':result[k]=LOCALES[market]
+            elif k=='language_tag':result[k]=ATTRIBUTE_LANGUAGES[market]
             elif not v.get('hidden'):result[k]=blank(v,market)
         return result
     if kind=='array':return [blank(n.get('items',{}),market)]
     return '' if kind=='string' else None
 
 def scope(entry,market):
-    return isinstance(entry,dict) and entry.get('marketplace_id',MARKETS[market])==MARKETS[market] and entry.get('language_tag',LOCALES[market])==LOCALES[market]
+    return isinstance(entry,dict) and entry.get('marketplace_id',MARKETS[market])==MARKETS[market] and entry.get('language_tag',ATTRIBUTE_LANGUAGES[market])==ATTRIBUTE_LANGUAGES[market]
 
 def editor_fields(row,template):
     root=template.schema_data if template else {};out=[]
@@ -95,11 +95,11 @@ def sanitize_metadata(n,value,market):
             if k=='marketplace_id':
                 if v!=MARKETS[market]:raise EditError('不能修改站点标识。')
             if k=='language_tag':
-                if v!=LOCALES[market]:raise EditError('不能修改语言标识。')
+                if v!=ATTRIBUTE_LANGUAGES[market]:raise EditError('不能修改语言标识。')
             result[k]=sanitize_metadata(n.get('properties',{}).get(k,{}),v,market)
         for k in n.get('properties',{}):
             if k=='marketplace_id':result[k]=MARKETS[market]
-            if k=='language_tag':result[k]=LOCALES[market]
+            if k=='language_tag':result[k]=ATTRIBUTE_LANGUAGES[market]
         return result
     if isinstance(value,list):return [sanitize_metadata(n.get('items',{}),v,market) for v in value]
     return value

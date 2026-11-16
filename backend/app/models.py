@@ -459,3 +459,5 @@ from . import access_models  # register access-control tables
 from .store_credentials import StoreCredential
 
 from .data_sync_models import DataSyncConfig,DataSyncRun
+
+from .mail_models import MailApplication,MailConnection,MailMessage
