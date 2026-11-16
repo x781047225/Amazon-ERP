@@ -4,12 +4,12 @@ from fastapi import APIRouter,HTTPException
 from pydantic import BaseModel,Field
 from sqlalchemy import select,text
 from .db import Session
-from .models import now
+from .models import now,Listing
 from .operations_models import ListingSyncJob as Job
 from .settings import ROOT,STORES,MARKETS
 from .auth import require_store,allowed_stores
 from .amazon import redis,AmazonError
-from .listing_import import scan_market,scan_windowed
+from .listing_import import scan_market,scan_windowed,ensure_template
 router=APIRouter(prefix='/api/listing-sync')
 def public(j):return {k:getattr(j,k) for k in ['id','store','markets','status','progress','error','created_at','finished_at']}
 def enqueue(store,markets,start_at=None,end_at=None,job_id=None):
@@ -53,6 +53,14 @@ def run(jid):
    try:
     if start:scan_windowed(store,market,cutoff,directory,progress,start=start.isoformat(),updated=True)
     else:scan_market(store,market,cutoff,directory,progress)
+    with Session() as db:types=list(db.scalars(select(Listing.product_type).where(Listing.store==store,Listing.marketplace==market).distinct()))
+    for index,pt in enumerate(types):
+     progress(phase='templates',market=market,product_type=pt,completed=index,total=len(types))
+     try:ensure_template(store,market,pt)
+     except AmazonError as e:
+      errors.append(market+' / '+pt+': '+str(e))
+      with Session.begin() as db:
+       for row in db.scalars(select(Listing).where(Listing.store==store,Listing.marketplace==market,Listing.product_type==pt)):row.template_error=str(e)
    except Exception as e:errors.append(market+': '+(str(e) if isinstance(e,AmazonError) else '同步中断，已保存进度'))
   with Session.begin() as db:
    j=db.get(Job,jid);j.status='failed' if errors else 'succeeded';j.error='；'.join(errors) or None;j.finished_at=now()

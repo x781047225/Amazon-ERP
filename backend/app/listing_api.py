@@ -61,6 +61,21 @@ def get_detail(pk:int):
         row=db.get(Listing,pk)
         if not row:raise HTTPException(404,'Listing 不存在')
         return listing_business.enrich(db,[row],[listing_service.detail(db,row)])[0]
+@router.post('/{pk}/template')
+def load_template(pk:int):
+    with Session() as db:
+        row=db.get(Listing,pk)
+        if not row:raise HTTPException(404,'Listing 不存在')
+        store,market,pt=row.store,row.marketplace,row.product_type
+    from .listing_import import ensure_template
+    try:ensure_template(store,market,pt)
+    except AmazonError as e:
+        with Session.begin() as db:
+            row=db.get(Listing,pk)
+            if row and (row.store,row.marketplace,row.product_type)==(store,market,pt):row.template_error=str(e)
+        raise HTTPException(502,str(e)) from None
+    return get_detail(pk)
+
 @router.post('/{pk}/refresh')
 def refresh(pk:int):
     with Session() as db:
