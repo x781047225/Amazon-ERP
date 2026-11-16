@@ -9,7 +9,7 @@ from .operations_models import ListingSyncJob as Job
 from .settings import ROOT,STORES,MARKETS
 from .auth import require_store,allowed_stores
 from .amazon import redis,AmazonError
-from .listing_import import scan_market,scan_windowed,ensure_template
+from .listing_import import scan_market,scan_windowed,ensure_template,catalog_batch
 router=APIRouter(prefix='/api/listing-sync')
 def public(j):return {k:getattr(j,k) for k in ['id','store','markets','status','progress','error','created_at','finished_at']}
 def enqueue(store,markets,start_at=None,end_at=None,job_id=None):
@@ -61,6 +61,17 @@ def run(jid):
       errors.append(market+' / '+pt+': '+str(e))
       with Session.begin() as db:
        for row in db.scalars(select(Listing).where(Listing.store==store,Listing.marketplace==market,Listing.product_type==pt)):row.template_error=str(e)
+    with Session() as db:asins=list(db.scalars(select(Listing.asin).where(Listing.store==store,Listing.marketplace==market,Listing.asin.is_not(None),Listing.asin!='').distinct()))
+    for offset in range(0,len(asins),20):
+     batch=asins[offset:offset+20]
+     progress(phase='catalog',market=market,completed=offset,total=len(asins))
+     try:
+      result=catalog_batch(store,market,batch)
+      errors.extend(market+' / '+asin+': '+error for asin,error in result['errors'].items())
+     except AmazonError as e:
+      errors.append(market+' / 目录: '+str(e))
+      with Session.begin() as db:
+       for row in db.scalars(select(Listing).where(Listing.store==store,Listing.marketplace==market,Listing.asin.in_(batch))):row.catalog_error=str(e)
    except Exception as e:errors.append(market+': '+(str(e) if isinstance(e,AmazonError) else '同步中断，已保存进度'))
   with Session.begin() as db:
    j=db.get(Job,jid);j.status='failed' if errors else 'succeeded';j.error='；'.join(errors) or None;j.finished_at=now()

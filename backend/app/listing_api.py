@@ -76,6 +76,24 @@ def load_template(pk:int):
         raise HTTPException(502,str(e)) from None
     return get_detail(pk)
 
+@router.post('/{pk}/catalog')
+def load_catalog(pk:int):
+    with Session() as db:
+        row=db.get(Listing,pk)
+        if not row:raise HTTPException(404,'Listing 不存在')
+        store,market,asin=row.store,row.marketplace,row.asin
+    if not asin:raise HTTPException(422,'商品尚未返回 ASIN，无法读取目录信息')
+    from .listing_import import catalog_batch
+    try:
+        result=catalog_batch(store,market,[asin])
+        if result['errors']:raise AmazonError(result['errors'].get(asin,'目录信息未返回'))
+    except AmazonError as e:
+        with Session.begin() as db:
+            row=db.get(Listing,pk)
+            if row and (row.store,row.marketplace,row.asin)==(store,market,asin):row.catalog_error=str(e)
+        raise HTTPException(502,str(e)) from None
+    return get_detail(pk)
+
 @router.post('/{pk}/refresh')
 def refresh(pk:int):
     with Session() as db:

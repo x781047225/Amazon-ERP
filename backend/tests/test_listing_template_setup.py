@@ -39,6 +39,7 @@ def test_sync_finishes_only_after_templates_and_retry_repairs(monkeypatch,tmp_pa
  imported();monkeypatch.setattr(jobs,'ROOT',tmp_path)
  gate=Mock();gate.acquire.return_value=True;monkeypatch.setattr(jobs.redis,'lock',lambda *a,**k:gate)
  monkeypatch.setattr(jobs,'scan_market',lambda *a,**k:None)
+ monkeypatch.setattr(jobs,'catalog_batch',lambda *a:{'saved':1,'errors':{}})
  monkeypatch.setattr(imp.remote,'definition',Mock(side_effect=AmazonError('模板暂不可用')))
  jid=jobs.enqueue('DemoStoreA',['DE'])['id'];jobs.run(jid)
  with Session.begin() as db:

@@ -75,12 +75,19 @@ async function load(silent=false){
 function search(){filters.page=1;load()}
 function hydrate(data:ListingDetail){selected.value=data;baseline.value=Object.fromEntries(data.edit_fields.map(f=>[f.key,clone(f.value)]));form.value=clone(baseline.value)}
 function stash(){if(!selected.value)return;if(dirty.value)edits.set(selected.value.id,{data:clone(selected.value),form:clone(form.value),base:clone(baseline.value)});else edits.delete(selected.value.id)}
-async function open(row:Listing){loading.value=true;try{const saved=edits.get(row.id);if(saved){selected.value=clone(saved.data);form.value=clone(saved.form);baseline.value=clone(saved.base)}else hydrate(await api('/'+row.id));section.value='content';error.value='';if(selected.value&&(!selected.value.template||selected.value.template_error)&&can('listing','operate'))await loadTemplate()}catch(e){ElMessage.error((e as Error).message)}finally{loading.value=false}}
+async function open(row:Listing){loading.value=true;try{const saved=edits.get(row.id);if(saved){selected.value=clone(saved.data);form.value=clone(saved.form);baseline.value=clone(saved.base)}else hydrate(await api('/'+row.id));section.value='content';error.value='';if(selected.value&&(!selected.value.template||selected.value.template_error)&&can('listing','operate'))await loadTemplate();if(selected.value?.asin&&(!selected.value.catalog_data||selected.value.catalog_error)&&can('listing','operate'))await loadCatalog()}catch(e){ElMessage.error((e as Error).message)}finally{loading.value=false}}
 async function loadTemplate(){
  if(!selected.value||busy.value)return
  const id=selected.value.id,pending=clone(changes.value);busy.value=true
  try{const data=await api('/'+id+'/template',{});if(selected.value?.id!==id)return;hydrate(data);for(const [key,value] of Object.entries(pending))form.value[key]=value}
  catch(e){if(selected.value?.id===id)selected.value.template_error=(e as Error).message;ElMessage.error((e as Error).message)}
+ finally{busy.value=false}
+}
+async function loadCatalog(){
+ if(!selected.value||busy.value)return
+ const id=selected.value.id,pending=clone(changes.value);busy.value=true
+ try{const data=await api('/'+id+'/catalog',{});if(selected.value?.id!==id)return;hydrate(data);for(const [key,value] of Object.entries(pending))form.value[key]=value}
+ catch(e){if(selected.value?.id===id)selected.value.catalog_error=(e as Error).message;ElMessage.error((e as Error).message)}
  finally{busy.value=false}
 }
 async function canLeave(){if(busy.value||priceBusy.value){ElMessage.info('当前操作尚未结束，请稍候');return false}if(preview.value||priceRow.value||linkRow.value||incomeRow.value){ElMessage.info('请先关闭提交预览或调价窗口');return false}stash();return true}
@@ -130,6 +137,7 @@ onBeforeUnmount(()=>{disposed=true;listingRequest++;window.removeEventListener('
  <div class="listing-detail-toolbar"><el-button :icon="ArrowLeft" @click="back">返回列表</el-button><div class="ld-actions"><span class="muted">{{dirty?`前端有 ${Object.keys(changes).length} 项未提交编辑`:'当前为亚马逊读取信息'}}</span><el-button type="primary" :loading="busy" :disabled="!dirty||!can('listing','operate')" @click="showPreview">提交预览</el-button></div></div>
  <div class="listing-hero panel"><el-image :src="selected.image_url" fit="contain" class="hero-image"/><div class="hero-copy"><div class="eyebrow">{{selected.store}} · {{marketNames[selected.marketplace]||selected.marketplace}}</div><div class="identifier-line"><h2>{{selected.sku}}</h2><CopyValue label="SKU" :value="selected.sku"/></div><div class="identifier-line muted"><span>ASIN：{{selected.asin||'未返回'}}</span><CopyValue label="ASIN" :value="selected.asin"/></div><div class="identifier-line muted"><span>FNSKU：{{selected.fnsku||'未返回'}}</span><CopyValue label="FNSKU" :value="selected.fnsku"/></div><p>{{selected.title}}</p><el-tag effect="plain">{{typeNames[selected.product_type]||selected.product_type}}</el-tag></div><div class="hero-meta"><span>最近读取</span><b>{{time(selected.synced_at)}}</b><span>当前属性 {{selected.attribute_count}} 项</span></div></div>
  <p v-if="!selected.template||selected.template_error" class="listing-note">{{busy?'正在加载品类编辑模板…':'品类编辑模板尚未就绪，请重试加载；也可在设置 → 同步数据中重新初始化 Listing。'}} <el-button v-if="can('listing','operate')" :loading="busy" @click="loadTemplate">加载编辑模板</el-button></p>
+ <p v-if="!selected.catalog_data||selected.catalog_error" class="listing-note">目录资料包括图片、分类等，未就绪时不影响已加载模板的字段编辑。<el-button v-if="can('listing','operate')" :disabled="!selected.asin" :loading="busy" @click="loadCatalog">加载目录信息</el-button></p>
  <p class="listing-note">编辑内容只保留在当前页面会话，刷新或关闭页面会丢失未提交内容。同步后保留你的编辑；预览核对后才会提交。<el-button v-if="selected.draft&&Object.keys(selected.draft.changes).length" link @click="legacy">载入旧版未提交内容</el-button></p>
  <el-alert v-if="selected.sync_error||selected.template_error||selected.catalog_error" :title="selected.sync_error||selected.template_error||selected.catalog_error||''" type="warning" :closable="false"/>
  <div class="panel listing-detail-body"><el-tabs v-model="section">
