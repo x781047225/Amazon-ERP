@@ -10,7 +10,7 @@ import AdsCreatePage from './AdsCreatePage.vue'
 const createMode=ref('')
 const canEditAds=computed(()=>can(level.value==='detail'?'advertising.'+tab.value:'advertising','operate'))
 const profiles=ref<any[]>([]),profile=ref(''),country=ref('FR'),store=ref(''),level=ref('campaign'),tab=ref(firstAllowed('advertising',['ad','target','negative','search','logs'])),campaign=ref<any>(null),group=ref<any>(null)
-const dates=ref<string[]>([]),preset=ref('7'),q=ref(''),searchType=ref('all'),state=ref(''),page=ref(1),loading=ref(false),syncing=ref(false),error=ref(''),data=ref<any>({rows:[],total:0}),jobs=ref<any[]>([]),showJobs=ref(false),sort=ref(''),direction=ref('desc'),hover=ref<number|null>(null)
+const dates=ref<string[]>([]),preset=ref('7'),q=ref(''),searchType=ref('all'),state=ref(''),page=ref(1),pageSize=ref(25),loading=ref(false),syncing=ref(false),error=ref(''),data=ref<any>({rows:[],total:0}),jobs=ref<any[]>([]),showJobs=ref(false),sort=ref(''),direction=ref('desc'),hover=ref<number|null>(null)
 const editOpen=ref(false),editBusy=ref(false),editRow=ref<any>(null),isCreate=ref(false),editKind=ref(''),editForm=ref<any>({}),previewData=ref<any>(null),editError=ref('')
 const suggestLoading=ref(false)
 const labels:Record<string,string>={campaign:'广告活动',adgroup:'广告组',ad:'广告',target:'投放',negative:'否定投放',search:'用户搜索词',logs:'操作日志'}
@@ -41,7 +41,7 @@ async function load(){
  if(!profile.value||dates.value?.length!==2)return
  const id=++request;loading.value=true;error.value='';hover.value=null
  if(loadedLevel!==currentLevel.value){data.value={rows:[],total:0};loadedLevel=currentLevel.value}
- try{const p=new URLSearchParams({profile_id:profile.value,level:currentLevel.value,campaign_id:campaign.value?.id||'',adgroup_id:group.value?.id||'',start:dates.value[0],end:dates.value[1],q:q.value,search_type:searchType.value,state:currentLevel.value==='logs'||currentLevel.value==='search'?'':state.value,page:String(page.value),sort:sort.value,direction:direction.value});const r=await api('/advertising/workspace?'+p);if(id===request)data.value=r}catch(e){if(id===request)error.value=(e as Error).message}finally{if(id===request)loading.value=false}
+ try{const p=new URLSearchParams({profile_id:profile.value,level:currentLevel.value,campaign_id:campaign.value?.id||'',adgroup_id:group.value?.id||'',start:dates.value[0],end:dates.value[1],q:q.value,search_type:searchType.value,state:currentLevel.value==='logs'||currentLevel.value==='search'?'':state.value,page:String(page.value),page_size:String(pageSize.value),sort:sort.value,direction:direction.value});const r=await api('/advertising/workspace?'+p);if(id===request)data.value=r}catch(e){if(id===request)error.value=(e as Error).message}finally{if(id===request)loading.value=false}
 }
 async function loadJobs(){const pid=profile.value;if(pid){const result=await api('/advertising/jobs?'+new URLSearchParams({profile_id:pid}));if(profile.value===pid)jobs.value=result}}
 function search(){page.value=1;load()}
@@ -49,9 +49,9 @@ function search(){page.value=1;load()}
 const workspaceTabs=ref<any[]>([{id:'home',label:'全部广告活动',snapshot:null}]),activeTab=ref('home')
 const tabMenu=ref<{id:string,x:number,y:number}|null>(null)
 const tabMenuIndex=computed(()=>workspaceTabs.value.findIndex(t=>t.id===tabMenu.value?.id))
-function captureView(){return JSON.parse(JSON.stringify({profile:profile.value,country:country.value,store:store.value,level:level.value,tab:tab.value,campaign:campaign.value,group:group.value,dates:dates.value,preset:preset.value,q:q.value,searchType:searchType.value,state:state.value,page:page.value,sort:sort.value,direction:direction.value,chartMetric:chartMetric.value,inlineValues:inlineValues.value,data:data.value}))}
+function captureView(){return JSON.parse(JSON.stringify({profile:profile.value,country:country.value,store:store.value,level:level.value,tab:tab.value,campaign:campaign.value,group:group.value,dates:dates.value,preset:preset.value,q:q.value,searchType:searchType.value,state:state.value,page:page.value,pageSize:pageSize.value,sort:sort.value,direction:direction.value,chartMetric:chartMetric.value,inlineValues:inlineValues.value,data:data.value}))}
 function saveView(){const t=workspaceTabs.value.find(t=>t.id===activeTab.value);if(t){t.snapshot=captureView();if(t.id!=='home')t.label=group.value?.name||campaign.value?.name||t.label}}
-function restoreView(v:any){profile.value=v.profile;country.value=v.country;store.value=v.store;level.value=v.level;tab.value=v.tab;campaign.value=v.campaign;group.value=v.group;dates.value=[...v.dates];preset.value=v.preset;q.value=v.q;searchType.value=v.searchType;state.value=v.state;page.value=v.page;sort.value=v.sort;direction.value=v.direction;chartMetric.value=v.chartMetric;inlineValues.value=v.inlineValues||{};data.value=v.data||{rows:[],total:0};loadedLevel=currentLevel.value;hover.value=null;error.value=''}
+function restoreView(v:any){profile.value=v.profile;country.value=v.country;store.value=v.store;level.value=v.level;tab.value=v.tab;campaign.value=v.campaign;group.value=v.group;dates.value=[...v.dates];preset.value=v.preset;q.value=v.q;searchType.value=v.searchType;state.value=v.state;page.value=v.page;pageSize.value=v.pageSize||25;sort.value=v.sort;direction.value=v.direction;chartMetric.value=v.chartMetric;inlineValues.value=v.inlineValues||{};data.value=v.data||{rows:[],total:0};loadedLevel=currentLevel.value;hover.value=null;error.value=''}
 function activateTab(id:string){tabMenu.value=null;if(id===activeTab.value)return;const target=workspaceTabs.value.find(t=>t.id===id);if(!target)return;saveView();request++;activeTab.value=id;restoreView(target.snapshot);load();loadJobs();loadPreferences()}
 function openEntity(next:string,row:any,parent:any=null){
  const id=profile.value+':'+next+':'+row.id
@@ -184,7 +184,7 @@ function hoverChart(e:MouseEvent){const b=(e.currentTarget as SVGElement).getBou
   <template #empty><el-empty :description="currentLevel==='search'&&!data.metrics_ready?'尚未同步该时段的搜索词报表':'没有匹配的记录'"/></template>
  </el-table>
  <div v-if="data.summary" class="ads-totals"><b>{{data.coverage?.complete?'筛选结果合计':'已同步部分合计'}}</b><span>曝光 {{number(data.summary.impressions)}}</span><span>点击 {{number(data.summary.clicks)}}</span><span>花费 {{money(data.summary.cost)}}</span><span>销售额 {{money(data.summary.sales)}}</span><span>ACOS {{percent(data.summary.acos)}}</span></div>
- <div class="table-footer"><span>每页20条</span><el-pagination v-model:current-page="page" :page-size="20" :total="data.total||0" layout="total, prev, pager, next" @current-change="load"/></div></section>
+ <div class="table-footer"><span>每页20条</span><AppPagination v-model:current-page="page" :total="data.total||0" @change="load" v-model:page-size="pageSize"/></div></section>
  <p v-if="!canEditAds" class="ads-footer muted">当前账号可查看和同步已授权店铺的广告数据；创建广告、调价及启停由管理员操作。</p>
  <p class="ads-footer muted">当前显示所选店铺站点的商品推广数据。广告状态为设置状态，实际投放还受活动、广告组、预算及资格影响。修改需预览确认，操作日志记录本系统提交的修改。</p>
  <el-dialog v-model="editOpen" :title="isCreate?'新增否定投放':'编辑广告设置'" :width="editKind==='campaign'?'760px':'620px'" top="6vh" :close-on-click-modal="false" :close-on-press-escape="!editBusy" :show-close="!editBusy"><p><b>{{editRow?.name}}</b> · {{store}} / {{country}} / {{currency}}</p><el-alert v-if="editError" :title="editError" type="error" :closable="false" show-icon/>

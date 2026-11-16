@@ -190,7 +190,7 @@ async function logout(){try{await ElMessageBox.confirm('退出会清除本次会
       <el-button type="primary" native-type="submit" :icon="Search">查询</el-button><el-button @click="reset">重置</el-button><el-button :icon="Refresh" @click="refresh">刷新页面</el-button>
      <TableReset table-key="OrderRows/orders"/></form>
      <OrderRows :orders="orders" :loading="loading" :statuses="statuses" :names="names" @detail="detail" @calculate="calculatorOrder=$event" @sync="openSync"/>
-     <div class="table-footer"><span>下单时间按北京时间显示</span><el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="[25,50,100]" :total="total" layout="total, sizes, prev, pager, next" @current-change="fetchOrders" @size-change="search"/></div>
+     <div class="table-footer"><span>下单时间按北京时间显示</span><AppPagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" @change="fetchOrders"/></div>
     </section>
    </template>
    <div v-if="hasTab('home')" v-show="tab==='home'"><DashboardPanel :key="currentStore" :store="currentStore" @navigate="navigate"/></div><div v-if="hasTab('users') && can('users')" v-show="tab==='users'"><UserPanel/></div><div v-if="hasTab('finance')" v-show="tab==='finance'"><FinancePanel :key="currentStore" :store="currentStore"/></div><div v-if="hasTab('fba')" v-show="tab==='fba'"><FbaPanel :active="tab==='fba'" :target="fbaTarget" @settlement="openSettlement" @open-sta="openSta" :key="currentStore" :initial-store="currentStore"/></div>

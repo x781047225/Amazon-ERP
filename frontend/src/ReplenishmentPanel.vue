@@ -7,14 +7,14 @@ import {ref,reactive,computed,onMounted,watch} from 'vue'
 import {ElMessage} from 'element-plus'
 import {api,session} from './session'
 const props=defineProps<{initialStore:string}>(),emit=defineEmits(['navigate'])
-const admin=computed(()=>can('replenishment','operate')),loading=ref(false),error=ref(''),data=ref<any>(null),page=ref(1),selected=ref<any[]>([])
+const admin=computed(()=>can('replenishment','operate')),loading=ref(false),error=ref(''),data=ref<any>(null),page=ref(1),pageSize=ref(25),selected=ref<any[]>([])
 const options=reactive({stores:[] as string[],warehouses:[] as any[]})
 const filters=reactive({store:props.initialStore||'',region:'UK',q:'',only_need:false,only_linked:false,sort:'need'})
 const format=(v:any)=>v==null?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:2})
 const stamp=(v:any)=>v?new Date(v).toLocaleString('zh-CN',{hour12:false}):'尚无记录'
 const channelNames:Record<string,string>={air:'空派',truck:'卡航',sea:'海运'}
 let sequence=0
-async function load(){const seq=++sequence;loading.value=true;error.value='';selected.value=[];try{const p=new URLSearchParams({...Object.fromEntries(Object.entries(filters).map(([k,v])=>[k,String(v)])),page:String(page.value)});const d=await api('/replenishment?'+p);if(seq===sequence)data.value=d}catch(e){if(seq===sequence){error.value=(e as Error).message;data.value=null}}finally{if(seq===sequence)loading.value=false}}
+async function load(){const seq=++sequence;loading.value=true;error.value='';selected.value=[];try{const p=new URLSearchParams({...Object.fromEntries(Object.entries(filters).map(([k,v])=>[k,String(v)])),page:String(page.value),page_size:String(pageSize.value)});const d=await api('/replenishment?'+p);if(seq===sequence)data.value=d}catch(e){if(seq===sequence){error.value=(e as Error).message;data.value=null}}finally{if(seq===sequence)loading.value=false}}
 function search(){page.value=1;load()}
 const detail=ref<any>(null)
 const graph=computed(()=>{if(!detail.value)return '';const a=detail.value.projection,top=Math.max(1,...a.map((x:any)=>x.stock));return a.map((x:any,i:number)=>`${20+i/(a.length-1)*710},${160-x.stock/top*130}`).join(' ')})
@@ -61,7 +61,7 @@ watch(()=>props.initialStore,v=>{filters.store=v;search()})
  <el-table-column :column-key="'column-15'" :width="tableWidths.width('table-1', 'column-15', undefined)" label="补货状态" min-width="160"><template #default="{row}"><el-tag :type="row.risk==='库存充足'?'success':row.risk==='海运来不及'?'danger':'warning'">{{row.risk}}</el-tag><small v-if="row.shortage_date" class="muted">预计缺货 {{row.shortage_date}}</small><small v-if="row.issues.length" class="muted">{{row.issues.length}} 项需留意</small></template></el-table-column>
  <el-table-column :column-key="'column-16'" label="操作" :width="tableWidths.width('table-1', 'column-16', '145')" fixed="right"><template #default="{row}"><el-button link type="primary" @click="detail=row">计算明细</el-button><el-button v-if="admin" link type="primary" :disabled="!row.can_generate||loading" @click="preview(row)">采购</el-button></template></el-table-column>
  </el-table></template>
- <div class="replenish-footer"><span>计算时间：{{stamp(data?.calculated_at)}}</span><el-pagination v-model:current-page="page" :page-size="20" :total="data?.total||0" layout="total, prev, pager, next" @current-change="load"/></div>
+ <div class="replenish-footer"><span>计算时间：{{stamp(data?.calculated_at)}}</span><AppPagination v-model:current-page="page" :total="data?.total||0" @change="load" v-model:page-size="pageSize"/></div>
  </section>
  <p class="replenish-note">发货计划已锁定的库存按计划发货日期＋渠道时效计入供应；未配货部分不重复计数。本地可用量已扣除锁定量，并在店铺及区域间分配一次。采购途中只计入预计能赶上本轮的部分；日期不明的 FBA 在途暂不抵扣，并提示核对。新采购生产等待时间另计，备货时长从本地仓可发货时开始。</p>
  <el-dialog :model-value="!!detail" @update:model-value="(v:boolean)=>{if(!v)detail=null}" title="补货计算明细" width="min(900px,95vw)">

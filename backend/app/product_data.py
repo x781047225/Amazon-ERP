@@ -20,10 +20,10 @@ class SupplierBody(BaseModel):
  _url=field_validator('shop_url')(web_link)
 def supplier_data(s):return {k:getattr(s,k) for k in ['id','name','shop_url','purchase_method','settlement_method','revision','updated_at']}
 @router.get('/suppliers')
-def suppliers(q:str='',page:int=Query(1,ge=1)):
+def suppliers(q:str='',page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):
  with Session() as db:
   cond=[Supplier.name.ilike(pattern(q),escape='\\')] if q else []
-  return {'total':db.scalar(select(func.count()).select_from(Supplier).where(*cond)),'rows':[supplier_data(s) for s in db.scalars(select(Supplier).where(*cond).order_by(Supplier.id.desc()).offset((page-1)*20).limit(20))]}
+  return {'total':db.scalar(select(func.count()).select_from(Supplier).where(*cond)),'rows':[supplier_data(s) for s in db.scalars(select(Supplier).where(*cond).order_by(Supplier.id.desc()).offset((page-1)*page_size).limit(page_size))]}
 @router.post('/suppliers')
 @router.post('/suppliers/{pk}')
 def save_supplier(b:SupplierBody,pk:int|None=None):

@@ -77,7 +77,7 @@ def product_rows(db,p):
     return list(rows.values())
 
 @router.get('/create/products')
-def products(profile_id:str,q:str='',page:int=Query(1,ge=1),page_size:int=Query(10,ge=1,le=50)):
+def products(profile_id:str,q:str='',page:int=Query(1,ge=1),page_size:int=Query(10,ge=1,le=100)):
     with Session() as db:
         rows=product_rows(db,profile_checked(db,profile_id))
     needle=q.strip().casefold()

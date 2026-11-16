@@ -79,14 +79,14 @@ def delete_batch(code:str,b:Selection):
  return {'ok':True}
 
 @router.get('/plan-batches/{code}/logs')
-def logs(code:str,page:int=Query(1,ge=1)):
+def logs(code:str,page:int=Query(1,ge=1),page_size:int=Query(100,ge=1,le=100)):
  with Session() as db:
   rows=batch_rows(db,code,allow_deleted=True)
   cond=[AccessAudit.target==code,AccessAudit.action.in_(list(TITLES))]
   total=db.scalar(select(func.count()).select_from(AccessAudit).where(*cond))
-  result=[{'id':a.id,'actor':a.actor,'title':TITLES[a.action],'created_at':a.created_at,'detail':a.detail} for a in db.scalars(select(AccessAudit).where(*cond).order_by(AccessAudit.id.desc()).offset((page-1)*100).limit(100))]
+  result=[{'id':a.id,'actor':a.actor,'title':TITLES[a.action],'created_at':a.created_at,'detail':a.detail} for a in db.scalars(select(AccessAudit).where(*cond).order_by(AccessAudit.id.desc()).offset((page-1)*page_size).limit(page_size))]
   historical=bool(rows) and not db.scalar(select(AccessAudit.id).where(*cond,AccessAudit.action=='purchase_plan_batch_create').limit(1))
-  if page==1 and historical:
+  if historical and (page-1)*page_size<=total<page*page_size:
    result.append({'id':'historical','actor':' / '.join(dict.fromkeys(p.created_by for p in rows if p.created_by)) or '历史记录未记录','title':'创建采购计划（历史记录）','created_at':min(p.created_at for p in rows),'detail':{}})
   return {'rows':result,'total':total+int(historical)}
 

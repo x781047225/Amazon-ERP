@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter,HTTPException,Query
 from pydantic import BaseModel,ConfigDict
 from typing import Literal
-from sqlalchemy import select,text
+from sqlalchemy import select,text,func
 from .db import Session
 from .models import now,SyncJob,FinanceJob,FbaJob,StoreInventory,AdsProfile,AdsSync
 from .operations_models import ListingSyncJob
@@ -90,9 +90,12 @@ def initialize(store:str,kind:Kind,b:Start):
  with Session.begin() as db:
   r=create(db,store,kind,b.days,'initialize',principal.get()['username']);audit(db,'data_sync_initialize',store,{'kind':kind,'days':b.days,'run_id':r.id});return public(r)
 @router.get('/runs')
-def runs(store:str,page:int=Query(1,ge=1)):
+def runs(store:str,page:int=Query(1,ge=1),page_size:int=Query(30,ge=1,le=100),paginated:bool=False):
  require_store(store)
- with Session() as db:return [public(r) for r in db.scalars(select(Run).where(Run.store==store).order_by(Run.created_at.desc()).offset((page-1)*30).limit(30))]
+ with Session() as db:
+  rows=[public(r) for r in db.scalars(select(Run).where(Run.store==store).order_by(Run.created_at.desc(),Run.id.desc()).offset((page-1)*page_size).limit(page_size))]
+  if not paginated:return rows
+  return {'rows':rows,'total':db.scalar(select(func.count()).select_from(Run).where(Run.store==store))}
 def migrate_legacy_toggle():
  # The old global switch lived in Redis. Adopt it once, without overriding user edits.
  with Session.begin() as db:

@@ -64,13 +64,13 @@ class CodeBody(BaseModel):
  declaration_elements:str=Field(default='',max_length=10000)
  revision:int|None=None
 @router.get('/codes/{kind}')
-def codes(kind:Kind,q:str='',name:str='',hs_code:str='',page:int=Query(1,ge=1)):
+def codes(kind:Kind,q:str='',name:str='',hs_code:str='',page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):
  with Session() as db:
   cond=[CustomsCode.kind==kind]
   if q.strip():cond.append(or_(CustomsCode.name.ilike(pattern(q),escape='\\'),CustomsCode.hs_code.ilike(pattern(q),escape='\\')))
   if name.strip():cond.append(CustomsCode.name.ilike(pattern(name),escape='\\'))
   if hs_code.strip():cond.append(CustomsCode.hs_code.ilike(pattern(hs_code),escape='\\'))
-  return {'total':db.scalar(select(func.count()).select_from(CustomsCode).where(*cond)),'rows':[code_data(r) for r in db.scalars(select(CustomsCode).where(*cond).order_by(CustomsCode.id.desc()).offset((page-1)*20).limit(20))]}
+  return {'total':db.scalar(select(func.count()).select_from(CustomsCode).where(*cond)),'rows':[code_data(r) for r in db.scalars(select(CustomsCode).where(*cond).order_by(CustomsCode.id.desc()).offset((page-1)*page_size).limit(page_size))]}
 def code_data(r):return {k:getattr(r,k) for k in ('id','kind','name','hs_code','tax_rate','declaration_elements','revision')}
 @router.post('/codes/{kind}')
 @router.post('/codes/{kind}/{pk}')

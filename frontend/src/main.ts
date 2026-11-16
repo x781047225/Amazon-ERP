@@ -5,4 +5,5 @@ import 'element-plus/dist/index.css'
 import './style.css'
 import App from './App.vue'
 import TableReset from './TableReset.vue'
-createApp(App).component('TableReset',TableReset).use(ElementPlus,{locale:zhCn}).mount('#app')
+import AppPagination from './AppPagination.vue'
+createApp(App).component('TableReset',TableReset).component('AppPagination',AppPagination).use(ElementPlus,{locale:zhCn}).mount('#app')

@@ -6,12 +6,12 @@ import {useTableWidths} from './tableWidths'
 const widths=useTableWidths('ShippingProductPicker')
 const props=defineProps<{modelValue:any[],store:string,country:string,disabled:boolean,protectedIds?:number[]}>()
 const emit=defineEmits(['update:modelValue','busy'])
-const rows=ref<any[]>([]),total=ref(0),page=ref(1),q=ref(''),loading=ref(false),error=ref(''),pending=ref(0)
+const rows=ref<any[]>([]),total=ref(0),page=ref(1),pageSize=ref(25),q=ref(''),loading=ref(false),error=ref(''),pending=ref(0)
 const picked=computed(()=>new Map(props.modelValue.map(i=>[i.product_id,i])))
 const quantity=computed(()=>props.modelValue.reduce((n,i)=>n+(Number(i.quantity)||0),0))
 let generation=0,context=0,alive=true
 watch(pending,n=>emit('busy',n>0),{flush:'sync'})
-async function load(){const n=++generation;loading.value=true;error.value='';try{const d=await api('/products?'+new URLSearchParams({q:q.value.trim(),page:String(page.value),page_size:'10'}));if(alive&&n===generation){rows.value=d.rows;total.value=d.total}}catch(e){if(alive&&n===generation)error.value=(e as Error).message}finally{if(n===generation)loading.value=false}}
+async function load(){const n=++generation;loading.value=true;error.value='';try{const d=await api('/products?'+new URLSearchParams({q:q.value.trim(),page:String(page.value),page_size:String(pageSize.value)}));if(alive&&n===generation){rows.value=d.rows;total.value=d.total}}catch(e){if(alive&&n===generation)error.value=(e as Error).message}finally{if(n===generation)loading.value=false}}
 function search(){page.value=1;load()}
 async function candidates(item:any){const version=context;item.listing_id=null;item.candidates=[];pending.value++;try{const list=await api('/shipping/candidates?'+new URLSearchParams({store:props.store,country:props.country,product_id:String(item.product_id)}));if(alive&&version===context){item.candidates=list;item.listing_id=list.length===1?list[0].id:null}}catch(e){if(alive&&version===context)error.value=(e as Error).message}finally{pending.value--}}
 async function toggle(product:any,checked:boolean){if(props.disabled)return;if(!checked){if(props.protectedIds?.includes(product.id))return;emit('update:modelValue',props.modelValue.filter(i=>i.product_id!==product.id));return}if(picked.value.has(product.id))return;const item=reactive({product_id:product.id,code:product.code,name:product.name,quantity:1,listing_id:null,candidates:[]});emit('update:modelValue',[...props.modelValue,item]);await candidates(item)}
@@ -28,7 +28,7 @@ onBeforeUnmount(()=>{alive=false;generation++;context++})
 <el-table-column  :width="widths.width('products','listing',470)" column-key="listing" label="店铺 SKU / FNSKU" ><template #default="{row}"><el-select v-if="picked.has(row.id)" v-model="picked.get(row.id).listing_id" :aria-label="row.code+'的SKU'" :disabled="disabled||pending>0" :placeholder="pending?'正在读取 SKU':picked.get(row.id).candidates.length?'选择 SKU':'当前店铺/国家未关联 SKU，请先关联 Listing'" clearable><el-option v-for="c in picked.get(row.id).candidates" :key="c.id" :value="c.id" :label="c.sku+' · '+(c.fnsku||'FNSKU未返回')"/></el-select><span v-else class="muted">勾选产品后带出关联 SKU</span></template></el-table-column>
 <el-table-column  :width="widths.width('products','quantity',190)" column-key="quantity" label="计划发货量" ><template #default="{row}"><el-input-number v-if="picked.has(row.id)" v-model="picked.get(row.id).quantity" :aria-label="row.code+'发货数量'" :min="1" :max="100000" :precision="0" :disabled="disabled"/><span v-else>—</span></template></el-table-column>
 </el-table></template>
-<el-pagination v-model:current-page="page" :page-size="10" :total="total" layout="total, prev, pager, next" @current-change="load()"/>
+<AppPagination v-model:current-page="page" :total="total" @change="load()" v-model:page-size="pageSize"/>
 <div v-if="modelValue.length" class="picked-products"><el-tag v-for="item in modelValue" :key="item.product_id" :closable="!disabled&&!protectedIds?.includes(item.product_id)" @close="toggle({id:item.product_id},false)">{{item.code}} · {{item.quantity||0}} 件</el-tag></div>
 </section></template>
 <style scoped>.product-picker{margin:10px 0 20px}.picker-toolbar{display:flex;align-items:center;gap:12px;margin-bottom:12px}.picker-toolbar .el-input{max-width:330px}.picker-toolbar span,.muted{color:#899b93;font-size:13px}.el-select{width:100%}.el-input-number{width:155px}.el-pagination{margin-top:10px}.picked-products{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}</style>

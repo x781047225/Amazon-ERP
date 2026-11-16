@@ -5,7 +5,7 @@ const listWidths=useListTableWidths('DataSyncPanelLists')
 import {ref,onMounted,onUnmounted,watch} from 'vue'
 import {api,session,can} from './session'
 import {ElMessage} from 'element-plus'
-const stores=ref<string[]>([]),store=ref(session.value?.current_store||''),rows=ref<any[]>([]),runs=ref<any[]>([]),error=ref(''),loading=ref(false),page=ref(1)
+const stores=ref<string[]>([]),store=ref(session.value?.current_store||''),rows=ref<any[]>([]),runs=ref<any[]>([]),error=ref(''),loading=ref(false),page=ref(1),pageSize=ref(25),total=ref(0)
 const days=[1,7,14,30,90,180,365],intervals=[1440,720,360,60,30,10,5]
 const names:Record<string,string>={listing:'Listing',orders:'订单',inventory:'库存',shipments:'货件',finance:'利润结算',advertising:'广告活动',sta:'STA任务'}
 const statuses:Record<string,string>={queued:'排队中',running:'同步中',waiting:'等待亚马逊报表',succeeded:'已完成',partial:'部分完成',failed:'失败'}
@@ -18,10 +18,10 @@ async function load(reset=false){
  const id=++seq,s=store.value
  if(reset)loading.value=true
  try{
-  const [data,history]=await Promise.all([api('/settings/sync-data?store='+encodeURIComponent(s)),api('/settings/sync-data/runs?'+new URLSearchParams({store:s,page:String(page.value)}))])
+  const [data,history]=await Promise.all([api('/settings/sync-data?store='+encodeURIComponent(s)),api('/settings/sync-data/runs?'+new URLSearchParams({store:s,page:String(page.value),page_size:String(pageSize.value),paginated:'true'}))])
   if(disposed||id!==seq)return
   rows.value=data.rows.map((r:any)=>{const old=rows.value.find(x=>x.kind===r.kind);return {...r,draft:!reset&&old?old.draft:{days:r.days,interval_minutes:r.interval_minutes,enabled:r.enabled},draftRevision:!reset&&old?old.draftRevision:r.revision,saving:old?.saving||false,starting:old?.starting||false}})
-  runs.value=history;error.value=''
+  runs.value=history.rows;total.value=history.total;error.value=''
  }catch(e){if(!disposed&&id===seq)error.value=(e as Error).message}
  finally{if(id===seq)loading.value=false}
 }
@@ -54,7 +54,7 @@ onUnmounted(()=>{disposed=true;seq++;if(timer)clearInterval(timer)})
  <template v-if="true"><el-table data-width-key="DataSyncPanelLists/list-2" @header-dragend="(w:number,_:number,c:any)=>listWidths.resize('list-2',w,c)" @header-contextmenu="(c:any,e:MouseEvent)=>listWidths.resetColumn('list-2',c,e)" :data="runs" border row-key="id">
   <el-table-column :column-key="'column-1'" :width="listWidths.width('list-2','column-1',undefined)" type="expand"><template #default="{row}"><div class="sync-detail"><p>请求范围：{{time(row.start_at)}} 至 {{time(row.end_at)}}</p><p v-if="row.warning">{{row.warning}}</p><p v-if="row.error" class="sync-error">{{row.error}}</p><template v-if="true"><TableReset table-key="DataSyncPanelLists/list-3"/><el-table data-width-key="DataSyncPanelLists/list-3" @header-dragend="(w:number,_:number,c:any)=>listWidths.resize('list-3',w,c)" @header-contextmenu="(c:any,e:MouseEvent)=>listWidths.resetColumn('list-3',c,e)" :data="row.steps"><el-table-column :column-key="'column-1'" :width="listWidths.width('list-3','column-1',undefined)" label="分段 / 广告账户" min-width="300"><template #default="{row:step}">{{step.country?step.country+' · '+step.profile_id+' · ':''}}{{time(step.start)}} 至 {{time(step.end)}}</template></el-table-column><el-table-column :column-key="'column-2'" :width="listWidths.width('list-3','column-2','170')" label="状态" ><template #default="{row:step}">{{statuses[step.status]||'待执行'}}</template></el-table-column><el-table-column :column-key="'error'" :width="listWidths.width('list-3','error',undefined)" prop="error" label="说明" min-width="250"/></el-table></template></div></template></el-table-column>
   <el-table-column :column-key="'column-2'" :width="listWidths.width('list-2','column-2','120')" label="数据" ><template #default="{row}">{{names[row.kind]}}</template></el-table-column><el-table-column :column-key="'column-3'" :width="listWidths.width('list-2','column-3','130')" label="任务" ><template #default="{row}">{{row.mode==='initialize'?'初始化':'定时同步'}}</template></el-table-column><el-table-column :column-key="'column-4'" :width="listWidths.width('list-2','column-4','130')" label="状态" ><template #default="{row}">{{statuses[row.status]||row.status}}</template></el-table-column><el-table-column :column-key="'column-5'" :width="listWidths.width('list-2','column-5',undefined)" label="发起时间" min-width="175"><template #default="{row}">{{time(row.created_at)}}</template></el-table-column><el-table-column :column-key="'column-6'" :width="listWidths.width('list-2','column-6',undefined)" label="完成时间" min-width="175"><template #default="{row}">{{time(row.finished_at)}}</template></el-table-column><el-table-column :column-key="'actor'" :width="listWidths.width('list-2','actor','140')" prop="actor" label="发起人" /><el-table-column :column-key="'column-8'" :width="listWidths.width('list-2','column-8',undefined)" label="说明" min-width="260"><template #default="{row}">{{row.error||row.warning||'—'}}</template></el-table-column>
- </el-table></template><div class="sync-pages"><el-button :disabled="page===1" @click="page--;load()">上一页</el-button><span>第 {{page}} 页</span><el-button :disabled="runs.length<30" @click="page++;load()">下一页</el-button></div>
+ </el-table></template><AppPagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" @change="load()"/>
 </section>
 </template>
 <style scoped>

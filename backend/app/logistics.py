@@ -106,13 +106,13 @@ def shipment_context(db,store,sid,kind='invoice'):
   break
  return {'shipment_pk':s.id,'shipment_id':sid,'store':store,'name':s.name or sid,'country':s.destination_country or '', 'date':now().astimezone(ZoneInfo('Asia/Shanghai')).date().isoformat(),'weight':weight,'boxes':box_count,'items':items,'currency':next(iter({i['currency'] for i in items})) if len({i['currency'] for i in items})==1 else ''}
 @router.get('/shipments')
-def search_shipments(q:str='',page:int=Query(1,ge=1),store:str=''):
+def search_shipments(q:str='',page:int=Query(1,ge=1),store:str='',page_size:int=Query(20,ge=1,le=100)):
  with Session() as db:
   cond=[Shipment.store.in_(allowed_stores())]
   if store:require_store(store);cond.append(Shipment.store==store)
   if q:cond.append(or_(Shipment.shipment_id.ilike(pattern(q),escape='\\'),Shipment.name.ilike(pattern(q),escape='\\')))
   count=db.scalar(select(func.count()).select_from(Shipment).where(*cond))
-  return {'rows':[{'id':s.id,'store':s.store,'shipment_id':s.shipment_id,'name':s.name} for s in db.scalars(select(Shipment).where(*cond).order_by(Shipment.id.desc()).offset((page-1)*20).limit(20))],'total':count}
+  return {'rows':[{'id':s.id,'store':s.store,'shipment_id':s.shipment_id,'name':s.name} for s in db.scalars(select(Shipment).where(*cond).order_by(Shipment.id.desc()).offset((page-1)*page_size).limit(page_size))],'total':count}
 @router.get('/shipment')
 def context(store:str,shipment_id:str,kind:str='invoice'):
  if kind not in ('invoice','declaration'):raise HTTPException(422,'单据类型无效')
@@ -150,11 +150,11 @@ def save_settlement(b:SettlementBody,pk:int|None=None):
   if not row:row=Settlement(store=b.store,shipment_id=b.shipment_id,actor=principal.get()['username']);db.add(row)
   row.detail=detail;db.flush();audit(db,'logistics_settlement_save',row.id,detail);return {'id':row.id,**detail}
 @router.get('/settlements')
-def settlements(q:str='',page:int=Query(1,ge=1)):
+def settlements(q:str='',page:int=Query(1,ge=1),page_size:int=Query(30,ge=1,le=100)):
  with Session() as db:
   cond=[Settlement.store.in_(allowed_stores())]
   if q:cond.append(or_(Settlement.shipment_id.ilike(pattern(q),escape='\\'),Settlement.detail['channel']['name'].as_string().ilike(pattern(q),escape='\\')))
-  return {'total':db.scalar(select(func.count()).select_from(Settlement).where(*cond)),'rows':[{'id':s.id,'created_at':s.created_at,**s.detail} for s in db.scalars(select(Settlement).where(*cond).order_by(Settlement.id.desc()).offset((page-1)*30).limit(30))]}
+  return {'total':db.scalar(select(func.count()).select_from(Settlement).where(*cond)),'rows':[{'id':s.id,'created_at':s.created_at,**s.detail} for s in db.scalars(select(Settlement).where(*cond).order_by(Settlement.id.desc()).offset((page-1)*page_size).limit(page_size))]}
 
 def workbook(content):
  try:
@@ -287,12 +287,12 @@ def generate(b:Generate):
   buf=BytesIO();wb.save(buf);filename=f"{b.shipment_id}-{'清关发票' if t.kind=='invoice' else '报关单'}.xlsx"
   d=Document(store=b.store,shipment_id=b.shipment_id,kind=t.kind,template_id=t.id,filename=filename,content=buf.getvalue(),detail={'values':values,'items':items,'mapping':m},actor=principal.get()['username']);db.add(d);db.flush();audit(db,'logistics_document_create',d.id,{'shipment_id':b.shipment_id,'kind':t.kind,'template_id':t.id});return {'id':d.id,'filename':filename}
 @router.get('/documents')
-def documents(kind:str='',q:str='',page:int=Query(1,ge=1)):
+def documents(kind:str='',q:str='',page:int=Query(1,ge=1),page_size:int=Query(30,ge=1,le=100)):
  with Session() as db:
   cond=[Document.store.in_(allowed_stores())]
   if kind:cond.append(Document.kind==kind)
   if q:cond.append(Document.shipment_id.ilike(pattern(q),escape='\\'))
-  return {'total':db.scalar(select(func.count()).select_from(Document).where(*cond)),'rows':[{'id':d.id,'store':d.store,'shipment_id':d.shipment_id,'kind':d.kind,'filename':d.filename,'actor':d.actor,'created_at':d.created_at} for d in db.scalars(select(Document).where(*cond).order_by(Document.id.desc()).offset((page-1)*30).limit(30))]}
+  return {'total':db.scalar(select(func.count()).select_from(Document).where(*cond)),'rows':[{'id':d.id,'store':d.store,'shipment_id':d.shipment_id,'kind':d.kind,'filename':d.filename,'actor':d.actor,'created_at':d.created_at} for d in db.scalars(select(Document).where(*cond).order_by(Document.id.desc()).offset((page-1)*page_size).limit(page_size))]}
 @router.get('/documents/{pk}/download')
 def download_document(pk:int):
  with Session() as db:

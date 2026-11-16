@@ -108,7 +108,7 @@ def warehouse_delete(pk:int):
  return {'ok':True}
 
 @router.get('/label-listings')
-def label_listings(q:str='',store:str='',country:str='',page:int=Query(1,ge=1)):
+def label_listings(q:str='',store:str='',country:str='',page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):
  with Session() as db:
   fnsku=func.coalesce(Listing.listing_data['summaries'][0]['fnSku'].as_string(),ListingInventory.data['fnSku'].as_string())
   stmt=select(Listing,LocalProduct,fnsku.label('fnsku')).outerjoin(ProductLink,ProductLink.listing_pk==Listing.id).outerjoin(LocalProduct,LocalProduct.id==ProductLink.product_id).outerjoin(ListingInventory,ListingInventory.listing_pk==Listing.id)
@@ -117,7 +117,7 @@ def label_listings(q:str='',store:str='',country:str='',page:int=Query(1,ge=1)):
   if country:cond.append(Listing.marketplace==country)
   if q:cond.append(or_(*[c.ilike(pattern(q),escape='\\') for c in [Listing.sku,fnsku,LocalProduct.code,LocalProduct.name,Listing.title]]))
   stmt=stmt.where(*cond);total=db.scalar(select(func.count()).select_from(stmt.subquery()))
-  return {'total':total,'rows':[{'id':l.id,'store':l.store,'country':l.marketplace,'sku':l.sku,'fnsku':f,'code':p.code if p else '', 'name':p.name if p else 'SKU未关联','image_url':l.image_url} for l,p,f in db.execute(stmt.order_by(Listing.id).offset((page-1)*20).limit(20))]}
+  return {'total':total,'rows':[{'id':l.id,'store':l.store,'country':l.marketplace,'sku':l.sku,'fnsku':f,'code':p.code if p else '', 'name':p.name if p else 'SKU未关联','image_url':l.image_url} for l,p,f in db.execute(stmt.order_by(Listing.id).offset((page-1)*page_size).limit(page_size))]}
 class LabelItem(Body):
  id:int
  quantity:int=Field(gt=0,le=20000,strict=True)

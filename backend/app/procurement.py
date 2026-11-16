@@ -445,10 +445,10 @@ def apply_order_update(db,pk,b):
   auto_from_receipt(db,event)
  return {'id':pk,'received_delta':delta,'replayed':False}
 @router.get('/orders/{pk}/logs')
-def order_logs(pk:int,page:int=Query(1,ge=1),whole:bool=False):
+def order_logs(pk:int,page:int=Query(1,ge=1),whole:bool=False,page_size:int=Query(20,ge=1,le=100)):
  with Session() as db:
   lines=document_lines(db,pk) if whole else [get_order(db,pk)];codes={o.id:o.product_code for o in lines};cond=Event.order_id.in_(codes);total=db.scalar(select(func.count()).select_from(Event).where(cond))
-  return {'total':total,'rows':[{**{k:getattr(e,k) for k in ['id','actor','kind','detail','created_at']},'product_code':codes[e.order_id]} for e in db.scalars(select(Event).where(cond).order_by(Event.id.desc()).offset((page-1)*20).limit(20))]}
+  return {'total':total,'rows':[{**{k:getattr(e,k) for k in ['id','actor','kind','detail','created_at']},'product_code':codes[e.order_id]} for e in db.scalars(select(Event).where(cond).order_by(Event.id.desc()).offset((page-1)*page_size).limit(page_size))]}
 
 
 @router.post('/plan-batches/merge')

@@ -6,7 +6,7 @@ from typing import Literal
 from uuid import uuid4
 from fastapi import APIRouter,HTTPException,Query
 from pydantic import BaseModel,Field,ConfigDict
-from sqlalchemy import select
+from sqlalchemy import select,func
 from .db import Session
 from .models import now
 from .sta_models import StaTask
@@ -128,7 +128,7 @@ def delete_address(address_id:int):
  return {'ok':True}
 
 @router.get('')
-def listing(store:str='',q:str='',page:int=Query(1,ge=1)):
+def listing(store:str='',q:str='',page:int=Query(1,ge=1),page_size:int=Query(50,ge=1,le=100),paginated:bool=False):
  from sqlalchemy import literal,union_all,exists,and_
  from .sta_models import AmazonInboundPlan as History
  from .sta_history import public as history_public
@@ -140,8 +140,10 @@ def listing(store:str='',q:str='',page:int=Query(1,ge=1)):
    pattern='%'+q.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
    local=local.where(StaTask.name.ilike(pattern));remote=remote.where(History.name.ilike(pattern))
   combined=union_all(local,remote).subquery()
-  records=db.execute(select(combined).order_by(combined.c.created_at.desc(),combined.c.store,combined.c.id).offset((page-1)*50).limit(50))
-  return [history_public(db.get(History,(x.store,x.id))) if x.source=='amazon' else dict(public(db.get(StaTask,x.id),False),source='local') for x in records]
+  records=db.execute(select(combined).order_by(combined.c.created_at.desc(),combined.c.store,combined.c.id).offset((page-1)*page_size).limit(page_size))
+  rows=[history_public(db.get(History,(x.store,x.id))) if x.source=='amazon' else dict(public(db.get(StaTask,x.id),False),source='local') for x in records]
+  if not paginated:return rows
+  return {'rows':rows,'total':db.scalar(select(func.count()).select_from(combined))}
 @router.get('/history/{store}/{plan_id}')
 def history_detail(store:str,plan_id:str):
  from .sta_models import AmazonInboundPlan

@@ -454,16 +454,17 @@ def detail(pk:int):
  with Session() as db:return data(db,get_task(db,pk),True)
 LOG_TITLES={'shipping_dispatch_complete':'完成发货','shipping_create':'创建发货计划','shipping_change':'变更发货计划','shipping_merge':'合并发货计划','shipping_delete':'删除发货计划','shipping_packing_download':'下载装箱单','shipping_packing':'上传装箱单','shipping_repack':'删除装箱单','shipping_packing_edit':'编辑装箱单','shipping_release_stock':'释放库存','shipping_remainder':'创建剩货计划','shipping_labels':'打印 FNSKU 标签','shipping_stock_lock':'锁定库存','shipping_stock_unlock':'释放库存','shipping_stock_outbound':'确认发货 / 库存出库','shipping_sta_create':'创建 STA 任务','shipping_sta_action':'提交货件操作','shipping_sta_result':'货件操作结果','shipping_box_labels':'下载箱子标签','shipping_manual_outbound':'出库','shipping_stock_return':'撤销出库 / 恢复可用库存','shipping_sta_delete':'删除货件和费用','shipping_sta_complete':'货件追踪完成'}
 @router.get('/{pk}/logs')
-def logs(pk:int,page:int=Query(1,ge=1)):
+def logs(pk:int,page:int=Query(1,ge=1),page_size:int=Query(100,ge=1,le=100)):
  with Session() as db:
   t=get_task(db,pk)
   cond=[AccessAudit.target==str(pk),AccessAudit.action.in_(list(LOG_TITLES))]
-  rows=[{'id':a.id,'actor':a.actor,'action':a.action,'title':LOG_TITLES[a.action],'created_at':a.created_at,'detail':{k:v for k,v in a.detail.items() if k in ('message','filename','boxes','packed','quantity','sta_id','step','status','name','shipments')}} for a in db.scalars(select(AccessAudit).where(*cond).order_by(AccessAudit.id.desc()).offset((page-1)*100).limit(100))]
+  rows=[{'id':a.id,'actor':a.actor,'action':a.action,'title':LOG_TITLES[a.action],'created_at':a.created_at,'detail':{k:v for k,v in a.detail.items() if k in ('message','filename','boxes','packed','quantity','sta_id','step','status','name','shipments')}} for a in db.scalars(select(AccessAudit).where(*cond).order_by(AccessAudit.id.desc()).offset((page-1)*page_size).limit(page_size))]
   total=db.scalar(select(func.count()).select_from(AccessAudit).where(*cond))
   # Historical creation is known from the plan record; never invent past downloads.
-  if page==1 and not db.scalar(select(AccessAudit.id).where(*cond,AccessAudit.action.in_(['shipping_create','shipping_merge'])).limit(1)):
+  historical=not db.scalar(select(AccessAudit.id).where(*cond,AccessAudit.action.in_(['shipping_create','shipping_merge'])).limit(1))
+  if historical and (page-1)*page_size<=total<page*page_size:
    rows.append({'id':'creation','actor':t.actor,'action':'shipping_create','title':'创建发货计划（历史记录）','created_at':t.created_at,'detail':{}})
-  return {'rows':rows,'total':total}
+  return {'rows':rows,'total':total+int(historical)}
 
 PROFILE_FIELDS={'representative_company':'英代/欧代名称','representative_email':'英代/欧代邮箱','representative_address':'英代/欧代地址','manufacturer_company':'制造商名称','manufacturer_email':'制造商邮箱','manufacturer_address':'制造商地址'}
 def region(country):

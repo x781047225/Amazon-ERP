@@ -7,9 +7,9 @@ import {ElMessage,ElMessageBox} from 'element-plus'
 import {api} from './session'
 import type {Listing} from './listingTypes'
 const props=defineProps<{row:Listing|null}>(),emit=defineEmits(['close','saved'])
-const q=ref(''),page=ref(1),total=ref(0),rows=ref<any[]>([]),current=ref<any>(null),loading=ref(false),busy=ref(false),ready=ref(false),error=ref('')
+const q=ref(''),page=ref(1),pageSize=ref(25),total=ref(0),rows=ref<any[]>([]),current=ref<any>(null),loading=ref(false),busy=ref(false),ready=ref(false),error=ref('')
 let sequence=0,epoch=0
-async function search(reset=true){if(reset)page.value=1;const seq=++sequence;loading.value=true;try{const d=await api('/products?'+new URLSearchParams({q:q.value,page:String(page.value),page_size:'8'}));if(seq===sequence){rows.value=d.rows;total.value=d.total}}catch(e){error.value=(e as Error).message}finally{if(seq===sequence)loading.value=false}}
+async function search(reset=true){if(reset)page.value=1;const seq=++sequence;loading.value=true;try{const d=await api('/products?'+new URLSearchParams({q:q.value,page:String(page.value),page_size:String(pageSize.value)}));if(seq===sequence){rows.value=d.rows;total.value=d.total}}catch(e){error.value=(e as Error).message}finally{if(seq===sequence)loading.value=false}}
 watch(()=>props.row,async r=>{epoch++;sequence++;ready.value=false;rows.value=[];error.value='';if(!r)return;const id=epoch;q.value=r.sku;page.value=1;current.value=null;try{const d=await api('/products/listing-link/'+r.id);if(id!==epoch)return;current.value=d.product;ready.value=true;await search()}catch(e){if(id===epoch)error.value=(e as Error).message}},{immediate:true})
 function close(){if(!busy.value)emit('close')}
 async function bind(p:any|null){
@@ -31,7 +31,7 @@ async function bind(p:any|null){
  <el-table-column :column-key="'column-3'" label="采购成本 CNY" :width="tableWidths.width('table-1', 'column-3', '130')"><template #default="{row:p}">{{p.cost_cny==null?'未维护':Number(p.cost_cny).toFixed(2)}}</template></el-table-column>
  <el-table-column :column-key="'column-4'" label="操作" :width="tableWidths.width('table-1', 'column-4', '95')"><template #default="{row:p}"><el-button link type="primary" :disabled="!ready||busy||current?.id===p.id" @click="bind(p)">{{current?.id===p.id?'已关联':'关联'}}</el-button></template></el-table-column>
  </el-table></template>
- <el-pagination v-model:current-page="page" :total="total" :page-size="8" layout="total,prev,pager,next" @current-change="search(false)"/>
+ <AppPagination v-model:current-page="page" :total="total" @change="search(false)" v-model:page-size="pageSize"/>
  </template><template #footer><el-button :disabled="busy" @click="close">关闭</el-button></template>
 </el-dialog>
 </template>

@@ -10,7 +10,7 @@ import {ElMessage,ElMessageBox} from 'element-plus'
 import {api,session} from './session'
 const props=defineProps<{initialStore:string}>()
 const tab=ref(firstAllowed('products',['products', 'suppliers', 'declaration', 'clearance']))
-const rows=ref<any[]>([]),total=ref(0),page=ref(1),loading=ref(false),error=ref('')
+const rows=ref<any[]>([]),total=ref(0),page=ref(1),pageSize=ref(25),loading=ref(false),error=ref('')
 const summary=reactive({active_count:0,unlinked_listings:0}),options=reactive({suppliers:[] as string[],stores:[] as string[],markets:[] as string[]})
 const filter=reactive({q:'',supplier:'',archived:false,unlinked:false,review:false})
 const focusedProduct=ref('')
@@ -21,14 +21,14 @@ async function load(){
  if(!can('products.products'))return;
  const seq=++sequence;loading.value=true;error.value=''
  const f={...filter,archived:String(filter.archived),unlinked:String(filter.unlinked),review:String(filter.review)}
- try{const data=await api('/products?'+new URLSearchParams(Object.fromEntries(Object.entries({...f,page:String(page.value)}).filter(([key,value])=>key!=='product_id'||value!==''))));if(seq!==sequence)return;rows.value=data.rows;total.value=data.total;Object.assign(summary,{active_count:data.active_count,unlinked_listings:data.unlinked_listings})}catch(e){if(seq===sequence)error.value=(e as Error).message}finally{if(seq===sequence)loading.value=false}
+ try{const data=await api('/products?'+new URLSearchParams(Object.fromEntries(Object.entries({...f,page:String(page.value),page_size:String(pageSize.value)}).filter(([key,value])=>key!=='product_id'||value!==''))));if(seq!==sequence)return;rows.value=data.rows;total.value=data.total;Object.assign(summary,{active_count:data.active_count,unlinked_listings:data.unlinked_listings})}catch(e){if(seq===sequence)error.value=(e as Error).message}finally{if(seq===sequence)loading.value=false}
 }
 function search(){page.value=1;load()}
 function reset(){Object.assign(filter,{q:'',supplier:'',archived:false,unlinked:false,review:false});search()}
 async function refreshOptions(){if(!can('products.products'))return;const [o,p]=await Promise.all([api('/options'),api('/products/options')]);Object.assign(options,{stores:o.stores,markets:o.markets,suppliers:p.suppliers})}
-const linkedDialog=ref(false),linkedRows=ref<any[]>([]),linkedTotal=ref(0),linkedPage=ref(1),linkedId=ref(0),linkedBusy=ref(false)
+const linkedDialog=ref(false),linkedRows=ref<any[]>([]),linkedTotal=ref(0),linkedPage=ref(1),linkedPageSize=ref(25),linkedId=ref(0),linkedBusy=ref(false)
 async function showLinks(row:any){linkedId.value=row.id;linkedPage.value=1;focusedProduct.value=row.code;linkedDialog.value=true;await loadLinks()}
-async function loadLinks(){linkedBusy.value=true;try{const d=await api('/products/listings?'+new URLSearchParams({product_id:String(linkedId.value),state:'all',page:String(linkedPage.value)}));linkedRows.value=d.rows;linkedTotal.value=d.total}catch(e){ElMessage.error((e as Error).message)}finally{linkedBusy.value=false}}
+async function loadLinks(){linkedBusy.value=true;try{const d=await api('/products/listings?'+new URLSearchParams({product_id:String(linkedId.value),state:'all',page:String(linkedPage.value),page_size:String(linkedPageSize.value)}));linkedRows.value=d.rows;linkedTotal.value=d.total}catch(e){ElMessage.error((e as Error).message)}finally{linkedBusy.value=false}}
 const emit=defineEmits(['open-product'])
 function edit(row?:any){emit('open-product',row?.id)}
 defineExpose({canLeave:async()=>true,refresh:()=>{load();refreshOptions()}})
@@ -62,9 +62,9 @@ onMounted(async()=>{try{await refreshOptions()}catch(e){error.value=(e as Error)
    <el-table-column :column-key="'column-9'" label="已关联 SKU" :width="tableWidths.width('table-1', 'column-9', '100')"><template #default="{row}"><el-button link type="primary" @click="showLinks(row)">{{row.linked_count}} 项</el-button></template></el-table-column>
    <el-table-column :column-key="'column-10'" label="操作" :width="tableWidths.width('table-1', 'column-10', '120')" fixed="right"><template #default="{row}"><el-button link type="primary" @click="edit(row)">{{admin&&!row.archived?'编辑':'查看'}}</el-button><el-button v-if="admin" :disabled="!!row.merged_into" link :type="row.archived?'primary':'danger'" @click="archiveProduct(row,!!row.archived)">{{row.merged_into?'已归并':row.archived?'恢复':'删除'}}</el-button></template></el-table-column>
   </el-table></template>
-  <div class="catalog-footer"><small>标品档案跨店铺共用；关联数仅统计你有权限的店铺。</small><el-pagination v-model:current-page="page" :page-size="20" :total="total" layout="total, prev, pager, next" @current-change="load"/></div>
+  <div class="catalog-footer"><small>标品档案跨店铺共用；关联数仅统计你有权限的店铺。</small><AppPagination v-model:current-page="page" :total="total" @change="load" v-model:page-size="pageSize"/></div>
  </section>
- </template><el-dialog v-model="linkedDialog" :title="focusedProduct+' · 已关联 Listing'" width="780px"><p>关联操作请在 Listing 列表进行。</p><template v-if="true"><TableReset table-key="ProductPanel/table-3"/><el-table border data-width-key="ProductPanel/table-3" @header-dragend="(width: number, _old: number, column: any) => tableWidths.resize('table-3', width, column)" @header-contextmenu="(column: any, event: MouseEvent) => tableWidths.resetColumn('table-3', column, event)" :data="linkedRows" v-loading="linkedBusy"><el-table-column :column-key="'sku'" :width="tableWidths.width('table-3', 'sku', undefined)" prop="sku" label="亚马逊 SKU"/><el-table-column :column-key="'store'" prop="store" label="店铺" :width="tableWidths.width('table-3', 'store', '150')"/><el-table-column :column-key="'marketplace'" prop="marketplace" label="站点" :width="tableWidths.width('table-3', 'marketplace', '90')"/><el-table-column :column-key="'asin'" prop="asin" label="ASIN" :width="tableWidths.width('table-3', 'asin', '150')"/></el-table></template><el-pagination v-model:current-page="linkedPage" :total="linkedTotal" :page-size="20" layout="total,prev,pager,next" @current-change="loadLinks"/></el-dialog>
+ </template><el-dialog v-model="linkedDialog" :title="focusedProduct+' · 已关联 Listing'" width="780px"><p>关联操作请在 Listing 列表进行。</p><template v-if="true"><TableReset table-key="ProductPanel/table-3"/><el-table border data-width-key="ProductPanel/table-3" @header-dragend="(width: number, _old: number, column: any) => tableWidths.resize('table-3', width, column)" @header-contextmenu="(column: any, event: MouseEvent) => tableWidths.resetColumn('table-3', column, event)" :data="linkedRows" v-loading="linkedBusy"><el-table-column :column-key="'sku'" :width="tableWidths.width('table-3', 'sku', undefined)" prop="sku" label="亚马逊 SKU"/><el-table-column :column-key="'store'" prop="store" label="店铺" :width="tableWidths.width('table-3', 'store', '150')"/><el-table-column :column-key="'marketplace'" prop="marketplace" label="站点" :width="tableWidths.width('table-3', 'marketplace', '90')"/><el-table-column :column-key="'asin'" prop="asin" label="ASIN" :width="tableWidths.width('table-3', 'asin', '150')"/></el-table></template><AppPagination v-model:current-page="linkedPage" :total="linkedTotal" @change="loadLinks" v-model:page-size="linkedPageSize"/></el-dialog>
 </div>
 </template>
 <style scoped>
