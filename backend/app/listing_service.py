@@ -49,13 +49,14 @@ def save_listing(db,store,market,data,catalog=None,definition=None,catalog_error
     if not row:row=Listing(store=store,marketplace=market,sku=data['sku'],version=1);db.add(row)
     elif changed:row.version+=1
     old_type=row.product_type
+    if row.asin!=summary.get('asin'):row.catalog_notice=None;row.catalog_checked_at=None
     row.asin=summary.get('asin');row.product_type=pt;row.title=(values(attributes.get('item_name')) or [summary.get('itemName')])[0]
     row.brand=(values(attributes.get('brand')) or [None])[0];row.image_url=(summary.get('mainImage') or {}).get('link')
     row.attributes=attributes;row.listing_data=main;row.fingerprint=fingerprint;row.synced_at=now();row.sync_error=None
     if template:row.template_id=template.id
     elif old_type!=pt:row.template_id=None
     row.template_error=template_error;row.catalog_error=catalog_error
-    if catalog is not None:row.catalog_data=catalog;row.catalog_synced_at=now()
+    if catalog is not None:row.catalog_data=catalog;row.catalog_synced_at=now();row.catalog_checked_at=now();row.catalog_notice=None
     # Do not retain another ASIN's directory snapshot after an identity change.
     elif row.catalog_data and row.catalog_data.get('asin')!=row.asin:row.catalog_data=None;row.catalog_synced_at=None
     db.flush();record(db,row.id,'refresh',{'changed':changed,'fields':len(attributes),'catalog_error':catalog_error,'template_error':template_error})
@@ -70,12 +71,17 @@ def refresh(store,market,sku):
     if not lock.acquire(blocking=False):raise AmazonError('此商品正在同步，请稍后刷新页面。')
     try:
         data=listing_amazon.listing(store,market,sku);summary,pt=identify(data,market)
-        cat=None;definition=None;cat_error=None;tpl_error=None
+        cat=None;definition=None;cat_error=None;tpl_error=None;catalog_missing=False
         try:cat=listing_amazon.catalog(store,market,summary['asin'])
+        except listing_amazon.CatalogNotFound:cat_error=None;catalog_missing=True
         except (AmazonError,KeyError):cat_error='目录信息读取失败；店铺属性已独立读取，旧目录信息仍保留。'
         try:definition=listing_amazon.definition(store,market,pt)
         except AmazonError as e:tpl_error=str(e)
-        with Session.begin() as db:return save_listing(db,store,market,data,cat,definition,cat_error,tpl_error)
+        with Session.begin() as db:
+            pk=save_listing(db,store,market,data,cat,definition,cat_error,tpl_error)
+            if catalog_missing:
+                row=db.get(Listing,pk);row.catalog_notice='目录暂不可用，已使用卖家商品资料；原目录资料保留。';row.catalog_checked_at=now()
+            return pk
     except AmazonError as e:
         with Session.begin() as db:
             row=db.scalar(select(Listing).where(Listing.store==store,Listing.marketplace==market,Listing.sku==sku))
@@ -112,11 +118,11 @@ def detail(db,row):
     other=[v for k,v in fields.items() if k not in seen]
     if other:groups.append({'key':'other','title':'其他属性','fields':other})
     draft=db.get(ListingDraft,row.id);diff=draft_diff(row,draft,fields)
-    return dict(summary(row,draft),edit_fields=editor_fields(row,template),submissions=[result(s) for s in db.scalars(select(ListingSubmission).where(ListingSubmission.listing_pk==row.id).order_by(ListingSubmission.created_at.desc()).limit(20))],attributes=row.attributes,listing_data=row.listing_data,catalog_data=row.catalog_data,catalog_synced_at=row.catalog_synced_at,catalog_error=row.catalog_error,template_error=row.template_error,version=row.version,common_fields=[fields[k] for k in common_names if k in fields],groups=groups,template={'version':template.version,'fetched_at':template.fetched_at,'locale':template.locale,'property_count':len(schema.get('properties',{})),'base_required':schema.get('required',[])} if template else None,draft={'revision':draft.revision,'saved_at':draft.saved_at,'changes':draft.changes,'diff':diff} if draft else None,events=[{'id':e.id,'action':e.action,'detail':e.detail,'created_at':e.created_at} for e in db.scalars(select(ListingEvent).where(ListingEvent.listing_pk==row.id).order_by(ListingEvent.id.desc()).limit(30))])
+    return dict(summary(row,draft),edit_fields=editor_fields(row,template),submissions=[result(s) for s in db.scalars(select(ListingSubmission).where(ListingSubmission.listing_pk==row.id).order_by(ListingSubmission.created_at.desc()).limit(20))],attributes=row.attributes,listing_data=row.listing_data,catalog_data=row.catalog_data,catalog_synced_at=row.catalog_synced_at,catalog_error=row.catalog_error,catalog_notice=row.catalog_notice,catalog_checked_at=row.catalog_checked_at,template_error=row.template_error,version=row.version,common_fields=[fields[k] for k in common_names if k in fields],groups=groups,template={'version':template.version,'fetched_at':template.fetched_at,'locale':template.locale,'property_count':len(schema.get('properties',{})),'base_required':schema.get('required',[])} if template else None,draft={'revision':draft.revision,'saved_at':draft.saved_at,'changes':draft.changes,'diff':diff} if draft else None,events=[{'id':e.id,'action':e.action,'detail':e.detail,'created_at':e.created_at} for e in db.scalars(select(ListingEvent).where(ListingEvent.listing_pk==row.id).order_by(ListingEvent.id.desc()).limit(30))])
 
 def summary(row,draft=None):
     market_summary=next((s for s in row.listing_data.get('summaries',[]) if s.get('marketplaceId')==MARKETS[row.marketplace]),{})
-    return {**{k:getattr(row,k) for k in ['id','store','marketplace','sku','asin','product_type','title','brand','image_url','synced_at','sync_error']},'fnsku':market_summary.get('fnSku') or None,'statuses':market_summary.get('status',[]),'issue_count':len(row.listing_data.get('issues',[])),'has_draft':bool(draft and draft.changes),'attribute_count':len(row.attributes)}
+    return {**{k:getattr(row,k) for k in ['id','store','marketplace','sku','asin','product_type','title','brand','image_url','synced_at','sync_error']},'fnsku':market_summary.get('fnSku') or None,'statuses':market_summary.get('status',[]),'buyable':('BUYABLE' in market_summary['status']) if isinstance(market_summary.get('status'),list) else None,'issue_count':len(row.listing_data.get('issues',[])),'has_draft':bool(draft and draft.changes),'attribute_count':len(row.attributes)}
 
 class DraftError(Exception):pass
 class DraftConflict(DraftError):pass

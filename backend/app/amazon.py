@@ -11,6 +11,7 @@ _tokens={}
 from collections import defaultdict
 _locks=defaultdict(threading.Lock)
 class AmazonError(Exception): pass
+class OrderCursorExpired(AmazonError): pass
 
 def token(store):
     s=STORES[store]
@@ -68,6 +69,15 @@ def search_orders(store,start,end,markets,cursor=None,mode='incremental',heartbe
             if not isinstance(data.get('orders'),list):raise AmazonError('订单返回结构不完整，未推进同步时间。')
             return data
         code=r.status_code if r is not None else 0
+        if code==400 and cursor:
+            # Only explicit pagination errors permit a segment replay, never arbitrary 400s.
+            try:errors=r.json().get('errors',[])
+            except (ValueError,AttributeError):errors=[]
+            if isinstance(errors,list) and any(isinstance(e,dict) and (
+                str(e.get('code','')).lower() in ('invalidpaginationtoken','expiredpaginationtoken') or
+                ('pagination' in str(e.get('message','')).lower() and any(word in str(e.get('message','')).lower() for word in ('expired','invalid','not valid')))
+            ) for e in errors):raise OrderCursorExpired('订单分页位置已失效，需要从当前分段开始重新读取。')
+
         if code==401:_tokens.pop(store,None)
         elif code not in (0,429,500,502,503,504):
             raise AmazonError(f'订单接口拒绝请求（HTTP {code}）；请检查订单读取权限或查询范围。')

@@ -6,9 +6,9 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter,HTTPException,Query
 from pydantic import BaseModel,ConfigDict
 from typing import Literal
-from sqlalchemy import select,text,func
+from sqlalchemy import select,text,func,update
 from .db import Session
-from .models import now,SyncJob,FinanceJob,FbaJob,StoreInventory,AdsProfile,AdsSync
+from .models import now,SyncJob,FinanceJob,FbaJob,FbaWork,StoreInventory,AdsProfile,AdsSync
 from .operations_models import ListingSyncJob
 from .data_sync_models import DataSyncConfig as Config,DataSyncRun as Run
 from .auth import require_store,allowed_stores,principal
@@ -31,6 +31,7 @@ class Schedule(Body):
  interval_minutes:Literal[1440,720,360,60,30,10,5]=1440
  enabled:bool=False
  revision:int=0
+class Resume(Body):run_id:str
 class Start(Body):days:Literal[1,7,14,30,90,180,365]=30
 
 def readiness(store,kind):
@@ -56,7 +57,7 @@ def settings(store:str):
   rows=[]
   for kind,label in KINDS.items():
    c=db.get(Config,(store,kind));latest=db.scalar(select(Run).where(Run.store==store,Run.kind==kind).order_by(Run.created_at.desc()).limit(1));ready,message=readiness(store,kind)
-   rows.append({'kind':kind,'label':label,'note':NOTES[kind],'ready':ready,'message':message,'days':c.days if c else 30,'interval_minutes':c.interval_minutes if c else 1440,'enabled':c.enabled if c else False,'revision':c.revision if c else 0,'next_run_at':c.next_run_at if c else None,'last_success_at':c.last_success_at if c else None,'error':c.error if c else None,'latest':public(latest) if latest else None,'active':bool(latest and latest.status in ACTIVE) or legacy_active(db,store,kind)})
+   rows.append({'kind':kind,'label':label,'note':NOTES[kind],'ready':ready,'message':message,'days':c.days if c else 30,'interval_minutes':c.interval_minutes if c else 1440,'enabled':c.enabled if c else False,'revision':c.revision if c else 0,'next_run_at':c.next_run_at if c else None,'last_success_at':c.last_success_at if c else None,'error':c.error if c else None,'latest':public(latest) if latest else None,'active':db.scalar(select(Run.id).where(Run.store==store,Run.kind==kind,Run.status.in_(ACTIVE)).limit(1)) is not None or legacy_active(db,store,kind)})
   from .order_sync_progress import progress
   next(row for row in rows if row['kind']=='orders')['progress']=progress(db,store)
   return {'rows':rows,'days':DAYS,'intervals':INTERVALS}
@@ -93,6 +94,80 @@ def initialize(store:str,kind:Kind,b:Start):
  if not ready:raise HTTPException(422,message)
  with Session.begin() as db:
   r=create(db,store,kind,b.days,'initialize',principal.get()['username']);audit(db,'data_sync_initialize',store,{'kind':kind,'days':b.days,'run_id':r.id});return public(r)
+@router.post('/{store}/{kind}/resume')
+def resume(store:str,kind:Kind,b:Resume):
+ require_store(store)
+ # Same gate as the coordinator: an old worker must finish before resumption.
+ gate=redis.lock('erp:data-sync:'+b.run_id,timeout=900,blocking_timeout=0)
+ if not gate.acquire(blocking=False):raise HTTPException(409,'任务正在更新，请稍后刷新再试')
+ try:
+  with Session.begin() as db:
+   lock(db,store,kind)
+   r=db.get(Run,b.run_id)
+   if not r or r.store!=store or r.kind!=kind:raise HTTPException(404,'同步任务不存在')
+   if r.status!='failed':raise HTTPException(409,'只有失败任务可以继续同步，请刷新查看最新状态')
+   if db.scalar(select(Run.id).where(Run.store==store,Run.kind==kind,Run.status.in_(ACTIVE))) or legacy_active(db,store,kind):raise HTTPException(409,'该店铺此类数据已有任务，完成后再继续')
+   ready,message=readiness(store,kind)
+   if not ready:raise HTTPException(422,message)
+   if kind=='mail' and r.plans:
+    from .mail_models import MailConnection
+    connection=db.get(MailConnection,store)
+    if not connection or r.plans[0].get('revision')!=connection.revision:raise HTTPException(409,'邮箱授权已变更，请重新初始化')
+   plans=copy.deepcopy(r.plans)
+   # Do not queue every child here: the coordinator resumes them one at a time.
+   if kind not in ('sta','mail'):
+    for p in plans:
+     if p.get('status')!='succeeded':p['status']='retry_pending';p['error']=None
+   previous_error=r.error
+   r.plans=plans;r.status='queued';r.error=None;r.finished_at=None
+   c=db.get(Config,(store,kind))
+   if c:c.error=None
+   audit(db,'data_sync_resume',store,{'kind':kind,'run_id':r.id,'previous_error':previous_error,'completed':sum(p.get('status')=='succeeded' for p in plans),'total':len(plans)})
+   return public(r)
+ finally:
+  try:gate.release()
+  except Exception:pass
+
+
+def resume_child(r,p):
+ """Requeue one existing checkpoint without resetting its immutable query range."""
+ if not p.get('id'):return launch(r,p)
+ if r.kind=='inventory':
+  # Inventory is an atomic current snapshot; it has no durable page cursor.
+  from .store_inventory import queue
+  queue(r.store);return r.store
+ model={'orders':SyncJob,'finance':FinanceJob,'shipments':FbaJob,'listing':ListingSyncJob,'advertising':AdsSync}[r.kind]
+ key={'orders':'sync:','finance':'finance:','shipments':'fba:','listing':'listing-scan:','advertising':'ads:'}[r.kind]+(p['profile_id'] if r.kind=='advertising' else r.store)
+ with Session.begin() as db:
+  db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:k))'),{'k':key})
+  child=db.get(model,p['id'])
+  if child:
+   if r.kind=='advertising':
+    profile=db.get(AdsProfile,child.profile_id)
+    if not profile or profile.account!=r.store or child.profile_id!=p['profile_id']:raise HTTPException(409,'广告子任务与原店铺不一致')
+    scope=model.profile_id==child.profile_id
+   else:
+    if child.store!=r.store:raise HTTPException(409,'子任务与原店铺不一致')
+    scope=model.store==r.store
+   if child.status in ['succeeded',*ACTIVE,'waiting']:return child.id
+   if db.scalar(select(model.id).where(scope,model.id!=child.id,model.status.in_([*ACTIVE,'waiting']))):return None
+   if r.kind=='shipments':
+    db.execute(update(FbaWork).where(FbaWork.job_id==child.id,FbaWork.status=='failed').values(status='pending',error=None))
+    if child.mode=='ids' and not child.failed:child.phase='discovery';child.cursor=None;child.market_index=0
+    child.failed=0
+   if r.kind=='advertising':
+    data=copy.deepcopy(child.data)
+    # Completed report results remain; failed reports get a new report request.
+    data['reports']={k:v for k,v in data.get('reports',{}).items() if v.get('status') not in ('FAILED','FAILURE')}
+    child.data=data
+    if child.phase=='complete':child.phase='reports'
+    child.updated_at=now()
+   else:child.finished_at=None;child.heartbeat_at=None
+   child.status='queued';child.error=None
+   return child.id
+ # Missing child can be reconstructed using its original deterministic ID/range.
+ return launch(r,p)
+
 @router.get('/runs')
 def runs(store:str,page:int=Query(1,ge=1),page_size:int=Query(30,ge=1,le=100),paginated:bool=False):
  require_store(store)
@@ -198,7 +273,7 @@ def advance(rid):
     j=db.get(Run,rid);j.status='succeeded';j.finished_at=now();j.error=None
     c=db.get(Config,(r.store,r.kind))
     if not c:c=Config(store=r.store,kind=r.kind,days=r.days,enabled=False);db.add(c)
-    c.watermark=r.end_at;c.last_success_at=j.finished_at;c.error=None
+    c.watermark=max(c.watermark or r.end_at,r.end_at);c.last_success_at=j.finished_at;c.error=None
    return
   if not r.plans:
    plans=make_plans(r)
@@ -208,6 +283,10 @@ def advance(rid):
   execution=sorted(plans,key=lambda p:(bool(p.get('id')),p['end']),reverse=True) if r.kind=='orders' and r.mode=='initialize' else plans
   for p in execution:
    if p.get('status') in ('succeeded','failed','partial'):continue
+   if p.get('status')=='retry_pending':
+    resumed=resume_child(r,p)
+    if not resumed:return
+    p['id']=resumed
    if not p.get('id'):
     p['id']=launch(r,p)
     if not p['id']:return

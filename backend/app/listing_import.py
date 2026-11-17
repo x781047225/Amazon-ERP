@@ -40,7 +40,7 @@ def save_page(store,market,items):
                 from .listing_business import parse_dt
                 if parse_dt(old_summary['lastUpdatedDate'])>parse_dt(summary['lastUpdatedDate']):skus.append(data['sku']);continue
             template=db.scalar(select(ListingTemplate).where(ListingTemplate.store==store,ListingTemplate.marketplace==market,ListingTemplate.product_type==pt,ListingTemplate.locale==remote.LOCALES[market]).order_by(ListingTemplate.fetched_at.desc()).limit(1))
-            pk=service.save_listing(db,store,market,data,catalog_error=existing.catalog_error if existing and existing.catalog_data else '目录信息待同步',template_error=None if template else '品类模板待同步')
+            pk=service.save_listing(db,store,market,data,catalog_error=existing.catalog_error if existing and (existing.catalog_data or existing.catalog_checked_at) else '目录信息待同步',template_error=None if template else '品类模板待同步')
             row=db.get(Listing,pk)
             if template:row.template_id=template.id
             skus.append(data['sku'])
@@ -117,7 +117,7 @@ def ensure_template(store,market,pt):
         for row in db.scalars(select(Listing).where(Listing.store==store,Listing.marketplace==market,Listing.product_type==pt)):row.template_id=t.id;row.template_error=None
     return 'downloaded'
 
-def catalog_batch(store,market,asins):
+def catalog_batch(store,market,asins,refresh_seller=False):
     params={'marketplaceIds':MARKETS[market],'identifiers':','.join(asins),'identifiersType':'ASIN','includedData':CATALOG_DATASETS,'pageSize':20,'locale':remote.LOCALES[market]}
     result={};tokens=set()
     while True:
@@ -132,15 +132,32 @@ def catalog_batch(store,market,asins):
         if cursor in tokens:raise AmazonError('目录分页重复。')
         tokens.add(cursor);params['pageToken']=cursor
     # Some ASINs do not appear in catalog search; verify individually before recording a gap.
-    errors={}
+    errors={};missing=set()
     for asin in set(asins)-set(result):
         try:
             item=remote.get_json(store,'/catalog/2022-04-01/items/'+quote(asin,safe=''),{'marketplaceIds':MARKETS[market],'includedData':CATALOG_DATASETS,'locale':remote.LOCALES[market]},'catalog')
             if item.get('asin')!=asin or not any(s.get('marketplaceId')==MARKETS[market] for s in item.get('summaries',[])):raise AmazonError('目录身份不完整。')
             result[asin]=item
+        except remote.CatalogNotFound:missing.add(asin)
         except AmazonError as e:errors[asin]=str(e)
+    # The scan already read seller attributes and status. A detail-page request
+    # reads that same seller API now, without inventing catalog values or status.
+    if refresh_seller and missing:
+        with Session() as db:targets=[(r.id,r.sku,r.asin) for r in db.scalars(select(Listing).where(Listing.store==store,Listing.marketplace==market,Listing.asin.in_(missing)))]
+        for pk,sku,asin in targets:
+            try:
+                data=remote.listing(store,market,sku)
+                summary,_=service.identify(data,market)
+                if summary.get('asin')!=asin:raise AmazonError('卖家商品身份已变化，请刷新完整商品后重试。')
+                with Session.begin() as db:
+                    row=db.get(Listing,pk)
+                    if row and row.asin==asin:service.save_listing(db,store,market,data,catalog_error=None,template_error=row.template_error)
+            except AmazonError as e:errors[asin]=str(e)
     with Session.begin() as db:
         for row in db.scalars(select(Listing).where(Listing.store==store,Listing.marketplace==market,Listing.asin.in_(asins))):
-            if row.asin in result:row.catalog_data=result[row.asin];row.catalog_synced_at=now();row.catalog_error=None
+            if row.asin in result:
+                row.catalog_data=result[row.asin];row.catalog_synced_at=now();row.catalog_checked_at=now();row.catalog_error=None;row.catalog_notice=None
+            elif row.asin in missing and row.asin not in errors:
+                row.catalog_error=None;row.catalog_checked_at=now();row.catalog_notice='目录暂不可用，已使用卖家商品资料；原目录资料保留。'
             else:row.catalog_error=errors.get(row.asin,'目录信息未返回；保留原数据。')
-    return {'saved':len(result),'errors':errors}
+    return {'saved':len(result),'unavailable':len(missing-set(errors)),'errors':errors}

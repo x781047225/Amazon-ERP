@@ -172,6 +172,8 @@ class Listing(Base):
     catalog_synced_at=Column(DateTime(timezone=True))
     sync_error=Column(Text)
     catalog_error=Column(Text)
+    catalog_notice=Column(Text)
+    catalog_checked_at=Column(DateTime(timezone=True))
     template_error=Column(Text)
     __table_args__=(UniqueConstraint('store','marketplace','sku'),)
 class ListingDraft(Base):
@@ -461,3 +463,5 @@ from .store_credentials import StoreCredential
 from .data_sync_models import DataSyncConfig,DataSyncRun
 
 from .mail_models import MailApplication,MailConnection,MailMessage
+
+from .todo_models import Todo,TodoEvent,TodoImage,TodoCc

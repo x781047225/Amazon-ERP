@@ -82,10 +82,15 @@ def load_catalog(pk:int):
         row=db.get(Listing,pk)
         if not row:raise HTTPException(404,'Listing 不存在')
         store,market,asin=row.store,row.marketplace,row.asin
+        # Cache only a verified absence; authorization/network errors remain visible.
+        from datetime import timedelta
+        from .models import now
+        cached_missing=bool(row.catalog_notice and not row.catalog_error and row.catalog_checked_at and row.catalog_checked_at>now()-timedelta(hours=24))
+    if cached_missing:return get_detail(pk)
     if not asin:raise HTTPException(422,'商品尚未返回 ASIN，无法读取目录信息')
     from .listing_import import catalog_batch
     try:
-        result=catalog_batch(store,market,[asin])
+        result=catalog_batch(store,market,[asin],refresh_seller=True)
         if result['errors']:raise AmazonError(result['errors'].get(asin,'目录信息未返回'))
     except AmazonError as e:
         with Session.begin() as db:

@@ -88,3 +88,51 @@ def test_history_backfill_does_not_advance_incremental_cursor():
     jid,_=create_job('DemoStoreC',['DE'],30,'history')
     with patch('app.amazon.redis.lock',return_value=Lock()),patch('app.amazon.search_orders',return_value={'orders':[]}):run_job(jid)
     with Session() as db:assert db.scalar(select(func.count()).select_from(SyncState))==0
+
+
+def test_expired_cursor_replays_only_original_segment_and_deduplicates():
+    from app.amazon import OrderCursorExpired
+    jid,_=create_job('DemoStoreC',['DE'],30,'history');seed()
+    with Session.begin() as db:
+        j=db.get(SyncJob,jid);j.cursor='expired';j.processed=100;j.pages=1;bounds=(j.start_at,j.end_at)
+    with patch('app.amazon.redis.lock',return_value=Lock()),patch('app.amazon.search_orders',side_effect=[OrderCursorExpired('expired'),{'orders':[order()]}]) as read:run_job(jid)
+    assert [c.args[4] for c in read.call_args_list]==['expired',None]
+    assert all(c.args[1:3]==bounds for c in read.call_args_list)
+    with Session() as db:
+        assert db.get(SyncJob,jid).status=='succeeded'
+        assert db.scalar(select(func.count()).select_from(Order))==1
+
+
+def test_expired_cursor_replay_is_bounded():
+    from app.amazon import OrderCursorExpired
+    jid,_=create_job('DemoStoreC',['DE'],30,'history')
+    with Session.begin() as db:db.get(SyncJob,jid).cursor='expired'
+    with patch('app.amazon.redis.lock',return_value=Lock()),patch('app.amazon.search_orders',side_effect=[OrderCursorExpired('expired'),{'orders':[],'pagination':{'nextToken':'another'}},OrderCursorExpired('expired again')]) as read:run_job(jid)
+    assert read.call_count==3
+    with Session() as db:assert db.get(SyncJob,jid).status=='failed' and db.get(SyncJob,jid).cursor=='another'
+
+
+def test_lost_lock_has_actionable_error_and_keeps_checkpoint():
+    from redis.exceptions import LockNotOwnedError
+    from unittest.mock import Mock
+    jid,_=create_job('DemoStoreC',['DE'])
+    with Session.begin() as db:db.get(SyncJob,jid).cursor='saved-page'
+    lock=Mock();lock.acquire.return_value=True;lock.extend.side_effect=LockNotOwnedError('test')
+    with patch('app.amazon.redis.lock',return_value=lock),patch('app.amazon.search_orders') as read:run_job(jid)
+    read.assert_not_called()
+    with Session() as db:
+        j=db.get(SyncJob,jid);assert j.cursor=='saved-page' and '继续同步' in j.error and j.status=='failed'
+
+
+def test_only_explicit_pagination_error_can_trigger_replay(monkeypatch):
+    from app import amazon
+    from unittest.mock import Mock
+    import pytest
+    monkeypatch.setattr(amazon.redis,'eval',lambda *a:0)
+    monkeypatch.setattr(amazon,'token',lambda store:'test-token')
+    response=Mock(ok=False,status_code=400);session=Mock();session.get.return_value=response
+    monkeypatch.setattr(amazon.requests,'Session',lambda:session)
+    for error,expected in [({'code':'InvalidInput','message':'paginationToken is invalid'},amazon.OrderCursorExpired),({'code':'InvalidInput','message':'Invalid date range'},amazon.AmazonError)]:
+        response.json.return_value={'errors':[error]}
+        with pytest.raises(expected) as exc:amazon.search_orders('DemoStoreC',now()-timedelta(days=1),now(),['DE'],'test-cursor')
+        assert type(exc.value) is expected

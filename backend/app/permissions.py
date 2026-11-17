@@ -6,7 +6,7 @@ from sqlalchemy import select
 from .db import Session
 from .access_models import Role,UserRole
 MENU={
- 'home':('首页',{}),'products':('产品管理',{'products':'产品信息','suppliers':'供应商','declaration':'报关资料','clearance':'清关资料'}),
+ 'home':('首页',{}),'todos':('待办事项',{}),'products':('产品管理',{'products':'产品信息','suppliers':'供应商','declaration':'报关资料','clearance':'清关资料'}),
  'listing':('Listing',{}),'orders':('订单中心',{}),
  'fba':('FBA货件',{'list':'货件列表','sta':'STA任务','invoice':'清关发票','declaration':'报关单'}),
  'procurement':('采购管理',{'plans':'采购计划','orders':'采购单'}),'shipping':('发货计划',{}),
@@ -53,6 +53,7 @@ def route_keys(path,query,body,method):
   return ['users.'+{'roles':'roles','catalog':'roles','tokens':'mcp','audit':'mcp'}.get(leaf,'users')]
  if path.startswith('/api/mail/'):
   return ['settings.mail'] if path.split('/')[3] in ('messages','message') else ['settings.stores']
+ if path.startswith('/api/todos'):return ['todos']
  if path.startswith('/api/users'):return ['users.users']
  if path=='/api/integration/capabilities':return ['listing','orders','fba.list','warehouse']
  if path.startswith('/api/customs/choices'):return ['products.products','products.declaration','products.clearance']
@@ -134,6 +135,7 @@ def enforce(request,p,body):
  action='view' if request.method in ('GET','HEAD','OPTIONS') else 'operate'
  # Read-only calculations still use POST, but do not modify business records.
  if path.endswith('/income-estimate') or path.endswith('/estimate') or path in ('/api/advertising/column-widths','/api/advertising/column-preferences'):action='view'
+ if path.startswith('/api/todos/') and path.endswith('/seen'):action='view'
  if keys==[]:return False
  if keys is None:
   if not p.get('is_admin'):raise HTTPException(403,'接口尚未授权')

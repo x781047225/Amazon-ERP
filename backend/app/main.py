@@ -31,6 +31,8 @@ async def validation_error(request,exc):
         return JSONResponse({'detail':'授权配置字段格式无效，请检查输入内容'},status_code=422)
     return await request_validation_exception_handler(request,exc)
 app.include_router(auth.router)
+from .todos import router as todos_router
+app.include_router(todos_router)
 app.add_middleware(TrustedHostMiddleware,allowed_hosts=['127.0.0.1','localhost','testserver',*LOCAL.get('http_allowed_hosts',[])])
 @app.middleware('http')
 async def local_write_guard(request:Request,call_next):
@@ -51,7 +53,7 @@ async def authenticate(request:Request,call_next):
     if not p or (path=='/mcp' and not p.get('token_id')):return JSONResponse({'detail':'凭证无效、已过期或已撤销'},status_code=401,headers={'WWW-Authenticate':'Bearer'})
     scope=auth.principal.set(p);grant=permissions.operation_grant.set(False);audit_id=None;status=500
     try:
-        try:body=await request.json() if request.method not in ('GET','HEAD','OPTIONS') else {}
+        try:body=await request.json() if request.method not in ('GET','HEAD','OPTIONS') and path!='/api/todos/images' else {}
         except Exception:body={}
         if p.get('token_id') and request.method not in ('GET','HEAD','OPTIONS') and path!='/mcp':audit_id=access.begin_token_audit(p,request,body)
         if path!='/mcp':permissions.operation_grant.set(permissions.enforce(request,p,body if isinstance(body,dict) else {}))

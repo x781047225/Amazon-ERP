@@ -252,3 +252,188 @@ def test_finished_initialization_can_be_started_again(gate):
  row=next(x for x in client.get(BASE+'?store=DemoStoreB').json()['rows'] if x['kind']=='orders')
  assert row['latest']['status']=='succeeded' and not row['active'] and row['last_success_at']
  assert post('/DemoStoreB/orders/initialize',{'days':1}).status_code==200
+
+
+def fail_all(r):
+ plans=sync.make_plans(r)
+ for p in plans:
+  jid=sync.launch(r,p);p.update(id=jid,status='failed',error='test failure')
+  model={'orders':SyncJob,'finance':FinanceJob,'shipments':FbaJob,'listing':ListingSyncJob}[r.kind]
+  with Session.begin() as db:
+   child=db.get(model,jid);child.status='failed';child.error='test failure';child.finished_at=now()
+ with Session.begin() as db:
+  row=db.get(Run,r.id);row.plans=plans;row.status='failed';row.error='test failure';row.finished_at=now()
+ return plans
+
+
+def test_resume_preserves_11_of_13_and_sequential_checkpoints(gate):
+ r=run('orders',365);plans=fail_all(r)
+ with Session.begin() as db:
+  row=db.get(Run,r.id)
+  for p in plans[2:]:
+   p['status']='succeeded';p['error']=None;db.get(SyncJob,p['id']).status='succeeded'
+  row.plans=plans
+  for p in plans[:2]:
+   child=db.get(SyncJob,p['id']);child.cursor='saved-page';child.pages=17;child.processed=1700
+ result=post('/DemoStoreB/orders/resume',{'run_id':r.id})
+ assert result.status_code==200 and result.json()['completed']==11 and result.json()['total']==13
+ assert result.json()['id']==r.id and result.json()['status']=='queued'
+ assert post('/DemoStoreB/orders/resume',{'run_id':r.id}).status_code==409
+ with Session() as db:
+  row=db.get(Run,r.id);assert row.days==365 and (row.start_at,row.end_at)==(r.start_at,r.end_at)
+  assert row.plans[2:]==plans[2:] and row.plans[0]['id']==plans[0]['id']
+  assert len(list(db.scalars(select(Run))))==1
+  assert not list(db.scalars(select(SyncJob).where(SyncJob.status=='queued')))
+ sync.advance(r.id)
+ with Session() as db:
+  jobs=list(db.scalars(select(SyncJob).where(SyncJob.status=='queued')));assert len(jobs)==1
+  first=jobs[0];assert first.id==plans[1]['id'] and first.cursor=='saved-page' and first.pages==17 and first.processed==1700
+  assert db.get(SyncJob,plans[0]['id']).status=='failed'
+ with Session.begin() as db:db.get(SyncJob,first.id).status='succeeded'
+ sync.advance(r.id)
+ with Session() as db:
+  assert db.get(Run,r.id).status=='running' and db.get(SyncJob,plans[0]['id']).status=='queued'
+  assert db.get(Config,('DemoStoreB','orders')) is None
+ with Session.begin() as db:db.get(SyncJob,plans[0]['id']).status='succeeded'
+ sync.advance(r.id)
+ with Session() as db:
+  row=db.get(Run,r.id);assert row.status=='succeeded' and all(p['status']=='succeeded' for p in row.plans)
+  assert db.get(Config,('DemoStoreB','orders')).watermark==r.end_at
+  assert db.get(Config,('DemoStoreB','orders')).last_success_at
+  assert len(list(db.scalars(select(SyncJob))))==13
+
+
+@pytest.mark.parametrize('status',['queued','running','succeeded','partial'])
+def test_resume_only_failed_status(gate,status):
+ r=run()
+ with Session.begin() as db:db.get(Run,r.id).status=status
+ assert post('/DemoStoreB/orders/resume',{'run_id':r.id}).status_code==409
+
+
+def test_resume_requires_scope_permission_original_kind_and_no_other_job(gate,monkeypatch):
+ r=run();fail_all(r)
+ assert post('/DemoStoreA/orders/resume',{'run_id':r.id}).status_code==404
+ assert post('/DemoStoreB/finance/resume',{'run_id':r.id}).status_code==404
+ assert post('/DemoStoreB/orders/resume',{'run_id':'missing'}).status_code==404
+ from app import auth
+ principal={'id':1,'username':'reader','is_admin':False,'stores':['DemoStoreB'],'permissions':['settings.view','settings.sync-data.view'],'warehouse_ids':[]}
+ monkeypatch.setattr(auth,'resolve_session',lambda req:principal)
+ assert post('/DemoStoreB/orders/resume',{'run_id':r.id}).status_code==403
+ principal['permissions'].append('settings.sync-data.operate')
+ assert post('/DemoStoreA/orders/resume',{'run_id':r.id}).status_code==403
+ active=run()
+ assert post('/DemoStoreB/orders/resume',{'run_id':r.id}).status_code==409
+ with Session() as db:assert db.get(Run,r.id).status=='failed'
+
+
+def test_resume_coordinator_gate_and_no_partial_reset(gate):
+ r=run();plans=fail_all(r);gate.acquire.return_value=False
+ assert post('/DemoStoreB/orders/resume',{'run_id':r.id}).status_code==409
+ with Session() as db:assert db.get(Run,r.id).plans==plans
+
+
+def test_resume_preparation_failure_and_missing_child(gate):
+ r=run('orders',7)
+ with Session.begin() as db:db.get(Run,r.id).status='failed'
+ assert post('/DemoStoreB/orders/resume',{'run_id':r.id}).status_code==200
+ sync.advance(r.id)
+ with Session.begin() as db:
+  row=db.get(Run,r.id);child=row.plans[0]['id'];db.delete(db.get(SyncJob,child));row.status='failed'
+ assert post('/DemoStoreB/orders/resume',{'run_id':r.id}).status_code==200
+ sync.advance(r.id)
+ with Session() as db:assert db.get(SyncJob,child).start_at==r.start_at
+
+
+def test_historical_resume_visible_as_active_even_with_newer_success(gate):
+ r=run();fail_all(r)
+ newer=run()
+ with Session.begin() as db:db.get(Run,newer.id).status='succeeded'
+ assert post('/DemoStoreB/orders/resume',{'run_id':r.id}).status_code==200
+ row=next(x for x in client.get(BASE+'?store=DemoStoreB').json()['rows'] if x['kind']=='orders')
+ assert row['latest']['id']==newer.id and row['active']
+ assert post('/DemoStoreB/orders/initialize',{'days':365}).status_code==409
+
+
+@pytest.mark.parametrize('kind,model',[('finance',FinanceJob),('listing',ListingSyncJob),('shipments',FbaJob)])
+def test_other_children_resume_existing_checkpoints(gate,kind,model):
+ from app.models import FbaWork
+ r=run(kind,7);plans=fail_all(r);jid=plans[0]['id']
+ with Session.begin() as db:
+  child=db.get(model,jid)
+  if kind=='finance':child.cursor='finance-page';child.pages=4;child.tokens=['old-page-hash']
+  if kind=='listing':child.progress={'market':'DE','completed':5}
+  if kind=='shipments':
+   child.market_index=2;child.phase='items';child.failed=1;child.processed=1
+   db.add_all([FbaWork(job_id=jid,shipment_id='TEST-DONE',metadata_json={},markets=['DE'],status='done'),FbaWork(job_id=jid,shipment_id='TEST-FAIL',metadata_json={},markets=['DE'],status='failed')])
+ assert post(f'/DemoStoreB/{kind}/resume',{'run_id':r.id}).status_code==200
+ sync.advance(r.id)
+ with Session() as db:
+  child=db.get(model,jid);assert child.status=='queued'
+  if kind=='finance':assert child.cursor=='finance-page' and child.pages==4 and child.tokens==['old-page-hash']
+  if kind=='listing':assert child.progress=={'market':'DE','completed':5}
+  if kind=='shipments':
+   assert child.market_index==2 and child.phase=='items' and child.failed==0 and child.processed==1
+   assert list(db.scalars(select(FbaWork.status).order_by(FbaWork.id)))==['done','pending']
+
+
+def test_resume_inventory_queues_current_snapshot(gate):
+ r=run('inventory');sync.advance(r.id)
+ with Session.begin() as db:
+  child=db.get(StoreInventory,r.store);child.status='failed';child.data={'DE':{'rows':[]}}
+ sync.advance(r.id)
+ assert post('/DemoStoreB/inventory/resume',{'run_id':r.id}).status_code==200
+ sync.advance(r.id)
+ with Session() as db:assert db.get(StoreInventory,r.store).status=='queued' and db.get(StoreInventory,r.store).data=={'DE':{'rows':[]}}
+
+
+def test_resume_advertising_keeps_successful_reports(monkeypatch,gate):
+ from app import ads_client
+ fake=Mock();fake.request.return_value=[{'profileId':111,'countryCode':'FR','currencyCode':'EUR','timezone':'Europe/Paris'}]
+ monkeypatch.setattr(ads_client,'Client',lambda **kw:fake)
+ monkeypatch.setattr(sync,'readiness',lambda *a:(True,''))
+ r=run('advertising',30);sync.advance(r.id)
+ with Session.begin() as db:
+  jid=db.get(Run,r.id).plans[0]['id'];child=db.get(AdsSync,jid);child.status='failed';child.phase='complete';child.data={'daily':True,'reports':{'ok':{'status':'COMPLETED','row_count':4},'bad':{'status':'FAILED','error':'failed report'}},'plans':[]}
+ sync.advance(r.id)
+ assert post('/DemoStoreB/advertising/resume',{'run_id':r.id}).status_code==200
+ sync.advance(r.id)
+ with Session() as db:
+  child=db.get(AdsSync,jid);assert child.status=='queued' and child.phase=='reports'
+  assert child.data['reports']=={'ok':{'status':'COMPLETED','row_count':4}}
+
+
+def test_resume_sta_keeps_inflight_plan_and_cursor(gate):
+ r=run('sta');state={'phase':1,'cursor':'saved-cursor','pending':[{'inboundPlanId':'TEST-PLAN'}],'seen':['saved-cursor'],'processed':5,'status':'running'}
+ with Session.begin() as db:
+  row=db.get(Run,r.id);row.plans=[state];row.status='failed'
+ assert post('/DemoStoreB/sta/resume',{'run_id':r.id}).status_code==200
+ with Session() as db:assert db.get(Run,r.id).plans==[state]
+
+
+def test_resume_mail_retains_cursor_and_blocks_changed_authorization(gate,monkeypatch):
+ from app.mail_models import MailConnection
+ from app.store_credentials import encode
+ monkeypatch.setattr(sync,'readiness',lambda *a:(True,''))
+ r=run('mail');state={'cursor':'https://graph.microsoft.com/v1.0/me/messages?$skiptoken=test','revision':1,'read':50,'saved':10,'status':'running'}
+ with Session.begin() as db:
+  db.add(MailConnection(store=r.store,email='demo@example.com',account_id='test',encrypted=encode({}),connected=True,revision=2))
+  row=db.get(Run,r.id);row.plans=[state];row.status='failed'
+ assert post('/DemoStoreB/mail/resume',{'run_id':r.id}).status_code==409
+ with Session.begin() as db:db.get(MailConnection,r.store).revision=1
+ response=post('/DemoStoreB/mail/resume',{'run_id':r.id})
+ assert response.status_code==200 and 'skiptoken' not in response.text
+ with Session() as db:assert db.get(Run,r.id).plans==[state]
+
+
+def test_resume_old_sta_does_not_regress_watermark(gate,monkeypatch):
+ from app import sta_history
+ r=run('sta');latest=now()
+ with Session.begin() as db:
+  db.get(Run,r.id).status='failed'
+  db.add(Config(store=r.store,kind='sta',watermark=latest))
+ monkeypatch.setattr(sta_history,'advance',lambda r:True)
+ assert post('/DemoStoreB/sta/resume',{'run_id':r.id}).status_code==200
+ sync.advance(r.id)
+ with Session() as db:
+  assert db.get(Run,r.id).status=='succeeded'
+  assert db.get(Config,(r.store,'sta')).watermark==latest

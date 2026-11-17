@@ -5,6 +5,7 @@ from sqlalchemy import select, delete, text
 from .db import Session
 from .models import Order, Item, SyncJob, SyncState, now
 from . import amazon
+from redis.exceptions import LockNotOwnedError
 
 def dt(value):return datetime.fromisoformat(value.replace('Z','+00:00'))
 def scope(store,markets):return store+':'+','.join(sorted(markets))
@@ -54,6 +55,7 @@ def run_job(job_id):
     lock=amazon.redis.lock('erp:sync:'+store,timeout=240,blocking_timeout=0,thread_local=False)
     if not lock.acquire(blocking=False):return
     last_beat=0
+    cursor_restarted=False
     def heartbeat():
         nonlocal last_beat
         import time
@@ -70,7 +72,16 @@ def run_job(job_id):
         while True:
             heartbeat()
             with Session() as db:j=db.get(SyncJob,job_id)
-            data=amazon.search_orders(j.store,j.start_at,j.end_at,j.markets,j.cursor,j.mode,heartbeat)
+            try:data=amazon.search_orders(j.store,j.start_at,j.end_at,j.markets,j.cursor,j.mode,heartbeat)
+            except amazon.OrderCursorExpired:
+                if not j.cursor or cursor_restarted:raise
+                heartbeat()
+                with Session.begin() as db:
+                    current=db.get(SyncJob,job_id)
+                    current.cursor=None;current.pages=0;current.processed=0
+                cursor_restarted=True
+                print('Sync replaying expired cursor segment',job_id,flush=True)
+                continue
             next_token=(data.get('pagination') or {}).get('nextToken')
             if next_token and next_token==j.cursor:raise amazon.AmazonError('亚马逊返回重复分页标记，已停止以避免重复循环。')
             with Session.begin() as db:
@@ -88,7 +99,7 @@ def run_job(job_id):
     except Exception as error:
         with Session.begin() as db:
             j=db.get(SyncJob,job_id);j.status='failed';j.finished_at=now()
-            j.error=str(error) if isinstance(error,amazon.AmazonError) else '同步处理失败，进度已保留。请检查本地诊断记录。'
+            j.error='同步运行锁已失效，已保存的进度保留。请保持服务器运行，在同步数据中点击继续同步。' if isinstance(error,LockNotOwnedError) else str(error) if isinstance(error,amazon.AmazonError) else '同步处理失败，进度已保留。请检查本地诊断记录。'
         # Only exception class; never log request headers, credentials or order payloads.
         print('Sync failed',job_id,type(error).__name__,flush=True)
     finally:
