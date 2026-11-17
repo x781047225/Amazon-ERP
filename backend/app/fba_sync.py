@@ -114,6 +114,10 @@ def run_fba_job(job_id):
             heartbeat()
             with Session() as db:work=db.scalar(select(FbaWork).where(FbaWork.job_id==job_id,FbaWork.status=='pending').order_by(FbaWork.id))
             if work is None:break
+            if j.mode=='incremental' and work.metadata_json.get('ShipmentStatus') in ('CLOSED','CANCELLED','DELETED'):
+                with Session.begin() as db:
+                    db.get(FbaWork,work.id).status='done';db.get(FbaJob,job_id).processed+=1
+                continue
             try:
                 items=fba_amazon.all_items(store,work.shipment_id,work.markets[0],heartbeat)
                 with Session.begin() as db:
@@ -128,6 +132,8 @@ def run_fba_job(job_id):
                     if row:row.sync_error=message
                     db.get(FbaJob,job_id).failed+=1
                 print('FBA item sync failed',work.shipment_id,type(error).__name__,flush=True)
+                from .data_sync import stop_forbidden_message
+                if stop_forbidden_message(message):raise
         with Session.begin() as db:
             j=db.get(FbaJob,job_id)
             # Explicit-ID scans must never report silent success when not found.

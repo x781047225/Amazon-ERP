@@ -70,7 +70,7 @@ def test_sta_initial_history_idempotent_readonly_and_store_scope(monkeypatch):
  assert client.get('/api/sta/history/DemoStoreB/plan-1').status_code==403
  assert client.get('/api/sta').json()==[]
 
-def test_sta_initialize_range_and_scheduled_full_scan(monkeypatch):
+def test_sta_initialize_and_scheduled_ranges(monkeypatch):
  setup_remote(monkeypatch,old=True);r=make_run()
  while not sta_history.advance(r):pass
  with Session.begin() as db:
@@ -78,7 +78,7 @@ def test_sta_initialize_range_and_scheduled_full_scan(monkeypatch):
   db.get(DataSyncRun,r.id).status='succeeded'
  r=make_run('incremental')
  while not sta_history.advance(r):pass
- with Session() as db:assert db.get(AmazonInboundPlan,('DemoStoreB','plan-1')) is not None
+ with Session() as db:assert db.get(AmazonInboundPlan,('DemoStoreB','plan-1')) is None
 
 def test_sta_coordinator_error_keeps_watermark_and_success_advances(monkeypatch):
  gate=Mock();gate.acquire.return_value=True;monkeypatch.setattr(data_sync.redis,'lock',lambda *a,**k:gate)
@@ -102,3 +102,20 @@ def test_sta_pagination_checkpoint_hidden_and_repeat_rejected(monkeypatch):
  with Session() as db:
   saved=db.get(DataSyncRun,r.id);assert saved.plans[0]['cursor']=='private-cursor'
   assert 'private-cursor' not in str(data_sync.public(saved))
+
+
+def test_sta_incremental_skips_unchanged_plan_details(monkeypatch):
+ calls=setup_remote(monkeypatch);r=make_run()
+ while not sta_history.advance(r):pass
+ with Session.begin() as db:db.get(DataSyncRun,r.id).status='succeeded'
+ calls.clear();r=make_run('incremental')
+ while not sta_history.advance(r):pass
+ assert len(calls)==3 and all(path==sta_history.PATH for _,path,_ in calls)
+
+def test_sta_old_page_stops_pagination(monkeypatch):
+ r=make_run('incremental');calls=[]
+ def remote(*args,**kw):
+  calls.append(kw['params']);return {'inboundPlans':[{'inboundPlanId':'old','lastUpdatedAt':(now()-timedelta(days=100)).isoformat()}],'pagination':{'nextToken':'not-needed'}}
+ monkeypatch.setattr(sta_history,'call',remote)
+ while not sta_history.advance(r):pass
+ assert len(calls)==3 and all('paginationToken' not in p for p in calls)

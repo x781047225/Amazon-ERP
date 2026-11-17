@@ -1,6 +1,7 @@
 from .store_credentials import authorized_sp_stores
 from datetime import timedelta
 from celery import Celery
+from .task_delivery import UniqueDeliveryTask
 from celery.schedules import crontab
 import logging
 from sqlalchemy import select
@@ -9,7 +10,7 @@ from .db import Session
 from .models import FbaJob,ArrivalCache,now
 from .fba_sync import run_fba_job
 from .amazon import redis
-celery=Celery('erp_fba',broker=REDIS_URL,backend=REDIS_URL)
+celery=Celery('erp_fba',broker=REDIS_URL,backend=REDIS_URL,task_cls=UniqueDeliveryTask)
 celery.conf.update(task_default_queue='fba',task_serializer='json',accept_content=['json'],result_serializer='json',timezone='Asia/Shanghai',worker_prefetch_multiplier=1,task_acks_late=True,task_reject_on_worker_lost=True,broker_transport_options={'visibility_timeout':86400},result_expires=86400,beat_schedule={'dispatch-fba':{'task':'erp.fba.dispatch','schedule':20.0}})
 @celery.task(name='erp.fba.sync')
 def sync_task(job_id):

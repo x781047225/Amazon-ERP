@@ -293,6 +293,7 @@ class FinanceJob(Base):
 
 class StoreInventory(Base):
     __tablename__='store_inventory'
+    refresh_mode=Column(String(20),nullable=False,default='full',server_default='full')
     store=Column(String(40),primary_key=True)
     data=Column(JSONB,nullable=False,default=dict)
     status=Column(String(20),nullable=False,default='idle')

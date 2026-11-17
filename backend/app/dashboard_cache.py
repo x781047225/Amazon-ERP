@@ -1,4 +1,4 @@
-"""Durable historical cards, rebuilt after the overnight source jobs finish."""
+"""Durable historical cards, refreshed as imported source data changes."""
 from copy import deepcopy
 import hashlib,json
 from datetime import datetime,time
@@ -7,7 +7,7 @@ from sqlalchemy import select,func
 from sqlalchemy.dialects.postgresql import insert
 from fastapi.encoders import jsonable_encoder
 from .db import Session,engine
-from .models import SyncJob,FinanceJob,FeeQuote,Listing,now
+from .models import SyncJob,FinanceJob,FeeQuote,Listing,Order,FinanceTransaction,ExchangeRate,now
 from .product_data_models import DashboardCache as Cache
 from .operations_models import ListingSyncJob
 from .amazon import redis
@@ -31,6 +31,21 @@ def overnight_signature(db,store,at):
   if not job or job.status!='succeeded':return ''
   found.append(job.id)
  return '|'.join(found)
+def source_signature(db,store):
+ # A failed/unconfigured finance or Listing sync must not block imported orders.
+ # Include partial imports, since a completed segment is already usable locally.
+ values=[]
+ for model in (Order,FinanceTransaction):
+  count,stamp=db.execute(select(func.count(),func.max(model.synced_at)).where(model.store==store)).one()
+  values.append((count,str(stamp)))
+ for model in (SyncJob,FinanceJob,ListingSyncJob):
+  values.append(str(db.scalar(select(func.max(model.finished_at)).where(model.store==store,model.status=='succeeded'))))
+ values.extend((r.source,str(r.fetched_at)) for r in db.scalars(select(ExchangeRate).order_by(ExchangeRate.source)))
+ return hashlib.sha256(json.dumps(values).encode()).hexdigest()
+
+def outdated(payload,store,market,at,db):
+ return not payload or payload.get('_window')!=window_key(at,market) or payload.get('_source')!=source_signature(db,store) or bool(payload.get('_fees_pending') and not fees_pending(db,store))
+
 def register(store,market,currency,trend):
  key=key_for(store,market,currency,trend)
  with Session.begin() as db:
@@ -51,9 +66,9 @@ def refresh(key,at=None):
   with Session() as db:
    c=db.get(Cache,key)
    if not c:return
-   args=(c.store,c.marketplace,c.trend,c.currency);signature=overnight_signature(db,c.store,at)
+   args=(c.store,c.marketplace,c.trend,c.currency);signature=overnight_signature(db,c.store,at);source=source_signature(db,c.store)
   from .dashboard import calculate_dashboard
-  payload=jsonable_encoder(calculate_dashboard(*args,at_override=at));payload['cards'].pop('today',None);payload['_batch']=signature;payload['_window']=window_key(at,args[1])
+  payload=jsonable_encoder(calculate_dashboard(*args,at_override=at));payload['cards'].pop('today',None);payload['_batch']=signature;payload['_window']=window_key(at,args[1]);payload['_source']=source
   with Session.begin() as db:
    c=db.get(Cache,key);payload['_fees_pending']=fees_pending(db,c.store);c.payload=payload;c.period_day=period_day(at,c.marketplace);c.updated_at=now();c.error=None
  except Exception:
@@ -74,6 +89,5 @@ def dispatch():
  for store in STORES:
   for currency in ['EUR','GBP','CNY']:register(store,'',currency,'7')
  with Session() as db:
-  signatures={s:overnight_signature(db,s,at) for s in STORES}
-  keys=[c.key for c in db.scalars(select(Cache)) if signatures.get(c.store) and (not c.payload or c.payload.get('_window')!=window_key(at,c.marketplace) or c.payload.get('_batch')!=signatures[c.store] or c.payload.get('_fees_pending') and not fees_pending(db,c.store))]
+  keys=[c.key for c in db.scalars(select(Cache)) if outdated(c.payload,c.store,c.marketplace,at,db)]
  for key in keys:enqueue(key)

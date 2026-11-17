@@ -16,7 +16,7 @@ def stop(*args):
     if stopping:return
     stopping=True
     # Stop schedulers/API first, workers next, and storage last.
-    for group in [('api','scheduler','fba-scheduler'),('worker','fba-worker'),('redis',),('postgres',)]:
+    for group in [('api','scheduler','fba-scheduler'),('worker','fba-worker','control-worker','coordinator-worker','orders-worker','inventory-worker'),('redis',),('postgres',)]:
         selected=[(n,p) for n,p in children if n in group]
         for name,proc in selected:
             if proc.poll() is None:proc.terminate()
@@ -45,7 +45,11 @@ try:
         except Exception:time.sleep(1)
     else:raise RuntimeError('Database readiness timed out')
     subprocess.run([PY,'-m','alembic','upgrade','head'],cwd=ROOT/'backend',check=True)
+    from app.task_delivery import normalize_queues
+    print('Queue preparation:',normalize_queues(),flush=True)
     spawn('worker',[PY,'-m','celery','-A','app.tasks:celery','worker','--pool=threads','--concurrency=4','--loglevel=WARNING','--without-gossip','--without-mingle'],ROOT/'backend')
+    for queue,slots in [('control',2),('coordinator',2),('orders',4),('inventory',4)]:
+        spawn(queue+'-worker',[PY,'-m','celery','-A','app.tasks:celery','worker','-Q',queue,'--hostname',queue+'@%h','--pool=threads','--concurrency='+str(slots),'--loglevel=WARNING','--without-gossip','--without-mingle'],ROOT/'backend')
     spawn('scheduler',[PY,'-m','celery','-A','app.tasks:celery','beat','--loglevel=WARNING','--schedule',str(ROOT/'data/celerybeat-schedule')],ROOT/'backend')
     spawn('fba-worker',[PY,'-m','celery','-A','app.fba_tasks:celery','worker','-Q','fba','--hostname','fba@%h','--pool=threads','--concurrency=4','--loglevel=WARNING','--without-gossip','--without-mingle'],ROOT/'backend')
     spawn('fba-scheduler',[PY,'-m','celery','-A','app.fba_tasks:celery','beat','--loglevel=WARNING','--schedule',str(ROOT/'data/fba-celerybeat-schedule')],ROOT/'backend')

@@ -50,7 +50,7 @@ def shipment_page(store,market,mode,days,created_at,cursor=None,ids=None,heartbe
     params={'MarketplaceId':MARKETS[market]}
     if cursor:params.update(QueryType='NEXT_TOKEN',NextToken=cursor)
     elif mode=='ids':params.update(QueryType='SHIPMENT',ShipmentIdList=','.join(ids or []))
-    elif mode=='recent':params.update(QueryType='DATE_RANGE',ShipmentStatusList=','.join(STATUSES),LastUpdatedAfter=(created_at-timedelta(days=days)).isoformat(),LastUpdatedBefore=created_at.isoformat())
+    elif mode in ('recent','incremental'):params.update(QueryType='DATE_RANGE',ShipmentStatusList=','.join(STATUSES),LastUpdatedAfter=(created_at-timedelta(days=days)).isoformat(),LastUpdatedBefore=created_at.isoformat())
     else:params.update(QueryType='SHIPMENT',ShipmentStatusList=','.join(STATUSES))
     payload=read(store,'/fba/inbound/v0/shipments',params,'shipments',heartbeat)
     if not isinstance(payload.get('ShipmentData'),list):raise AmazonError('FBA 货件列表缺失，未推进分页。')

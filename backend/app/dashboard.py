@@ -124,13 +124,14 @@ def calculate_dashboard(store:str,marketplace:str='',trend:str='7',currency:str=
 
 
 @router.get('')
-def dashboard(store:str,marketplace:str='',trend:str='7',currency:str='EUR'):
+def dashboard(store:str,marketplace:str='',trend:str='7',currency:str='EUR',refresh:bool=False):
     require_store(store)
     if marketplace and marketplace not in ORDER_MARKETS:raise HTTPException(422,'站点无效')
     if currency not in ['GBP','EUR','CNY'] or trend not in ['7','14','30','6m','1y']:raise HTTPException(422,'统计参数无效')
     from . import dashboard_cache as cache
     at=now();key=cache.register(store,marketplace,currency,trend);saved=cache.read(key)
-    if not saved or not saved['payload']:
+    with Session() as db:needs_refresh=cache.outdated(saved['payload'] if saved else None,store,marketplace,at,db)
+    if refresh or needs_refresh:
         cache.refresh(key,at);saved=cache.read(key)
     if not saved or not saved['payload']:raise HTTPException(503,'历史统计正在计算，请稍后刷新')
     data=saved['payload'];base=[Order.store==store,Order.status.notin_(['CANCELLED','CANCELED']),Order.purchased_at<at]
@@ -142,9 +143,8 @@ def dashboard(store:str,marketplace:str='',trend:str='7',currency:str='EUR'):
         card['complete']=all(history_coverage(jobs,store,m,starts[m],ends[m]) for m in markets)
         data['cards']['today']=card;data['inventory']=inventory_snapshot(db,store,marketplace)[0]
         data['as_of']=db.scalar(select(func.max(Order.synced_at)).where(Order.store==store))
-        signature=cache.overnight_signature(db,store,at)
-    stale=data.get('_window')!=cache.window_key(at,marketplace) or bool(signature and signature!=data.get('_batch'))
-    if stale and signature:cache.enqueue(key)
-    data.pop('_batch',None);data.pop('_window',None);data.pop('_fees_pending',None)
+        stale=cache.outdated(data,store,marketplace,at,db)
+    if stale:cache.enqueue(key)
+    data.pop('_source',None);data.pop('_batch',None);data.pop('_window',None);data.pop('_fees_pending',None)
     data['history_cache']={'updated_at':saved['updated_at'],'period_day':saved['period_day'],'stale':stale,'error':saved['error']}
     return data

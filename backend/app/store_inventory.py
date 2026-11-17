@@ -1,5 +1,5 @@
 """Full marketplace stock snapshots, independent of the imported Listing catalog."""
-from datetime import timedelta
+from datetime import timedelta,datetime
 from fastapi import APIRouter
 from pydantic import BaseModel
 from sqlalchemy import select,text
@@ -10,19 +10,20 @@ from .amazon import redis,AmazonError
 from .listing_amazon import get_json
 from .auth import require_store
 router=APIRouter(prefix='/api/dashboard')
-def queue(store):
+def queue(store,incremental=False):
  require_store(store)
  with Session.begin() as db:
   db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':'store-stock:'+store})
   row=db.get(StoreInventory,store)
   if row is None:row=StoreInventory(store=store);db.add(row)
-  if row.status not in ['queued','running']:row.status='queued';row.error=None;row.attempted_at=now()
+  if row.status not in ['queued','running']:row.status='queued';row.error=None;row.attempted_at=now();row.refresh_mode='incremental' if incremental else 'full'
  return {'status':'queued'}
 class Refresh(BaseModel):store:str
 @router.post('/inventory/refresh')
 def refresh(body:Refresh):return queue(body.store)
-def fetch_market(store,market,heartbeat):
+def fetch_market(store,market,heartbeat,start=None):
  params={'details':'true','granularityType':'Marketplace','granularityId':MARKETS[market],'marketplaceIds':MARKETS[market]};records={};tokens=set()
+ if start:params['startDateTime']=start.isoformat()
  for _ in range(1000):
   d=get_json(store,'/fba/inventory/v1/summaries',params,'inventory');p=d.get('payload') or {}
   if (p.get('granularity') or {}).get('granularityId')!=MARKETS[market] or not isinstance(p.get('inventorySummaries'),list):raise AmazonError('库存返回站点或格式不完整')
@@ -50,10 +51,20 @@ def run(store):
   errors=[]
   for market in MARKETS:
    try:
-    rows=fetch_market(store,market,heartbeat)
+    requested_at=now()
+    with Session() as db:
+     snapshot=db.get(StoreInventory,store);previous=(snapshot.data or {}).get(market,{})
+     full_at=datetime.fromisoformat(previous['full_synced_at']) if previous.get('full_synced_at') else None
+     since=datetime.fromisoformat(previous['watermark'])-timedelta(minutes=2) if previous.get('watermark') else None
+     incremental=snapshot.refresh_mode=='incremental' and since is not None and full_at is not None and requested_at-full_at<timedelta(hours=4)
+    changes=fetch_market(store,market,heartbeat,since) if incremental else fetch_market(store,market,heartbeat)
+    rows=changes
+    if incremental:
+     merged={(x['sellerSku'],x['fnSku']):x for x in previous.get('rows',[])}
+     merged.update({(x['sellerSku'],x['fnSku']):x for x in changes});rows=list(merged.values())
     with Session.begin() as db:
-     r=db.get(StoreInventory,store);r.data={**r.data,market:{'rows':rows,'synced_at':now().isoformat()}}
-     by_sku={x['sellerSku']:x for x in rows}
+     r=db.get(StoreInventory,store);r.data={**r.data,market:{'rows':rows,'synced_at':now().isoformat(),'watermark':requested_at.isoformat(),'full_synced_at':previous['full_synced_at'] if incremental else requested_at.isoformat()}}
+     by_sku={x['sellerSku']:x for x in changes}
      for listing in db.scalars(select(Listing).where(Listing.store==store,Listing.marketplace==market)):
       data=by_sku.get(listing.sku)
       if data and data.get('asin')==listing.asin:
@@ -61,7 +72,10 @@ def run(store):
        if not inv:inv=ListingInventory(listing_pk=listing.id);db.add(inv)
        inv.data=data;inv.synced_at=now();inv.error=None
 
-   except AmazonError as e:errors.append(market+': '+str(e))
+   except AmazonError as e:
+    errors.append(market+': '+str(e))
+    from .data_sync import stop_forbidden_message
+    if stop_forbidden_message(str(e)):break
   with Session.begin() as db:
    r=db.get(StoreInventory,store);r.status='failed' if errors else 'succeeded';r.error='；'.join(errors) or None;r.heartbeat_at=now()
  except Exception:

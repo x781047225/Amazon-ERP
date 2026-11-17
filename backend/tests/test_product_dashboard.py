@@ -76,3 +76,30 @@ def test_partial_profit_remains_visible(monkeypatch):
  monkeypatch.setattr(overview_metrics,'order_values',lambda db,orders:{o.id:{'display_amount':'10','display_currency':'EUR','gross_profit':'3' if o.order_id=='0' else None,'amount_estimated':False} for o in orders})
  with Session() as db:r=overview_metrics.sales(db,[Order.store=='DemoStoreA'],at,'today',{'currency':'EUR','rates':{'EUR':'1'},'date':'2026-11-13'})
  assert r['order_profit']['amount']=='3.00' and r['known_profit_orders']==1 and r['unknown_profit_orders']==1 and r['profit_partial'] and r['order_margin']=='30.00'
+
+
+def test_currency_cache_refreshes_without_all_syncs_succeeding(monkeypatch):
+ from app import dashboard
+ from app.product_data_models import DashboardCache
+ at=datetime(2026,11,17,12,tzinfo=timezone.utc);monkeypatch.setattr(dashboard,'now',lambda:at)
+ with Session.begin() as db:db.add(ExchangeRate(source='ECB',rate_date='2026-11-17',rates={'EUR':'1','GBP':'0.8'}))
+ url='/api/dashboard?store=DemoStoreA&marketplace=DE&currency='
+ empty=client.get(url+'EUR');assert empty.status_code==200 and empty.json()['cards']['7']['orders']==0
+ with Session.begin() as db:
+  db.add(Order(store='DemoStoreA',order_id='demo-new',marketplace='DE',purchased_at=at-timedelta(days=1),updated_at=at,status='SHIPPED',quantity=3,amount=40,currency='GBP'))
+  db.add(FinanceJob(id='failed-finance',store='DemoStoreA',status='failed',start_at=at-timedelta(days=1),end_at=at,error='权限不足'))
+ gbp=client.get(url+'GBP');eur=client.get(url+'EUR');assert gbp.status_code==eur.status_code==200
+ for response in (gbp,eur):
+  card=response.json()['cards']['7'];assert card['units']==3 and card['orders']==1 and not response.json()['history_cache']['stale']
+ assert gbp.json()['cards']['7']['converted']['amount']=='40.00'
+ assert eur.json()['cards']['7']['converted']['amount']=='50.00'
+ with Session.begin() as db:
+  order=db.scalar(select(Order).where(Order.order_id=='demo-new'));order.amount=80
+ refreshed=client.get(url+'EUR&refresh=true');assert refreshed.json()['cards']['7']['converted']['amount']=='100.00'
+
+def test_dashboard_dispatch_refreshes_partial_sources(monkeypatch):
+ from app.product_data_models import DashboardCache
+ key=dashboard_cache.register('DemoStoreA','','EUR','7');queued=[]
+ monkeypatch.setattr(dashboard_cache,'enqueue',queued.append)
+ dashboard_cache.dispatch()
+ assert key in queued

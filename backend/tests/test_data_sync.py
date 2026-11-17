@@ -24,8 +24,11 @@ def gate(monkeypatch):
 def test_defaults_ranges_and_readiness():
  r=client.get(BASE+'?store=DemoStoreB');assert r.status_code==200
  d=r.json();assert len(d['rows'])==8 and d['days']==[1,7,14,30,90,180,365]
- assert d['intervals']==[1440,720,360,60,30,10,5]
+ assert d['intervals']==[1440,720,360,240,60,30,10,5,1]
  assert not any(x['enabled'] for x in d['rows'])
+ assert all(x['interval_minutes']==1440 for x in d['rows'])
+ assert post('/DemoStoreB/orders/schedule',{'interval_minutes':1}).status_code==422
+ assert post('/DemoStoreB/inventory/schedule',{'interval_minutes':1}).status_code==200
  assert next(x for x in d['rows'] if x['kind']=='advertising')['ready'] is False
  assert post('/DemoStoreB/advertising/initialize',{'days':30}).status_code==422
  assert post('/DemoStoreB/orders/initialize',{'days':2}).status_code==422
@@ -60,15 +63,16 @@ def test_initialize_duplicate_and_independent_kinds():
   assert db.get(Config,('DemoStoreB','orders')) is None
  assert len(client.get(BASE+'/runs?store=DemoStoreB').json())==2
 
-def test_tick_due_watermark_disabled_and_no_duplicate():
+def test_tick_due_watermark_disabled_and_no_duplicate(monkeypatch):
+ at=now().replace(hour=6);monkeypatch.setattr(sync,'now',lambda:at)
  past=now()-timedelta(days=10)
  with Session.begin() as db:
-  db.add(Config(store='DemoStoreB',kind='orders',days=30,interval_minutes=5,enabled=True,next_run_at=now()-timedelta(seconds=1),watermark=past))
+  db.add(Config(store='DemoStoreB',kind='orders',days=30,interval_minutes=5,enabled=True,next_run_at=at-timedelta(seconds=1),watermark=past))
   db.add(Config(store='DemoStoreB',kind='finance',enabled=False,next_run_at=now()-timedelta(days=1)))
  ids=sync.tick();assert len(ids)==1 and sync.tick()==ids
  with Session() as db:
-  r=db.get(Run,ids[0]);assert r.start_at==past-timedelta(hours=48) and r.mode=='incremental'
-  assert db.get(Config,('DemoStoreB','orders')).next_run_at>now()
+  r=db.get(Run,ids[0]);assert r.start_at==past-timedelta(minutes=10) and r.mode=='incremental'
+  assert db.get(Config,('DemoStoreB','orders')).next_run_at>at
   assert list(db.scalars(select(Run.kind)))==['orders']
 
 def test_due_missing_auth_records_failure_without_job():
@@ -111,7 +115,7 @@ def test_success_records_watermark_inventory_warning(gate):
  with Session.begin() as db:db.get(StoreInventory,'DemoStoreB').status='succeeded'
  sync.advance(r.id)
  with Session() as db:
-  j=db.get(Run,r.id);assert j.status=='succeeded' and '当前完整快照' in j.warning
+  j=db.get(Run,r.id);assert j.status=='succeeded' and '全量校准' in j.warning
   c=db.get(Config,('DemoStoreB','inventory'));assert c.watermark==r.end_at and c.last_success_at and not c.enabled
 
 def test_advertising_discovers_accounts_and_marks_limited_coverage(monkeypatch,gate):
@@ -164,7 +168,7 @@ def test_concurrent_legacy_listing_does_not_advance_wrong_range():
 def test_scheduled_shipments_refresh_all_statuses():
  with Session.begin() as db:r=sync.create(db,'DemoStoreB','shipments',30,'incremental','timer')
  jid=sync.launch(r,sync.make_plans(r)[0])
- with Session() as db:assert db.get(FbaJob,jid).mode=='all'
+ with Session() as db:assert db.get(FbaJob,jid).mode=='incremental'
 
 def test_scheduled_listing_refreshes_full_current_inventory():
  with Session.begin() as db:
@@ -437,3 +441,88 @@ def test_resume_old_sta_does_not_regress_watermark(gate,monkeypatch):
  with Session() as db:
   assert db.get(Run,r.id).status=='succeeded'
   assert db.get(Config,(r.store,'sta')).watermark==latest
+
+
+def test_new_initialization_clears_current_error_preserves_history():
+ with Session.begin() as db:
+  db.add(Config(store='DemoStoreB',kind='finance',error='旧的权限错误'))
+  db.add(Run(id='previous-failure',actor='tester',store='DemoStoreB',kind='finance',mode='initialize',days=1,status='failed',start_at=now()-timedelta(days=1),end_at=now(),plans=[],error='旧的权限错误',created_at=now()-timedelta(hours=1)))
+ response=post('/DemoStoreB/finance/initialize',{'days':1});assert response.status_code==200
+ row=next(r for r in client.get(BASE+'?store=DemoStoreB').json()['rows'] if r['kind']=='finance')
+ assert row['latest']['status']=='queued' and row['error'] is None and row['latest']['error'] is None
+ with Session() as db:
+  assert db.get(Config,('DemoStoreB','finance')).error is None
+  assert db.get(Run,'previous-failure').error=='旧的权限错误'
+
+def test_error_summary_and_schedule_explanation():
+ info=sync.error_info('权限不足（403）；权限不足（403）；网络暂不可用')
+ assert len(info['items'])==2 and info['items'][0]['count']==2 and '2 类' in info['summary']
+ assert '首次定时任务回溯已保存的 365 天' in sync.schedule_note('finance',Config(days=365))
+ assert '货件最近更新时间' in sync.schedule_note('shipments',None)
+
+@pytest.mark.parametrize('kind,overlap', [('orders',timedelta(minutes=10)),('finance',timedelta(days=1,minutes=10)),('mail',timedelta(hours=48,minutes=10))])
+def test_incremental_365_uses_successful_position_not_full_year(kind,overlap,monkeypatch):
+ at=now();watermark=at-timedelta(hours=12);monkeypatch.setattr(sync,'now',lambda:at)
+ with Session.begin() as db:
+  db.add(Config(store='DemoStoreB',kind=kind,days=365,watermark=watermark));db.flush()
+  r=sync.create(db,'DemoStoreB',kind,365,'incremental','tester')
+  assert r.start_at==watermark-overlap and r.end_at==at-timedelta(minutes=3)
+
+
+@pytest.mark.parametrize('kind,model,error', [
+ ('finance',FinanceJob,'财务接口权限不足（403），请授权后重试'),
+ ('orders',SyncJob,'订单接口拒绝请求（HTTP 403）；请检查读取权限'),
+])
+def test_first_forbidden_stops_remaining_segments_and_preserves_watermark(kind,model,error,gate):
+ watermark=now()-timedelta(days=400)
+ with Session.begin() as db:db.add(Config(store='DemoStoreB',kind=kind,watermark=watermark))
+ r=run(kind,365);sync.advance(r.id)
+ with Session.begin() as db:
+  child=db.scalar(select(model).where(model.store=='DemoStoreB'));child.status='failed';child.error=error
+ sync.advance(r.id);sync.advance(r.id)
+ with Session() as db:
+  job=db.get(Run,r.id);assert job.status=='failed' and job.finished_at
+  assert '403' in job.error and '本次任务已停止' in job.error
+  assert len(job.plans)==13 and sum(bool(p.get('id')) for p in job.plans)==1
+  assert len(list(db.scalars(select(model))))==1
+  assert db.get(Config,('DemoStoreB',kind)).watermark==watermark
+ # Explicit continuation retries the failed child first; it does not skip it.
+ assert post('/DemoStoreB/'+kind+'/resume',{'run_id':r.id}).status_code==200
+ sync.advance(r.id)
+ with Session.begin() as db:
+  child=db.scalar(select(model).where(model.store=='DemoStoreB'));assert child.status=='queued';child.status='succeeded';child.error=None
+ sync.advance(r.id)
+ with Session() as db:
+  job=db.get(Run,r.id);assert job.status=='running'
+  assert sum(p.get('status')=='succeeded' for p in job.plans)==1
+  assert len(list(db.scalars(select(model))))==2
+
+def test_finance_first_403_keeps_successful_page_and_stops_other_segments(monkeypatch,gate):
+ from app import finance
+ from app.amazon import AmazonError
+ fake=Mock();fake.return_value={'transactions':[],'nextToken':'test-page-2'}
+ calls=[]
+ def page(store,start,end,cursor,order_id):
+  calls.append(cursor)
+  if cursor:raise AmazonError('财务接口权限不足（403），请授权后重试')
+  return fake()
+ monkeypatch.setattr(finance,'page',page)
+ r=run('finance',365);sync.advance(r.id)
+ with Session() as db:child_id=db.get(Run,r.id).plans[0]['id']
+ finance.run_job(child_id);sync.advance(r.id)
+ with Session() as db:
+  job=db.get(Run,r.id);child=db.get(FinanceJob,child_id)
+  assert job.status=='failed' and len(list(db.scalars(select(FinanceJob))))==1
+  assert child.pages==1 and child.cursor=='test-page-2'
+ assert calls==[None,'test-page-2']
+
+def test_previously_recorded_403_blocks_new_segments(gate):
+ r=run('finance',365);sync.advance(r.id)
+ with Session.begin() as db:
+  j=db.get(Run,r.id);plans=j.plans;plans[0].update(status='failed',error='财务接口权限不足（403）')
+  from sqlalchemy.orm.attributes import flag_modified
+  flag_modified(j,'plans')
+ sync.advance(r.id)
+ with Session() as db:
+  assert db.get(Run,r.id).status=='failed'
+  assert len(list(db.scalars(select(FinanceJob))))==1
