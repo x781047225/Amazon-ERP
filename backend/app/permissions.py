@@ -56,6 +56,7 @@ def route_keys(path,query,body,method):
  if path.startswith('/api/todos'):return ['todos']
  if path.startswith('/api/users'):return ['users.users']
  if path=='/api/integration/capabilities':return ['listing','orders','fba.list','warehouse']
+ if path.startswith('/api/customs/profiles'):return ['products.products','products.declaration','products.clearance'] if read else ['products.declaration','products.clearance']
  if path.startswith('/api/customs/choices'):return ['products.products','products.declaration','products.clearance']
  if path.startswith('/api/customs/'):
   kind=path.split('/')[-1]

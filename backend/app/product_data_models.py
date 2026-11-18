@@ -51,3 +51,12 @@ class StoreVat(Base):
  tax_agent_address=Column(Text,nullable=False,default='')
  revision=Column(Integer,nullable=False,default=1)
  updated_at=Column(DateTime(timezone=True),nullable=False,default=now)
+
+class CustomsProfile(Base):
+ __tablename__='customs_profiles'
+ id=Column(Integer,primary_key=True)
+ name=Column(String(500),nullable=False)
+ declaration=Column(JSONB,nullable=False,default=dict)
+ clearance=Column(JSONB,nullable=False,default=dict)
+ revision=Column(Integer,nullable=False,default=1)
+ updated_at=Column(DateTime(timezone=True),nullable=False,default=now)

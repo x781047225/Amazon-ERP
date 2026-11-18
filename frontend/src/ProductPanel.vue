@@ -4,7 +4,7 @@ import {useTableWidths} from './tableWidths'
 const tableWidths=useTableWidths('ProductPanel')
 
 import SupplierPanel from './SupplierPanel.vue'
-import ProductCustomsPanel from './ProductCustomsPanel.vue'
+import CustomsProfilePanel from './CustomsProfilePanel.vue'
 import {ref,reactive,onMounted,computed} from 'vue'
 import {ElMessage,ElMessageBox} from 'element-plus'
 import {api,session} from './session'
@@ -45,7 +45,7 @@ onMounted(async()=>{try{await refreshOptions()}catch(e){error.value=(e as Error)
 <template>
 <div class="product-center">
  
- <div class="catalog-nav"><el-radio-group v-model="tab"><el-radio-button v-if="can('products.products')" value="products">产品信息</el-radio-button><el-radio-button v-if="can('products.suppliers')" value="suppliers">供应商</el-radio-button><el-radio-button v-if="can('products.declaration')" value="declaration">报关资料</el-radio-button><el-radio-button v-if="can('products.clearance')" value="clearance">清关资料</el-radio-button></el-radio-group></div><SupplierPanel v-if="tab==='suppliers'"/><ProductCustomsPanel v-else-if="tab==='declaration'||tab==='clearance'" :kind="tab"/><template v-else>
+ <div class="catalog-nav"><el-radio-group v-model="tab"><el-radio-button v-if="can('products.products')" value="products">产品信息</el-radio-button><el-radio-button v-if="can('products.suppliers')" value="suppliers">供应商</el-radio-button><el-radio-button v-if="can('products.declaration')||can('products.clearance')" :value="can('products.declaration')?'declaration':'clearance'">清关&amp;报关资料</el-radio-button></el-radio-group></div><SupplierPanel v-if="tab==='suppliers'"/><CustomsProfilePanel v-else-if="tab==='declaration'||tab==='clearance'"/><template v-else>
  <div class="catalog-stats"><span>在用标品 <b>{{summary.active_count.toLocaleString()}}</b></span><span>可访问店铺待关联 SKU <b>{{summary.unlinked_listings.toLocaleString()}}</b></span></div>
  <section class="catalog-card">
   <div class="catalog-filters"><el-input v-model="filter.q" placeholder="搜索 GM 编码 / 原编码 / 品名" clearable @keyup.enter="search"/><el-select v-model="filter.supplier" placeholder="全部供应商" clearable filterable><el-option v-for="s in options.suppliers" :key="s" :label="s" :value="s"/></el-select><el-checkbox v-model="filter.unlinked" @change="search">未关联</el-checkbox><el-checkbox v-model="filter.review" @change="search">待核对</el-checkbox><el-switch v-model="filter.archived" active-text="回收站" @change="search"/><el-button type="primary" @click="search">查询</el-button><el-button @click="reset">重置</el-button><el-button v-if="admin" type="primary" @click="edit()">新增产品</el-button><TableReset table-key="ProductPanel/table-1"/></div>

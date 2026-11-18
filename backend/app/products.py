@@ -12,7 +12,7 @@ from .models import LocalProduct as Product,ProductLink,Listing,AccessAudit,now
 from .auth import require_admin,principal
 router=APIRouter(prefix='/api/products')
 PACK_FIELDS=['package_length_cm','package_width_cm','package_height_cm','gross_weight_g']
-EXTRA_FIELDS=['freight_uk_cny','freight_eu_cny','image_path','purchase_url','declaration','clearance']
+EXTRA_FIELDS=['customs_profile_id','freight_uk_cny','freight_eu_cny','image_path','purchase_url','declaration','clearance']
 FIELDS=PACK_FIELDS+EXTRA_FIELDS+['id','code','name','cost_cny','primary_supplier','suppliers','specification','category','unit','notes','revision','archived','created_at','updated_at']
 def data(p):
  from .product_costs import freight
@@ -28,6 +28,7 @@ def locked(db,pk):
  return p
 from .product_data_schema import CustomsInfo,web_link
 class ProductBody(BaseModel):
+ customs_profile_id:int|None=Field(default=None,ge=1)
  model_config=ConfigDict(extra='forbid',str_strip_whitespace=True)
  code:str=Field(min_length=1,max_length=255)
  name:str=Field(min_length=1,max_length=500)
@@ -145,6 +146,11 @@ def create(body:ProductBody):
   with Session.begin() as db:
    from .customs_catalog import shared_values
    values=shared_values(body.model_dump(mode='json',exclude={'revision'}),{k:getattr(body,k).model_fields_set for k in ('declaration','clearance')})
+   from .customs_profiles import validate_link
+   if body.customs_profile_id:
+    for kind in ('declaration','clearance'):
+     if kind not in body.model_fields_set:values.pop(kind,None)
+   validate_link(db,values)
    ensure_suppliers(db,body.suppliers);p=Product(**values);db.add(p);db.flush();audit(db,'product_create',p.id,body.model_dump(mode='json'));pk=p.id
  except IntegrityError:raise HTTPException(409,'标品编码已存在（含回收站），请使用其他编码或恢复原标品') from None
  return {'id':pk}
@@ -175,9 +181,13 @@ def update(pk:int,body:ProductBody):
    ensure_suppliers(db,body.suppliers)
    values=body.model_dump(mode='json',exclude={'revision',*(set(PACK_FIELDS+EXTRA_FIELDS)-body.model_fields_set)})
    from .customs_catalog import shared_values
+   for kind in ('declaration','clearance'):
+    if kind in values:values[kind]={**getattr(p,kind),**getattr(body,kind).model_dump(mode='json',exclude_unset=True)}
    if 'declaration' in values or 'clearance' in values:
     infos=shared_values({k:values.get(k,getattr(p,k)) for k in ('declaration','clearance')},{k:getattr(body,k).model_fields_set for k in ('declaration','clearance') if k in values})
     values.update(infos)
+   from .customs_profiles import validate_link
+   validate_link(db,values,p.customs_profile_id)
    old={k:str(getattr(p,k)) if isinstance(getattr(p,k),Decimal) else getattr(p,k) for k in values}
    if p.code!=body.code:
     n=p.source.get('normalization',{});p.source={**p.source,'normalization':{**n,'aliases':list(dict.fromkeys([*n.get('aliases',[]),p.code]))}}

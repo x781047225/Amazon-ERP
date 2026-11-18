@@ -238,3 +238,9 @@ app.include_router(integration_router)
 
 from .mail import router as mail_router
 app.include_router(mail_router)
+
+from .payouts import router as payouts_router
+app.include_router(payouts_router)
+
+from .customs_profiles import router as customs_profiles_router
+app.include_router(customs_profiles_router)

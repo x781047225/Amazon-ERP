@@ -173,3 +173,15 @@ def data_sync_run(rid):
     from .data_sync import advance
     advance(rid)
 celery.conf.beat_schedule['data_sync_dispatch']={'task':'erp.data_sync_dispatch','schedule':30.0}
+
+@celery.task(name='erp.payout_dispatch')
+def payout_dispatch():
+    from .payouts import tick
+    for jid in tick():
+        if redis.set('erp:payout:dispatch:'+jid,'1',nx=True,ex=30):
+            payout_task.apply_async(args=[jid],queue='payouts')
+@celery.task(name='erp.payout')
+def payout_task(jid):
+    from .payouts import run
+    run(jid)
+celery.conf.beat_schedule['payout_dispatch']={'task':'erp.payout_dispatch','schedule':30.0}

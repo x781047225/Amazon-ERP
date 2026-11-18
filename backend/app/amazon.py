@@ -13,6 +13,14 @@ _locks=defaultdict(threading.Lock)
 class AmazonError(Exception): pass
 class OrderCursorExpired(AmazonError): pass
 
+def token_error(status,refresh_token):
+    # Diagnose known copy mistakes only after LWA rejected the request. Never expose credentials.
+    if refresh_token.startswith('Atza|'):
+        return f'亚马逊授权失败（HTTP {status}）：refresh_token 疑似误填了访问令牌。请从生产应用的「授权应用」页面重新复制刷新令牌，勿填写 access_token。'
+    if status in (429,500,502,503,504):
+        return f'亚马逊授权服务暂时不可用（HTTP {status}），尚未进入业务接口；请稍后重试，不能仅凭此状态判定密钥错误。'
+    return f'亚马逊授权失败（HTTP {status}），请核对 Client ID、Client Secret 和 Refresh Token 属于同一生产应用，并确认已授权。'
+
 def token(store):
     s=STORES[store]
     if not all(s.get(k) for k in ('client_id','client_secret','refresh_token')):raise AmazonError('请在设置中补齐店铺授权')
@@ -24,8 +32,14 @@ def token(store):
             r=session.post('https://api.amazon.com/auth/o2/token',data={'grant_type':'refresh_token','refresh_token':s['refresh_token'],'client_id':s['client_id'],'client_secret':s['client_secret']},proxies=build_request_proxies(s['proxy_url'],s.get('upstream_proxy')),timeout=(20,45))
         except requests.RequestException:raise AmazonError('授权连接失败：请检查网络与该店铺代理。') from None
         finally:session.close()
-        if r.status_code!=200:raise AmazonError(f'亚马逊授权失败（HTTP {r.status_code}），请检查店铺授权。')
-        result=r.json();_tokens[store]=(result['access_token'],time.time()+result.get('expires_in',3600),s['revision'])
+        if r.status_code!=200:
+            raise AmazonError(token_error(r.status_code,s.get('refresh_token','')))
+        try:
+            result=r.json()
+            if not isinstance(result.get('access_token'),str) or not result['access_token']:raise ValueError()
+        except (ValueError,TypeError,AttributeError):
+            raise AmazonError('亚马逊授权响应不完整，未取得访问令牌，请稍后重试。') from None
+        _tokens[store]=(result['access_token'],time.time()+result.get('expires_in',3600),s['revision'])
         return result['access_token']
 
 # Shared per-store token bucket. All search tasks share the same quota.

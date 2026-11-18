@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing import Literal
 from urllib.parse import urlsplit
-from pydantic import BaseModel,Field,ConfigDict
+from pydantic import BaseModel,Field,ConfigDict,field_validator
 
 def web_link(value):
  if value:
@@ -29,3 +29,7 @@ class CustomsInfo(BaseModel):
  tax_rate:Decimal|None=Field(default=None,ge=0,le=100,decimal_places=4)
  unit_price:Decimal|None=Field(default=None,ge=0,max_digits=18,decimal_places=4)
  currency:Literal['CNY','EUR','GBP']='CNY'
+
+ clearance_url_uk:str=Field(default='',max_length=2000)
+ clearance_url_de:str=Field(default='',max_length=2000)
+ _clearance_links=field_validator('clearance_url_uk','clearance_url_de')(web_link)

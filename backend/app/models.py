@@ -317,6 +317,7 @@ class OrderReport(Base):
     excluded=Column(JSONB,nullable=False,default=dict)
 
 class LocalProduct(Base):
+    customs_profile_id=Column(Integer,ForeignKey('customs_profiles.id',ondelete='SET NULL'),index=True)
     __tablename__='local_products'
     id=Column(Integer,primary_key=True)
     code=Column(String(255),nullable=False,unique=True)
@@ -466,3 +467,5 @@ from .data_sync_models import DataSyncConfig,DataSyncRun
 from .mail_models import MailApplication,MailConnection,MailMessage
 
 from .todo_models import Todo,TodoEvent,TodoImage,TodoCc
+
+from .payout_models import PayoutConfig,PayoutRun

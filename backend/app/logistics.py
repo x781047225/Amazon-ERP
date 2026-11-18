@@ -24,9 +24,12 @@ CHANNELS=['空派','卡航','铁路','海运']
 TAX_MODES=['自税递延','包税']
 LAST_MILE=['卡派','快递派']
 router=APIRouter(prefix='/api/logistics')
-SCALARS={'shipment_id':'FBA号','name':'货件名称','store':'店铺','country':'国家','date':'日期','weight':'装箱单重量 kg','boxes':'箱数','supplier':'货代名称','currency':'币种','invoice_number':'发票号码','shipper':'发货人','consignee':'收货人','address':'收货地址','total':'商品总价'}
+SCALARS={'warehouse_code':'亚马逊仓库代码','vat':'VAT','eori':'EORI号','shipment_id':'FBA号','name':'货件名称','store':'店铺','country':'国家','date':'日期','weight':'装箱单重量 kg','boxes':'箱数','supplier':'货代名称','currency':'币种','invoice_number':'发票号码','shipper':'发货人','consignee':'收货人','address':'收货地址','total':'商品总价'}
 COLUMNS={'code':'标品编码','sku':'SKU','fnsku':'FNSKU','name':'品名','quantity':'数量','unit_price':'申报单价','amount':'商品金额','material':'材质','usage':'用途','hs_code':'HS编码','origin':'原产国','weight':'商品重量 kg'}
 COLUMNS.update({'name_cn':'中文名称','name_en':'英文名称','material_cn':'中文材质','material_en':'英文材质','usage_cn':'中文用途','usage_en':'英文用途','brand_type':'品牌类型','export_preference':'出口享惠情况','internal_code':'内部编码','model':'型号','domestic_source':'境内货源地','unit':'成交单位','exemption':'征免','other_elements':'其他申报要素','tax_rate':'清关税率 (%)','currency':'单价币种'})
+SCALAR_KEYS=('shipment_id','country','warehouse_code','vat','eori','boxes')
+COLUMNS.update({'box_label':'箱号（FBA号+U000001，按箱展开）','product_name':'商品名称','clearance_url':'清关url（按目的国）'})
+DETAIL_KEYS=('box_label','product_name','material_cn','material_en','usage_cn','usage_en','origin','domestic_source','unit','model','name_cn','name_en','brand_type','hs_code','tax_rate','unit_price','currency','clearance_url','quantity','amount','sku','fnsku','weight')
 @router.get('/options')
 def channel_options():return {'countries':{c:COUNTRY_NAMES.get(c,c) for c in ORDER_MARKETS},'channels':CHANNELS,'tax_modes':TAX_MODES,'last_mile_modes':LAST_MILE}
 class Body(BaseModel):model_config=ConfigDict(extra='forbid',str_strip_whitespace=True)
@@ -83,17 +86,24 @@ def shipment_context(db,store,sid,kind='invoice'):
  if not s:raise HTTPException(404,'货件不存在或无权限')
  rows=list(db.scalars(select(ShipmentItem).where(ShipmentItem.shipment_pk==s.id)))
  items=[]
+ country='UK' if s.destination_country=='GB' else s.destination_country
+ from .product_data_models import StoreVat,CustomsProfile
+ vat=db.get(StoreVat,(store,country))
  for item in rows:
   pair=db.execute(select(Listing,LocalProduct).outerjoin(ProductLink,ProductLink.listing_pk==Listing.id).outerjoin(LocalProduct,LocalProduct.id==ProductLink.product_id).where(Listing.store==store,Listing.sku==item.sku).order_by((Listing.marketplace==('UK' if s.destination_country=='GB' else s.destination_country)).desc()).limit(1)).first()
   l,p=pair if pair else (None,None)
   info=(p.declaration if kind=='declaration' else p.clearance) if p else {}
-  items.append({**info,'sku':item.sku,'fnsku':item.fnsku or '', 'code':p.code if p else '', 'name':info.get('name_en') or info.get('name_cn') or (p.name if p else (l.title if l else '')),'quantity':item.shipped or 0,'unit_price':float(info['unit_price']) if info.get('unit_price') is not None else None,'material':info.get('material_en') or info.get('material_cn',''),'usage':info.get('usage_en') or info.get('usage_cn',''),'hs_code':info.get('hs_code',''),'origin':info.get('origin',''),'currency':info.get('currency','CNY'),'tax_rate':float(info['tax_rate']) if info.get('tax_rate') is not None else None,'weight':float(p.gross_weight_g)/1000 if p and p.gross_weight_g is not None else None})
- weight=None;box_count=None
+  profile=db.get(CustomsProfile,p.customs_profile_id) if p and p.customs_profile_id else None
+  url=info.get('clearance_url_uk' if country=='UK' else 'clearance_url_de','') if country in ('UK','DE') else ''
+  items.append({**info,'product_name':profile.name if profile else p.name if p else '', 'clearance_url':url,'sku':item.sku,'fnsku':item.fnsku or '', 'code':p.code if p else '', 'name':info.get('name_en') or info.get('name_cn') or (p.name if p else (l.title if l else '')),'quantity':item.shipped or 0,'unit_price':float(info['unit_price']) if info.get('unit_price') is not None else None,'material':info.get('material_en') or info.get('material_cn',''),'usage':info.get('usage_en') or info.get('usage_cn',''),'hs_code':info.get('hs_code',''),'origin':info.get('origin',''),'currency':info.get('currency','CNY'),'tax_rate':float(info['tax_rate']) if info.get('tax_rate') is not None else None,'weight':float(p.gross_weight_g)/1000 if p and p.gross_weight_g is not None else None})
+ weight=None;box_count=None;box_contents=[]
  for sta in db.scalars(select(StaTask).where(StaTask.store==store,StaTask.status!='cancelled')):
   ships=sta.result.get('shipments',[]);ship=next((r for r in ships if r.get('shipmentConfirmationId')==sid),None)
   if not ship:continue
   boxes=ship.get('boxes',[])
   if boxes:
+   box_contents=boxes
+   if not all(b.get('items') for b in boxes) and len(ships)==1 and len(sta.snapshot.get('boxes',[]))==len(boxes):box_contents=sta.snapshot['boxes']
    weights=[]
    for b in boxes:
     v=b.get('weight') or {};value=v.get('value');unit=v.get('unit')
@@ -101,10 +111,10 @@ def shipment_context(db,store,sid,kind='invoice'):
     weights.append(Decimal(str(value))*(Decimal('.45359237') if unit in ('LB','POUNDS') else 1))
    box_count=len(boxes);weight=str(sum(weights)) if weights else None
   elif len(ships)==1:
-   boxes=sta.snapshot.get('boxes',[]);box_count=len(boxes) or None
+   boxes=sta.snapshot.get('boxes',[]);box_count=len(boxes) or None;box_contents=boxes
    if boxes and all(b.get('weight_kg') is not None for b in boxes):weight=str(sum(Decimal(str(b['weight_kg'])) for b in boxes))
   break
- return {'shipment_pk':s.id,'shipment_id':sid,'store':store,'name':s.name or sid,'country':s.destination_country or '', 'date':now().astimezone(ZoneInfo('Asia/Shanghai')).date().isoformat(),'weight':weight,'boxes':box_count,'items':items,'currency':next(iter({i['currency'] for i in items})) if len({i['currency'] for i in items})==1 else ''}
+ return {'warehouse_code':s.destination or '', 'vat':vat.vat if vat else '', 'eori':vat.eori if vat else '', 'box_contents':box_contents,'shipment_pk':s.id,'shipment_id':sid,'store':store,'name':s.name or sid,'country':s.destination_country or '', 'date':now().astimezone(ZoneInfo('Asia/Shanghai')).date().isoformat(),'weight':weight,'boxes':box_count,'items':items,'currency':next(iter({i['currency'] for i in items})) if len({i['currency'] for i in items})==1 else ''}
 @router.get('/shipments')
 def search_shipments(q:str='',page:int=Query(1,ge=1),store:str='',page_size:int=Query(20,ge=1,le=100)):
  with Session() as db:
@@ -193,7 +203,7 @@ def template_preview(pk:int,sheet:str=''):
   t=db.get(Template,pk)
   if not t:raise HTTPException(404,'模板不存在')
   wb=workbook(t.content);s=wb[sheet] if sheet in wb.sheetnames else wb.active
-  return {'sheets':wb.sheetnames,'sheet':s.title,'scalars':SCALARS,'columns':COLUMNS,'rows':[[{'cell':c.coordinate,'value':str(c.value or '')[:500]} for c in row] for row in s.iter_rows(max_row=min(s.max_row,100),max_col=min(s.max_column,30))]}
+  return {'sheets':wb.sheetnames,'sheet':s.title,'scalars':{k:SCALARS[k] for k in dict.fromkeys([*SCALAR_KEYS,*t.mapping.get('fields',{})]) if k in SCALARS},'columns':{k:COLUMNS[k] for k in dict.fromkeys([*DETAIL_KEYS,*(('export_preference','exemption','other_elements') if t.kind=='declaration' else ()),*t.mapping.get('columns',{})]) if k in COLUMNS},'rows':[[{'cell':c.coordinate,'value':str(c.value or '')[:500]} for c in row] for row in s.iter_rows(max_row=min(s.max_row,100),max_col=min(s.max_column,30))]}
 class Mapping(Body):
  sheet:str
  fields:dict[str,str]=Field(default_factory=dict)
@@ -249,6 +259,32 @@ class Generate(Body):
 def put(cell,value):
  cell.value=value
  if isinstance(value,str):cell.data_type='s'
+def expand_box_items(items,ctx):
+ """Expand from actual packing only; never repeat full shipment quantities per box."""
+ from collections import Counter
+ boxes=ctx.get('box_contents') or []
+ if not boxes or len(boxes)!=ctx.get('boxes'):raise HTTPException(422,'缺少完整装箱明细，不能生成递增箱号；请先同步或维护装箱资料')
+ source={i['sku']:i for i in items};counts=Counter();expanded=[]
+ # Amazon may return boxes out of order; retain actual carton identity when supplied.
+ known=[b.get('boxId','') for b in boxes]
+ if all(re.fullmatch(re.escape(ctx['shipment_id'])+r'U[0-9]{6}',ident) for ident in known):
+  if len(set(known))!=len(known):raise HTTPException(422,'装箱资料存在重复箱号')
+  boxes=sorted(boxes,key=lambda b:b['boxId'])
+  labels=[b['boxId'] for b in boxes]
+ else:labels=[ctx['shipment_id']+'U'+str(n).zfill(6) for n in range(1,len(boxes)+1)]
+ for number,box in enumerate(boxes,1):
+  contents=box.get('items') or []
+  if not contents:raise HTTPException(422,'装箱明细缺少箱内商品')
+  combined=Counter()
+  for entry in contents:
+   sku=entry.get('msku') or entry.get('sku');quantity=entry.get('quantity')
+   if sku not in source or isinstance(quantity,bool) or not isinstance(quantity,int) or quantity<=0:raise HTTPException(422,'箱内商品或数量无效，请核对装箱资料')
+   combined[sku]+=quantity
+  for sku,quantity in combined.items():
+   counts[sku]+=quantity;expanded.append({**source[sku],'quantity':quantity,'box_label':labels[number-1]})
+ if counts!=Counter({i['sku']:i['quantity'] for i in items}):raise HTTPException(409,'装箱数量与货件不一致，请重新同步后生成')
+ return expanded
+
 @router.post('/documents')
 def generate(b:Generate):
  require_admin();require_store(b.store)
@@ -261,6 +297,10 @@ def generate(b:Generate):
   expected={i['sku']:i['quantity'] for i in ctx['items']}
   if len(items)!=len(expected) or {i.get('sku'):i.get('quantity') for i in items}!=expected:raise HTTPException(409,'商品或数量与货件不一致，请重新打开')
   if not items:raise HTTPException(422,'货件明细尚未同步')
+  # Derived fields always come from this shipment, never a previous template or client value.
+  current={i['sku']:i for i in ctx['items']}
+  items=[{**i,'clearance_url':current[i['sku']].get('clearance_url','')} for i in items]
+  if 'box_label' in m['columns']:items=expand_box_items(items,ctx)
   if len(items)>m['end_row']-m['start_row']+1:raise HTTPException(422,'模板预留明细行不足，请扩大模板的明细结束行后再生成')
   currencies={i.get('currency') or next((x['currency'] for x in ctx['items'] if x['sku']==i['sku']),'CNY') for i in items}
   if len(currencies)!=1 or not currencies.issubset({'CNY','EUR','GBP'}):raise HTTPException(422,'同一单据的单价币种必须统一为人民币、欧元或英镑')
@@ -275,7 +315,7 @@ def generate(b:Generate):
     item['unit_price']=float(price);item['amount']=float(price*item['quantity']);total+=price*item['quantity']
    for field in m['columns']:
     if item.get(field) in (None,''):raise HTTPException(422,f"请补充 {item['sku']} 的{COLUMNS[field]}")
-  values={**ctx,**{k:v for k,v in b.values.items() if k in SCALARS},'shipment_id':ctx['shipment_id'],'store':ctx['store'],'weight':ctx['weight'],'boxes':ctx['boxes'],'total':float(total),'currency':currency,'supplier':t.supplier or b.values.get('supplier','')}
+  values={**ctx,**{k:v for k,v in b.values.items() if k in SCALARS},'shipment_id':ctx['shipment_id'],'store':ctx['store'],'country':ctx['country'],'warehouse_code':ctx['warehouse_code'],'weight':ctx['weight'],'boxes':ctx['boxes'],'total':float(total),'currency':currency,'supplier':t.supplier or b.values.get('supplier','')}
   for field,cell in m['fields'].items():
    if values.get(field) in (None,''):raise HTTPException(422,'请补充'+SCALARS[field]+'，或先同步对应货件数据')
    put(ws[cell],values[field])

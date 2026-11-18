@@ -52,11 +52,12 @@ if(!can(tab.value)&&!tab.value.startsWith('sta-')&&!tab.value.startsWith('produc
 watch([opened,tab],()=>{try{sessionStorage.setItem(tabStorageKey,JSON.stringify({tabs:opened.value,active:tab.value}))}catch{}},{deep:true})
 const compactPage=computed(()=>tab.value.startsWith('product-')||['todos','orders','logistics','settings','fba','shipping','listing','finance','users','products','warehouse','procurement'].includes(tab.value))
 const hasTab=(key:string)=>opened.value.some(x=>x.key===key)
-async function navigate(next:string){if(!can(next))return;mobileMenuOpen.value=false;if(!hasTab(next))opened.value.push({key:next});tab.value=next;nextTick(()=>window.scrollTo({top:0}));if(next==='orders'&&!orders.value.length)fetchOrders()}
-function openSta(data:{shippingId?:number,taskId?:string}){let found=opened.value.find(x=>(data.taskId&&x.taskId===data.taskId)||(data.shippingId&&x.shippingId===data.shippingId));if(!found){found={key:'sta-'+(data.taskId||data.shippingId),title:'STA 入库计划',...data};opened.value.push(found)}tab.value=found.key}
+function insertTab(entry:WorkTab){const i=opened.value.findIndex(t=>t.key===tab.value);opened.value.splice(i<0?opened.value.length:i+1,0,entry)}
+async function navigate(next:string){if(!can(next))return;mobileMenuOpen.value=false;if(!hasTab(next))insertTab({key:next});tab.value=next;nextTick(()=>window.scrollTo({top:0}));if(next==='orders'&&!orders.value.length)fetchOrders()}
+function openSta(data:{shippingId?:number,taskId?:string}){let found=opened.value.find(x=>(data.taskId&&x.taskId===data.taskId)||(data.shippingId&&x.shippingId===data.shippingId));if(!found){found={key:'sta-'+(data.taskId||data.shippingId),title:'STA 入库计划',...data};insertTab(found)}tab.value=found.key}
 function staCreated(entry:WorkTab,data:{id:string,name:string}){entry.taskId=data.id;entry.title='STA · '+data.name}
 const productEditors=new Map<string,any>()
-function openProduct(id?:number){const key=id?'product-'+id:'product-new';let entry=opened.value.find(t=>t.key===key);if(!entry){entry={key,productId:id,title:id?'编辑产品':'新增产品'};opened.value.push(entry)}tab.value=key}
+function openProduct(id?:number){const key=id?'product-'+id:'product-new';let entry=opened.value.find(t=>t.key===key);if(!entry){entry={key,productId:id,title:id?'编辑产品':'新增产品'};insertTab(entry)}tab.value=key}
 function productSaved(entry:WorkTab,data:{id:number,name:string}){const old=entry.key;entry.productId=data.id;entry.title=data.name;if(old==='product-new'){entry.key='product-'+data.id;if(tab.value===old)tab.value=entry.key}productPanel.value?.refresh()}
 async function closeTab(key:string){if(key.startsWith('product-')&&productEditors.get(key)&&!(await productEditors.get(key).canLeave()))return;if(key==='products'&&productPanel.value&&!(await productPanel.value.canLeave()))return;if(key==='listing'&&listingPanel.value&&!(await listingPanel.value.canLeave()))return;const i=opened.value.findIndex(x=>x.key===key);if(i<0)return;opened.value.splice(i,1);if(!opened.value.length){const fallback=['home','todos','products','listing','orders','fba','procurement','shipping','warehouse','finance','users','logistics','settings','advertising','replenishment'].find(k=>can(k));if(fallback)opened.value.push({key:fallback})};if(tab.value===key)tab.value=opened.value[Math.min(i,opened.value.length-1)]?.key||'no-access'}
 const dragging=ref(''),dragOver=ref('')
@@ -154,6 +155,7 @@ async function logout(){try{await ElMessageBox.confirm('退出会清除本次会
   <button v-if="can('listing')" class="nav-item" :class="{active:tab==='listing'}" @click="navigate('listing')"><el-icon><Document/></el-icon><span>Listing</span></button>
   <button v-if="can('orders')" class="nav-item" :class="{active:tab==='orders'}" @click="navigate('orders')"><el-icon><Document/></el-icon><span>订单中心</span></button>
   <button v-if="can('fba')" class="nav-item" :class="{active:tab==='fba'}" @click="navigate('fba')"><el-icon><Box/></el-icon><span>FBA货件</span></button>
+  <button v-if="can('logistics')" class="nav-item" :class="{active:tab==='logistics'}" @click="navigate('logistics')"><el-icon><Box/></el-icon><span>物流中心</span></button>
   <button v-if="can('procurement')" class="nav-item" :class="{active:tab==='procurement'}" @click="navigate('procurement')"><el-icon><ShoppingCart/></el-icon><span>采购管理</span></button>
   <button v-if="can('shipping')" class="nav-item" :class="{active:tab==='shipping'}" @click="navigate('shipping')"><el-icon><ShoppingCart/></el-icon><span>发货计划</span></button>
   <button v-if="can('replenishment')" class="nav-item" :class="{active:tab==='replenishment'}" @click="navigate('replenishment')"><el-icon><ShoppingCart/></el-icon><span>补货建议</span></button>
@@ -161,7 +163,6 @@ async function logout(){try{await ElMessageBox.confirm('退出会清除本次会
   <button v-if="can('finance')" class="nav-item" :class="{active:tab==='finance'}" @click="navigate('finance')"><el-icon><ShoppingCart/></el-icon><span>利润结算</span></button>
   <button v-if="canAccessAds" class="nav-item" :class="{active:tab==='advertising'}" @click="navigate('advertising')"><el-icon><Document/></el-icon><span>广告活动</span></button>
   <button v-if="can('users')" class="nav-item" :class="{active:tab==='users'}" @click="navigate('users')"><el-icon><Setting/></el-icon><span>用户管理</span></button>
-  <button v-if="can('logistics')" class="nav-item" :class="{active:tab==='logistics'}" @click="navigate('logistics')"><el-icon><Box/></el-icon><span>物流中心</span></button>
   <button v-if="can('settings')" class="nav-item" :class="{active:tab==='settings'}" @click="navigate('settings')"><el-icon><Setting/></el-icon><span>设置</span></button>
   <div class="sidebar-bottom"><div class="secure-dot"></div><span>数据存储在本机<small>Amazon-ERP / data</small></span><span class="version">v0.5</span></div>
  </aside>

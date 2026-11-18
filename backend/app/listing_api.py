@@ -247,6 +247,18 @@ def queue_price(pk:int,body:QueuedPrice):
     from .listing_price_jobs import enqueue
     return submit_errors(lambda:enqueue(pk,body))
 
+class QueuedPriceOnly(BaseModel):
+    model_config={'extra':'forbid'}
+    request_id:UUID
+    price:StrictStr
+    expected_currency:StrictStr
+    expected_fingerprint:StrictStr=Field(min_length=64,max_length=64)
+
+@router.post('/{pk}/price-only/queue',status_code=202)
+def queue_price_only(pk:int,body:QueuedPriceOnly):
+    from .listing_price_jobs import enqueue
+    return submit_errors(lambda:enqueue(pk,body,price_only=True))
+
 @router.get('/{pk}/price/jobs/{sid}')
 def price_job(pk:int,sid:UUID):
     from .listing_submit import context,result
@@ -259,7 +271,7 @@ def price_job(pk:int,sid:UUID):
         data=result(s);latest=latest_submissions(db,[pk]).get(pk)
         data['status']=state(row,s)['status'] if latest and latest.id==s.id else 'superseded'
         if data['status']=='verified' and s.status=='accepted':
-            s.status='verified';s.message='同步已确认售价和促销计划一致。';s.checked_at=now()
+            s.status='verified';s.message='同步已确认售价一致。' if state(row,s).get('price_only') else '同步已确认售价和促销计划一致。';s.checked_at=now()
         data['pricing']=listing_business.price_info(db,row)
         return data
 
