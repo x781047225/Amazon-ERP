@@ -33,7 +33,7 @@ def test_scan_commits_and_resumes_exact_count(tmp_path,monkeypatch):
     mock.reset_mock();assert imp.scan_market('DemoStoreA','DE','2026-10-28T00:00:00Z',tmp_path)['scan_done'];mock.assert_not_called()
 
 def test_scan_does_not_mark_truncated_results_complete(tmp_path,monkeypatch):
-    monkeypatch.setattr(imp,'search_page',lambda *a:{'numberOfResults':2,'items':[payload()]})
+    monkeypatch.setattr(imp,'search_page',lambda *a,**kw:{'numberOfResults':2,'items':[payload()]})
     with pytest.raises(AmazonError,match='数量'):imp.scan_market('DemoStoreA','DE','2026-10-28T00:00:00Z',tmp_path)
     assert not json.loads((tmp_path/'DE-state.json').read_text())['scan_done']
 
@@ -53,3 +53,44 @@ def test_template_is_shared_only_with_matching_market_type(monkeypatch):
     assert read(pk)['template']['version']=='new' and read(uk)['template']['version']=='v1'
     fail=MagicMock(side_effect=AssertionError('should reuse template'));monkeypatch.setattr(imp.remote,'definition',fail)
     assert imp.ensure_template('DemoStoreA','DE','TEST_TYPE')=='cached';fail.assert_not_called()
+
+def test_window_retry_restarts_cursor_and_does_not_accumulate_skus(tmp_path,monkeypatch):
+    responses=iter([
+        {'numberOfResults':2,'items':['A'],'pagination':{'nextToken':'p'}},
+        {'items':['A']},
+        {'numberOfResults':2,'items':['B'],'pagination':{'nextToken':'q'}},
+        {'items':['C']},
+    ]);calls=[]
+    def read(*a,**kw):calls.append((a,kw));return next(responses)
+    monkeypatch.setattr(imp,'search_page',read);monkeypatch.setattr(imp,'save_page',lambda s,m,items:items)
+    out=imp.scan_windowed('DemoStoreA','UK','2026-11-18T00:00:00Z',tmp_path)
+    assert out['scan_done'] and out['skus']==['B','C'] and len(calls)==4
+    assert len(calls[2][0])==3 # fresh first page, not p/q
+    d=json.loads((tmp_path/'UK-count-mismatch.json').read_text())
+    assert (d['expected'],d['actual'],d['duplicates'])==(2,1,1)
+
+def test_window_failure_is_bounded_and_keeps_completed_ranges(tmp_path,monkeypatch):
+    state={'pending':[['2026-11-17T00:00:00Z','2026-11-18T00:00:00Z']],'done':[{'start':'old','end':'old2','count':1}],'skus':['DONE'],'expected':3}
+    path=tmp_path/'UK-windows.json';path.write_text(json.dumps(state));calls=[]
+    def read(*a,**kw):calls.append(a);return {'numberOfResults':2,'items':['ONLY']}
+    monkeypatch.setattr(imp,'search_page',read);monkeypatch.setattr(imp,'save_page',lambda s,m,items:items)
+    with pytest.raises(AmazonError,match='预期 2 个，实际读取 1 个'):imp.scan_windowed('DemoStoreA','UK','2026-11-18T00:00:00Z',tmp_path)
+    assert len(calls)==3 and json.loads(path.read_text())==state
+    monkeypatch.setattr(imp,'search_page',lambda *a,**k:{'numberOfResults':2,'items':['A','B']})
+    out=imp.scan_windowed('DemoStoreA','UK','2026-11-18T00:00:00Z',tmp_path)
+    assert out['scan_done'] and out['skus']==['A','B','DONE']
+
+def test_window_rechecks_changed_root_count_without_false_success(tmp_path,monkeypatch):
+    state={'pending':[],'done':[{'count':2}],'skus':['A','B'],'expected':3}
+    path=tmp_path/'UK-windows.json';path.write_text(json.dumps(state))
+    monkeypatch.setattr(imp,'search_page',lambda *a,**kw:{'numberOfResults':2,'items':[]})
+    assert imp.scan_windowed('DemoStoreA','UK','2026-11-18T00:00:00Z',tmp_path)['scan_done']
+    path.write_text(json.dumps(state));monkeypatch.setattr(imp,'search_page',lambda *a,**kw:{'numberOfResults':4,'items':[]})
+    with pytest.raises(AmazonError,match='预期 4 个'):imp.scan_windowed('DemoStoreA','UK','2026-11-18T00:00:00Z',tmp_path)
+    saved=json.loads(path.read_text());assert saved['pending'] and not saved['scan_done']
+
+def test_window_permission_failure_is_not_retried(tmp_path,monkeypatch):
+    reader=MagicMock(side_effect=AmazonError('HTTP 403'))
+    monkeypatch.setattr(imp,'search_page',reader)
+    with pytest.raises(AmazonError,match='403'):imp.scan_windowed('DemoStoreA','UK','2026-11-18T00:00:00Z',tmp_path)
+    assert reader.call_count==1

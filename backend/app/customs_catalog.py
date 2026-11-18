@@ -18,7 +18,7 @@ from .products import pattern,audit
 router=APIRouter(prefix='/api/customs')
 Kind=Literal['declaration','clearance']
 CHOICES={'name_cn','name_en','material_cn','material_en','usage_cn','usage_en'}
-SHARED=('material_cn','material_en','usage_cn','usage_en','origin','domestic_source','unit','model')
+SHARED=('brand_type','brand','material_cn','material_en','usage_cn','usage_en','origin','domestic_source','unit','model')
 def shared_values(values,fields):
  """Only explicitly edited shared keys are copied. Existing other fields survive."""
  out=dict(values)
@@ -26,6 +26,8 @@ def shared_values(values,fields):
   source=next((k for k in ('declaration','clearance') if key in fields.get(k,set())),None)
   if source:
    for kind in ('declaration','clearance'):out[kind]={**out.get(kind,{}),key:out[source].get(key,'')}
+ if any('brand_type' in fields.get(k,set()) for k in ('declaration','clearance')) and out.get('declaration',{}).get('brand_type')=='无品牌':
+  for kind in ('declaration','clearance'):out[kind]={**out.get(kind,{}),'brand':'无'}
  return out
 @router.get('/choices')
 def choices():

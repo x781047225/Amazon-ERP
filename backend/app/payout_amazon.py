@@ -68,11 +68,21 @@ def expected(store,seller,market):
  row=found[0]
  if row.get('status')=='NO_PAYOUT_EXPECTED':return Decimal(0),None
  if row.get('status')!='SCHEDULED':raise PayoutError('亚马逊付款状态异常或已禁用，本轮已停止')
- raw=row.get('amount') or {}
- try:amount=Decimal(str(raw['currencyAmount']))
- except (KeyError,InvalidOperation,TypeError):raise PayoutError('预计付款金额缺失或格式错误') from None
- currency=raw.get('currencyCode')
- if not amount.is_finite() or not isinstance(currency,str) or not re.fullmatch('[A-Z]{3}',currency):raise PayoutError('预计付款金额或币种无效')
+ raw=row.get('amount')
+ if not isinstance(raw,dict):raise PayoutError('亚马逊未返回预计付款金额，本轮已停止')
+ # Production responses also use Money {value, unit}; do not mix partial pairs.
+ pairs=[(raw.get(a),raw.get(c)) for a,c in (('currencyAmount','currencyCode'),('value','unit')) if a in raw or c in raw]
+ if not pairs:raise PayoutError('亚马逊预计付款金额字段无法识别，本轮已停止')
+ parsed=[]
+ for value,currency in pairs:
+  try:
+   if value is None or isinstance(value,bool):raise InvalidOperation()
+   amount=Decimal(str(value))
+  except (InvalidOperation,TypeError,ValueError):raise PayoutError('亚马逊预计付款金额不是有效数字，本轮已停止') from None
+  if not amount.is_finite() or not isinstance(currency,str) or not re.fullmatch('[A-Z]{3}',currency):raise PayoutError('预计付款金额或币种无效')
+  parsed.append((amount,currency))
+ if len(set(parsed))!=1:raise PayoutError('预计付款金额字段相互冲突，本轮已停止')
+ amount,currency=parsed[0]
  return amount,currency
 def initiate(store,seller,market):
  if market not in SUPPORTED:raise PayoutError('该站点暂不支持提款接口')

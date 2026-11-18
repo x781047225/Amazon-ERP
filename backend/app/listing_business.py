@@ -153,6 +153,8 @@ def enrich(db,rows,results):
         for i,value in enumerate(result['sales']['values'].values()):value['units']=int(totals.get((row.store,row.marketplace,row.sku,row.asin),[0]*5)[i])
         result['arrivals']=arrival_info(db,row,at)
         result['has_draft']=result['has_draft'] or bool(result['pricing']['draft'] and result['pricing']['draft']['changes'])
+    from .listing_metrics import enrich as enrich_metrics
+    enrich_metrics(db,rows,results)
     return results
 
 def fetch_inventory(store,market,skus):

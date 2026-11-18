@@ -1,6 +1,6 @@
 """Local, labelled order estimates. Actual Amazon amounts are never overwritten."""
 import hashlib,json
-from decimal import Decimal
+from decimal import Decimal,ROUND_HALF_UP
 from datetime import timedelta
 from sqlalchemy import select,tuple_
 from sqlalchemy.dialects.postgresql import insert
@@ -13,7 +13,7 @@ from .settings import MARKETS
 from .amazon import AmazonError
 from .tax_estimates import included_vat
 CURRENCIES={'UK':'GBP','PL':'PLN','SE':'SEK','AE':'AED','SA':'SAR'}
-def money(x):return str(x.quantize(Decimal('.01')))
+def money(x):return str(x.quantize(Decimal('.01'),rounding=ROUND_HALF_UP))
 def quote_key(listing_id,price,currency):return hashlib.sha256(json.dumps([listing_id,str(Decimal(price).normalize()),currency]).encode()).hexdigest()
 def ensure_quote(listing,price,currency):
     key=quote_key(listing.id,price,currency)
@@ -22,6 +22,12 @@ def ensure_quote(listing,price,currency):
         q=db.get(FeeQuote,key)
         if q.status=='succeeded' and q.synced_at<now()-timedelta(hours=24) or q.status=='failed' and q.attempted_at<now()-timedelta(hours=1):q.status='queued';q.attempted_at=now()
         return {'status':q.status,'estimate':q.estimate,'synced_at':q.synced_at,'error':q.error,'stale':bool(q.synced_at and q.synced_at<now()-timedelta(hours=24))}
+
+def save_quote(listing_id,price,currency,estimate):
+    at=now();values=dict(key=quote_key(listing_id,price,currency),listing_id=listing_id,price=price,currency=currency,status='succeeded',estimate=estimate,synced_at=at,attempted_at=at,error=None)
+    with Session.begin() as db:
+        statement=insert(FeeQuote).values(**values)
+        db.execute(statement.on_conflict_do_update(index_elements=['key'],set_={k:v for k,v in values.items() if k!='key'}))
 
 def run_quote(key):
     from .listing_income import fetch_fees,parse_fees
@@ -55,7 +61,7 @@ def enrich(db,orders,items_by_order,queue=True):
     cached_quotes={q.key:q for q in db.scalars(select(FeeQuote).where(FeeQuote.listing_id.in_([l.id for l in listings.values()])))}
     for order in orders:
         currency=order.currency or CURRENCIES.get(order.marketplace,'EUR');items=items_by_order.get(order.id,[])
-        result[order.id]={'display_amount':str(order.amount) if order.amount is not None else None,'display_currency':currency,'amount_estimated':False,'gross_profit':None,'gross_margin':None,'notes':[],'pending':False}
+        result[order.id]={'display_amount':str(order.amount) if order.amount is not None else None,'display_currency':currency,'amount_estimated':False,'gross_profit':None,'gross_margin':None,'notes':[],'pending':False,'fee_updated_at':None}
         out=result[order.id];reasons=[];cost_notes=[];revenue=Decimal(0);fees_total=Decimal(0);purchase=Decimal(0);shipping=Decimal(0);missing_price=False
         if order.status in ('CANCELLED','CANCELED'):out['notes']=['已取消，不计算'];continue
         complete_items=bool(items) and sum(i['quantity'] for i in items)==order.quantity
@@ -66,15 +72,19 @@ def enrich(db,orders,items_by_order,queue=True):
         fx=fxs[currency]
         for item in items:
             l=listings.get((order.store,order.marketplace,item['sku']));qty=item['quantity'];p=products.get(l.id) if l else None
+            if l and item.get('asin') and l.asin!=item['asin']:l=None;p=None
             try:price=pricing(l) if l and l.marketplace in MARKETS else {}
             except (KeyError,ValueError,AmazonError):price={}
             raw=price.get('sale_price') if price.get('sale_status')=='active' else price.get('price');ccy=price.get('currency')
+            if item.get('amount') is not None and item.get('currency') and qty>0:
+                raw=money(Decimal(str(item['amount']))/qty);ccy=item['currency']
             if raw is None or Decimal(raw)<=0 or not ccy:
                 missing_price=True;reasons.append('部分商品售价未维护');continue
             unit=Decimal(raw)
             converted=convert([{'amount':str(unit*qty),'currency':ccy}],fx)
             if converted['amount'] is None:missing_price=True;reasons.append('汇率待补齐');continue
             revenue+=Decimal(converted['amount'])
+            if not l:reasons.append('商品 Listing 未匹配，费用无法预估');continue
             if order.fulfilled_by!='AMAZON':reasons.append('自配送费用暂未维护');continue
             key=quote_key(l.id,unit,ccy)
             if key not in quote_results:
@@ -84,6 +94,7 @@ def enrich(db,orders,items_by_order,queue=True):
                 if queue and due:quote_results[key]=ensure_quote(l,unit,ccy)
                 else:quote_results[key]={'status':q.status,'estimate':q.estimate,'synced_at':q.synced_at,'error':q.error,'stale':stale} if q else {'status':'queued','estimate':None}
             quote=quote_results[key]
+            if quote.get('synced_at'):out['fee_updated_at']=min(out['fee_updated_at'],quote['synced_at']) if out['fee_updated_at'] else quote['synced_at']
             if not quote['estimate']:
                 out['pending']|=quote['status'] in ('queued','running');reasons.append('费用待获取' if quote['status'] in ('queued','running') else '费用读取失败');continue
             try:total,*_=parse_fees(quote['estimate'],ccy)
@@ -105,5 +116,5 @@ def enrich(db,orders,items_by_order,queue=True):
         if effective is not None and not reasons:
             vat=included_vat(effective);gross=effective-fees_total-vat-purchase-shipping
             out.update(gross_profit=money(gross),gross_margin=money(gross/effective*100) if effective else None,amazon_fees=money(fees_total),vat=money(vat),purchase_cost=money(purchase),freight_cost=money(shipping),fx_date=fx['date'])
-        out['notes']=list(dict.fromkeys(reasons+cost_notes));out['method']='按当前售价及费用估算；增值税按含税销售额÷(1＋20%)×20%预估，未含广告、仓储及退款。不是实际结算毛利。'
+        out['notes']=list(dict.fromkeys(reasons+cost_notes));out['method']='按订单商品金额（缺失时用当前售价）及费用估算；增值税按含税销售额÷(1＋20%)×20%预估，未含广告、仓储及退款。不是实际结算毛利。'
     return result

@@ -75,7 +75,7 @@ def test_box_missing_or_mismatched_stops():
  with pytest.raises(HTTPException):logistics.expand_box_items(ctx['items'],ctx)
 def test_preview_basic_fields_and_dynamic_details():
  pk=template();d=client.get('/api/logistics/templates/'+str(pk)+'/preview').json()
- assert list(d['scalars'])==['shipment_id','country','warehouse_code','vat','eori','boxes']
+ assert list(d['scalars'])==['shipment_id','country','warehouse_code','boxes','vat','eori','consignee','address','province','city','postal_code','declaration_mode','tax_mode','currency','total_quantity','estimated_tax','dispatched_on']
  assert 'box_label' in d['columns'] and 'clearance_url' in d['columns']
  assert mapping(pk,fields={'invoice_number':'B3'}).status_code==200
  assert 'invoice_number' in client.get('/api/logistics/templates/'+str(pk)+'/preview').json()['scalars']
@@ -86,3 +86,53 @@ def test_amazon_box_order_keeps_carton_identity():
  ctx['box_contents'][1]['boxId']='FBA-TESTU000001'
  rows=logistics.expand_box_items(ctx['items'],ctx)
  assert [(r['box_label'],r['quantity']) for r in rows]==[('FBA-TESTU000001',6),('FBA-TESTU000002',4),('FBA-TESTU000002',2)]
+
+def test_clearance_links_accept_browser_copied_urls_and_optional_fields():
+ r=post('/customs/profiles',{'name':'派对纸杯16P','clearance':{'clearance_url_uk':' https://www.amazon.co.uk/dp/B0TEST0001 ','clearance_url_de':'amazon.de/gp/product/B0TEST0001'}})
+ assert r.status_code==200,r.text
+ data=r.json();assert data['clearance']['clearance_url_de']=='https://amazon.de/gp/product/B0TEST0001'
+ assert data['clearance']['clearance_url_uk']=='https://www.amazon.co.uk/dp/B0TEST0001'
+ assert client.get('/api/customs/profiles/'+str(data['id'])).json()['clearance']==data['clearance']
+ assert post('/customs/profiles',{'name':'仅商品名称'}).status_code==200
+ pk=product('LINKS',clearance={'clearance_url_de':'www.amazon.de/dp/B0TEST0001'})
+ assert detail(pk)['clearance']['clearance_url_de']=='https://www.amazon.de/dp/B0TEST0001'
+
+@pytest.mark.parametrize('url',['javascript:alert(1)','not a url','https://'+'test-user:test-password@example.com/item','ftp://example.com/item','https://bad host.example/item'])
+def test_invalid_clearance_links_identify_field_without_echoing_input(url):
+ r=post('/customs/profiles',{'name':'无效链接','clearance':{'clearance_url_de':url}})
+ assert r.status_code==422
+ message=r.json()['detail'];assert isinstance(message,str) and '德国清关url' in message
+ assert url not in message
+
+def test_profile_required_name_is_explained():
+ for name in ('','   '):
+  r=post('/customs/profiles',{'name':name})
+  assert r.status_code==422 and r.json()['detail']=='请填写商品名称。'
+
+def test_brand_shared_by_profiles_products_and_invoice():
+ r=post('/customs/profiles',{'name':'品牌资料','declaration':{'brand_type':'境内自主品牌','brand':'Example Brand'},'clearance':{'name_cn':'玩具'}})
+ assert r.status_code==200,r.text
+ lib=r.json()
+ for kind in ('declaration','clearance'):
+  assert lib[kind]['brand']=='Example Brand' and lib[kind]['brand_type']=='境内自主品牌'
+ pk=product('BRAND',customs_profile_id=lib['id']);listing(pk,country='DE',sku='SKU-1');shipment()
+ ctx=client.get('/api/logistics/shipment?store=DemoStoreA&shipment_id=FBA-TEST').json()
+ assert ctx['items'][0]['brand']=='Example Brand'
+ d=detail(pk)
+ assert post('/products/'+str(pk),{'code':'BRAND','name':d['name'],'revision':d['revision'],'declaration':{'brand_type':'无品牌'}}).status_code==200
+ d=detail(pk)
+ for kind in ('declaration','clearance'):assert d[kind]['brand']=='无' and d[kind]['brand_type']=='无品牌'
+ ctx=client.get('/api/logistics/shipment?store=DemoStoreA&shipment_id=FBA-TEST').json()
+ assert ctx['items'][0]['brand']=='无'
+ r=post('/customs/profiles/'+str(lib['id']),{'name':lib['name'],'revision':lib['revision'],'declaration':{'brand_type':'无品牌','brand':'Old Brand'}})
+ assert r.status_code==200,r.text
+ assert r.json()['clearance']['brand']==r.json()['declaration']['brand']=='无'
+
+def test_unrelated_product_update_preserves_legacy_brand_types():
+ pk=product('OLD-BRAND')
+ with Session.begin() as db:
+  p=db.get(LocalProduct,pk);p.declaration={'brand_type':'境内自主品牌','brand':'旧品牌'};p.clearance={'brand_type':'境外品牌（其他）','brand':'Original'}
+ d=detail(pk)
+ assert post('/products/'+str(pk),{'code':'OLD-BRAND','name':'只改名称','revision':d['revision']}).status_code==200
+ after=detail(pk)
+ assert after['declaration']==d['declaration'] and after['clearance']==d['clearance']

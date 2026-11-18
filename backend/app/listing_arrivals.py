@@ -34,7 +34,10 @@ def arrival_info(db,row,at=None):
     today=at.astimezone(ZoneInfo(ZONES[row.marketplace])).date()
     totals={str(n):0 for n in (15,30,60)};unknown=overdue=unverified=later=0;details=[];timestamps=[]
     identity=fnsku(row)
-    for shipment,item in candidates(db,row):
+    matches=candidates(db,row)
+    from .operations_models import LogisticsSettlement
+    channels={s.shipment_id:(s.detail.get('channel') or {}).get('name') for s in db.scalars(select(LogisticsSettlement).where(LogisticsSettlement.store==row.store,LogisticsSettlement.shipment_id.in_([sh.shipment_id for sh,_ in matches])))} if matches else {}
+    for shipment,item in matches:
         d=records.get(shipment.shipment_id,{})
         markets=d.get('marketplace_ids',[])
         if markets and MARKETS[row.marketplace] not in markets:continue
@@ -62,7 +65,7 @@ def arrival_info(db,row,at=None):
                     if delta<=days:totals[str(days)]+=units
         if observed:timestamps.append(observed)
         if quantity_at:timestamps.append(quantity_at)
-        details.append({'shipment_id':shipment.shipment_id,'units':units,'status':status,'warehouse':shipment.destination,'start':d.get('start'),'end':d.get('end'),'bucket':bucket,'synced_at':d.get('synced_at'),'quantity_at':quantity_at,'error':d.get('error')})
+        details.append({'shipment_id':shipment.shipment_id,'dispatched_on':shipment.dispatched_on,'logistics_channel':channels.get(shipment.shipment_id),'units':units,'status':status,'warehouse':shipment.destination,'start':d.get('start'),'end':d.get('end'),'bucket':bucket,'synced_at':d.get('synced_at'),'quantity_at':quantity_at,'error':d.get('error')})
     unresolved=unknown+overdue+unverified
     # Zero is meaningful only after a successful scan; absent FNSKU is never matched by SKU alone.
     ready=bool(cache and cache.synced_at and identity)

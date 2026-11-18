@@ -39,12 +39,14 @@ class LogisticsDocument(Base):
  store=Column(String(40),nullable=False,index=True)
  shipment_id=Column(String(80),nullable=False)
  kind=Column(String(20),nullable=False)
- template_id=Column(Integer,ForeignKey('logistics_templates.id'),nullable=False)
+ template_id=Column(Integer,ForeignKey('logistics_templates.id'),nullable=True)
  filename=Column(String(255),nullable=False)
  content=Column(LargeBinary,nullable=False)
  detail=Column(JSONB,nullable=False)
  actor=Column(String(64),nullable=False)
  created_at=Column(DateTime(timezone=True),nullable=False,default=now)
+ revision=Column(Integer,nullable=False,default=1)
+ updated_at=Column(DateTime(timezone=True),nullable=False,default=now)
  __table_args__=(UniqueConstraint('store','shipment_id','kind'),)
 class LogisticsSettlement(Base):
  __tablename__='logistics_settlements'

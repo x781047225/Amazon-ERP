@@ -73,6 +73,9 @@ def calculate(row,override=None,expected_currency=None):
     price=money(override if override is not None else default,'测算售价')
     fees=fetch_fees(row.store,row.marketplace,row.sku,price,currency)
     total,referral,fba,other=parse_fees(fees['estimate'],currency)
+    # Share the freshly validated quote with order-list estimates at this price.
+    from .order_estimates import save_quote
+    save_quote(row.id,price,currency,fees['estimate'])
     with Session() as db:
         product=db.scalar(select(LocalProduct).join(ProductLink,ProductLink.product_id==LocalProduct.id).where(ProductLink.listing_pk==row.id))
         from .product_costs import freight as product_freight

@@ -59,6 +59,8 @@ def test_pending_order_estimate_does_not_overwrite_actual_or_double_quantity():
   assert d['amount_estimated'] and d['display_amount']=='20.00'
   # revenue20 - fees6 - inclusive VAT3.33 - purchase2 - freight0.5
   assert d['vat']=='3.33' and d['gross_profit']=='8.17' and o.amount is None
+  from app.order_estimates import save_quote
+  save_quote(lid,19,'EUR',estimate())
   actual=enrich(db,[o],{oid:[{'sku':sku,'quantity':2,'amount':Decimal('38'),'currency':'EUR'}]},queue=False)[oid]
   assert actual['display_amount']=='38.00' and not actual['amount_estimated'] and actual['vat']=='6.33' and actual['gross_profit']=='23.17'
   o.amount=Decimal('18');d=enrich(db,[o],items,queue=False)[oid]

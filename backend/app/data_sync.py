@@ -18,13 +18,14 @@ from .store_credentials import get
 from .products import audit
 from .amazon import redis
 router=APIRouter(prefix='/api/settings/sync-data')
-KINDS={'listing':'Listing','orders':'订单','inventory':'库存','shipments':'货件','finance':'利润结算','advertising':'广告活动','sta':'STA任务','mail':'绩效邮件'}
+KINDS={'listing':'Listing','orders':'订单','inventory':'库存','shipments':'货件','finance':'利润结算','advertising':'广告活动','sta':'STA任务','mail':'绩效邮件','fees':'商品费用报告'}
 DAYS=[1,7,14,30,90,180,365]
 INTERVALS=[1440,720,360,240,60,30,10,5,1]
 ACTIVE=['queued','running']
 NOTES={'listing': '同步当前全部 Listing：SKU、ASIN、FNSKU、标题、品牌、主图、商品类型、属性（含亮点和关键词）、售价/促销报价、销售状态、问题提示、变体关系及配送可用量。初始化和定时任务均重新扫描当前全量，不按创建日期排除旧商品；库存详细数量由库存任务更新。API 未返回的商品保留本地旧记录，不据此删除。', 'orders': '同步订单号、下单/更新时间、状态、配送方式、金额/币种，以及商品 SKU、ASIN、名称、数量和金额。初始化按下单时间分段回溯，优先同步最近日期，再补齐历史；全部分段完成前显示整体进度，已入库订单可按日期范围查看。定时按最后更新时间同步，并重读前 10 分钟；每日凌晨另复核最近 48 小时，更新已有订单。下午下单、晚上取消也会更新，取消订单不计销量。全部分页成功后才推进同步位置，重复订单按编号更新。', 'inventory': '初始化读取各站点完整 FBA 库存，定时读取变化数据：SKU、ASIN、FNSKU、品相、可售、预留/处理中、不可售、在途、待发及接收中数量和总量。每 4 小时全量校准入库在途等不触发增量通知的数量，不生成历史库存，也不改动本地仓库出入库。返回不完整或失败时保留旧值并提示。', 'shipments': '同步 FBA 货件编号、名称、状态、收货仓/国家，以及商品 SKU、FNSKU、申报和已接收数量、箱内数量，并计算未接收/超收。初始化按所选范围的最近更新时间发现货件；定时按最近更新时间续读并重叠 1 天；已关闭、取消或删除的货件仅更新状态，跳过明细；本地维护的物流信息保留。', 'finance': '同步亚马逊入账交易：交易编号、订单关联、入账时间、状态、币种、销售回款、退款及各项费用明细；据此更新利润结算。初始化按时间范围分段读取，定时从成功位置往前重读 1 天，按交易编号更新去重。到账金额不等于利润，利润还需本地采购/头程成本和广告费用。', 'advertising': '每次发现广告账户并刷新当前 SP 广告活动、广告组、广告商品、关键词、投放和否定规则等资料（含状态、预算及竞价）；另同步按天的展示、点击、花费、归因订单和销售额。定时重读至少最近 14 天日报，以更新延迟归因。历史报表受接口回溯期限限制；SB/SD 仅展示支持的概览数据，不等同于完整同步。'}
 NOTES['sta']='同步亚马逊可返回的历史 STA 入库计划：计划编号、名称、状态、创建/更新时间、关联货件号、收货仓和商品 SKU/ASIN/FNSKU/数量。初始化按最近更新时间筛选所选天数；定时按最近更新时间增量读取并重叠 1 天，未变化的计划跳过明细。已关闭/作废计划保留。历史记录只供查看，不创建本地发货单或重复提交亚马逊；旧版或接口不提供的计划无法补造。'
-Kind=Literal['listing','orders','inventory','shipments','finance','advertising','sta','mail']
+Kind=Literal['listing','orders','inventory','shipments','finance','advertising','sta','mail','fees']
+NOTES['fees']='每天同步 FBA 费用预览、每日库存台账、仓储体积及费率、库存健康报告。基础仓储费按整月预估：截至昨日逐日累计＋最新完整日库存推算剩余天数（含今天）；预计超龄费取亚马逊返回值。历史已扣费用不作当月费用。NL/PL/SE/BE 暂无库存健康报告。广告复用历史日报，推荐每天同步。'
 NOTES['mail']='读取已授权微软邮箱中所选时间范围的亚马逊邮件（各邮件文件夹），保存主题、发件人、收件时间和纯文本正文；不下载附件、不改变已读状态、不删除邮箱邮件。绩效分类为关键词初筛，请核对原文。定时从最近成功位置重读48小时，按邮箱及邮件编号去重；全部分页成功才更新最近同步时间。授权被撤销后需重新连接。'
 class Body(BaseModel):model_config=ConfigDict(extra='forbid')
 class Schedule(Body):
@@ -35,11 +36,11 @@ class Schedule(Body):
 class Resume(Body):run_id:str
 class Start(Body):days:Literal[1,7,14,30,90,180,365]=30
 
-def readiness(store,kind):
+def readiness(store,kind,credentials=None):
  if kind=='mail':
   from .mail import readiness as mail_readiness
   return mail_readiness(store)
- try:d=get(store)
+ try:d=credentials if credentials is not None else get(store)
  except KeyError:return False,'请先维护店铺授权'
  keys=['ads_client_id','ads_client_secret','ads_refresh_token','ads_api_url'] if kind=='advertising' else ['seller_id','client_id','client_secret','refresh_token']
  return (True,'') if all(d.get(k) for k in keys) else (False,'请先补齐'+('广告' if kind=='advertising' else 'SP-API')+'授权')
@@ -53,6 +54,7 @@ def error_info(message):
  return {'summary':summary,'items':items}
 
 def schedule_note(kind,config):
+ if kind=='fees':return '每天一次费用及库存快照；月度报告提供体积、参考费率，每日台账计算本月累计仓储费，库存健康报告提供预计超龄费。'
  if kind=='listing':return '每次扫描当前全部 Listing，不受初始化天数影响。'
  if kind=='inventory':return '从各站点成功位置读取库存变化；每 4 小时全量校准在途等数量。不受初始化天数影响。'
  rule={'orders':'按订单最后更新时间，从上次成功位置往前重读 10 分钟；每日凌晨另复核最近 48 小时。','shipments':'按货件最近更新时间，从成功位置往前重读 1 天；已关闭、取消或删除的货件跳过明细。','sta':'按计划最近更新时间，从成功位置往前重读 1 天；未变化的计划跳过明细。','finance':'按入账时间，从上次成功位置往前重读 1 天 10 分钟。','mail':'按收件时间，从上次成功位置往前重读 48 小时 10 分钟。','advertising':'刷新当前广告资料；日报从上次成功位置往前重读 14 天 10 分钟，至少覆盖最近 14 天。'}[kind]
@@ -63,18 +65,23 @@ def public(r):
  return {k:getattr(r,k) for k in ['id','store','kind','mode','days','status','start_at','end_at','created_at','finished_at','actor','warning','error']}|{'steps':[{k:v for k,v in p.items() if k not in ('cursor','seen','pending')} for p in r.plans],'completed':sum(p.get('status')=='succeeded' for p in r.plans),'total':len(r.plans),'error_info':error_info(r.error)}
 def lock(db,store,kind):db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:k))'),{'k':'data-sync:'+store+':'+kind})
 def legacy_active(db,store,kind):
- if kind in ('sta','mail'):return False
+ if kind in ('sta','mail','fees'):return False
  model={'listing':ListingSyncJob,'orders':SyncJob,'shipments':FbaJob,'finance':FinanceJob,'inventory':StoreInventory}.get(kind)
- if model:return db.scalar(select(model).where(model.store==store,model.status.in_(ACTIVE))) is not None
- return db.scalar(select(AdsSync.id).join(AdsProfile,AdsProfile.id==AdsSync.profile_id).where(AdsProfile.account==store,AdsSync.status.in_(ACTIVE+['waiting']))) is not None
+ if model:return db.scalar(select(model.store).where(model.store==store,model.status.in_(ACTIVE)).limit(1)) is not None
+ return db.scalar(select(AdsSync.id).join(AdsProfile,AdsProfile.id==AdsSync.profile_id).where(AdsProfile.account==store,AdsSync.status.in_(ACTIVE+['waiting'])).limit(1)) is not None
 @router.get('')
 def settings(store:str):
  require_store(store)
  with Session() as db:
+  configs={c.kind:c for c in db.scalars(select(Config).where(Config.store==store))}
+  latest_runs={r.kind:r for r in db.scalars(select(Run).where(Run.store==store).distinct(Run.kind).order_by(Run.kind,Run.created_at.desc(),Run.id.desc()))}
+  active_kinds=set(db.scalars(select(Run.kind).where(Run.store==store,Run.status.in_(ACTIVE))))
+  try:credentials=get(store)
+  except KeyError:credentials={}
   rows=[]
   for kind,label in KINDS.items():
-   c=db.get(Config,(store,kind));latest=db.scalar(select(Run).where(Run.store==store,Run.kind==kind).order_by(Run.created_at.desc()).limit(1));ready,message=readiness(store,kind)
-   rows.append({'kind':kind,'label':label,'note':NOTES[kind],'ready':ready,'message':message,'days':c.days if c else 30,'interval_minutes':c.interval_minutes if c else 1440,'enabled':c.enabled if c else False,'revision':c.revision if c else 0,'next_run_at':c.next_run_at if c else None,'last_success_at':c.last_success_at if c else None,'error':c.error if c and not (latest and latest.status in ACTIVE) else None,'schedule_note':schedule_note(kind,c),'latest':public(latest) if latest else None,'active':db.scalar(select(Run.id).where(Run.store==store,Run.kind==kind,Run.status.in_(ACTIVE)).limit(1)) is not None or legacy_active(db,store,kind)})
+   c=configs.get(kind);latest=latest_runs.get(kind);ready,message=readiness(store,kind,credentials)
+   rows.append({'kind':kind,'label':label,'note':NOTES[kind],'ready':ready,'message':message,'days':c.days if c else 30,'interval_minutes':c.interval_minutes if c else 1440,'enabled':c.enabled if c else False,'revision':c.revision if c else 0,'next_run_at':c.next_run_at if c else None,'last_success_at':c.last_success_at if c else None,'error':c.error if c and not (latest and latest.status in ACTIVE) else None,'schedule_note':schedule_note(kind,c),'latest':public(latest) if latest else None,'active':kind in active_kinds or legacy_active(db,store,kind)})
   from .order_sync_progress import progress
   next(row for row in rows if row['kind']=='orders')['progress']=progress(db,store)
   return {'rows':rows,'days':DAYS,'intervals':INTERVALS}
@@ -136,7 +143,7 @@ def resume(store:str,kind:Kind,b:Resume):
     if not connection or r.plans[0].get('revision')!=connection.revision:raise HTTPException(409,'邮箱授权已变更，请重新初始化')
    plans=copy.deepcopy(r.plans)
    # Do not queue every child here: the coordinator resumes them one at a time.
-   if kind not in ('sta','mail'):
+   if kind not in ('sta','mail','fees'):
     for p in plans:
      if p.get('status')!='succeeded':p['status']='retry_pending';p['error']=None
    previous_error=r.error
@@ -308,6 +315,9 @@ def advance(rid):
    r=db.get(Run,rid)
    if not r or r.status not in ACTIVE:return
    r.status='running'
+  if r.kind=='fees':
+   from .fee_reports import advance as advance_fees
+   advance_fees(r);return
   if r.kind=='mail':
    from .mail import advance as advance_mail
    advance_mail(r);return

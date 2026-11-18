@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {ref,watch,onUnmounted,computed} from 'vue'
 import {api} from './session'
-const props=defineProps<{order:any|null}>(),emit=defineEmits<{close:[]}>()
+const props=defineProps<{order:any|null}>(),emit=defineEmits<{close:[],calculated:[]}>()
 const rows=ref<any[]>([]),loading=ref(false),error=ref('')
 let generation=0
 const timers=new Map<number,ReturnType<typeof setTimeout>>()
@@ -25,7 +25,7 @@ async function calculate(row:any,g=generation){
  if(!/^\d+(\.\d{1,2})?$/.test(row.price)||Number(row.price)<=0){row.problem='请输入大于 0、最多两位小数的单价';return}
  const id=props.order?.id;if(!id||row.error||g!==generation)return
  row.busy=true
- try{const data=await api(`/orders/${id}/income-items/${row.id}/estimate`,{price:row.price,currency:row.currency});if(g!==generation||version!==row.version)return;row.result=data}
+ try{const data=await api(`/orders/${id}/income-items/${row.id}/estimate`,{price:row.price,currency:row.currency});if(g!==generation||version!==row.version)return;row.result=data;emit('calculated')}
  catch(e){if(g===generation&&version===row.version)row.problem=(e as Error).message}
  finally{if(g===generation&&version===row.version)row.busy=false}
 }
@@ -41,7 +41,7 @@ const breakdown={referral_fee:'销售佣金',fba_fee:'FBA费用',other_amazon_fe
 <div class="price-row"><span>数量 {{row.quantity}}</span><el-input v-model="row.price" :aria-label="row.sku+'测算单价'" :disabled="!!row.error" placeholder="单价" @input="changed(row)"><template #prepend>单价</template><template #append>{{row.currency}}</template></el-input><el-button :disabled="!!row.error" :loading="row.busy" @click="calculate(row)">重新计算</el-button></div>
 <el-alert v-if="row.error||row.problem" :title="row.error||row.problem" type="warning" :closable="false"/>
 <div v-if="row.busy" class="calc-note">正在计算此 SKU…</div>
-<template v-if="row.result"><div class="cost-grid cost-head"><span>费用明细</span><span>单件（{{row.currency}}）</span><span>{{row.quantity}} 件合计（{{row.currency}}）</span></div><div v-for="(label,key) in breakdown" :key="key" class="cost-grid" :class="{profit:key==='gross_profit'}"><span>{{label}}</span><span>{{fmt(row.result.unit[key])}}</span><span>{{fmt(row.result.totals[key])}}</span></div><p class="calc-note">预计毛利率 {{row.result.unit.gross_margin}}% · 增值税：含税售价 ÷ 1.20 × 20%</p><p v-if="row.result.unit.purchase_missing||row.result.unit.freight_missing" class="cost-warning">采购成本或头程资料不完整，缺失项按 0 测算，毛利可能偏高。</p></template>
+<template v-if="row.result"><div class="cost-grid cost-head"><span>费用明细</span><span>单件（{{row.currency}}）</span><span>{{row.quantity}} 件合计（{{row.currency}}）</span></div><div v-for="(label,key) in breakdown" :key="key" class="cost-grid" :class="{profit:key==='gross_profit'}"><span>{{label}}</span><span>{{fmt(row.result.unit[key])}}</span><span>{{fmt(row.result.totals[key])}}</span></div><p class="calc-note">费用时间：{{row.result.unit.fee_time?new Date(row.result.unit.fee_time).toLocaleString('zh-CN'):'—'}} · 预计毛利率 {{row.result.unit.gross_margin}}% · 增值税：含税售价 ÷ 1.20 × 20%</p><p v-if="row.result.unit.purchase_missing||row.result.unit.freight_missing" class="cost-warning">采购成本或头程资料不完整，缺失项按 0 测算，毛利可能偏高。</p></template>
 </section>
 <div class="order-calc-total"><template v-if="complete"><div v-for="t in totals" :key="t.currency">测算收入 {{t.currency}} {{fmt(t.revenue/100)}} · <b>预计毛利 {{t.currency}} {{fmt(t.profit/100)}}</b> · 毛利率 {{t.revenue?fmt(t.profit/t.revenue*100):'—'}}%</div></template><span v-else>全部 SKU 计算完成后显示订单合计</span></div>
 <template #footer><el-button @click="close">关闭</el-button></template></el-dialog></template>

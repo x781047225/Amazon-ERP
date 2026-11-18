@@ -51,6 +51,7 @@ def scan_market(store,market,cutoff,directory,progress=lambda **kw:None):
     state=json.loads(path.read_text()) if path.exists() else {'store':store,'market':market,'cutoff':cutoff,'pages':0,'cursor':None,'skus':[],'tokens':[],'scan_done':False}
     if (state['store'],state['market'],state['cutoff'])!=(store,market,cutoff):raise AmazonError('导入检查点与任务不一致。')
     if state['scan_done']:return state
+    if state.get('windowed'):return scan_windowed(store,market,cutoff,directory,progress)
     seen=set(state['skus']);tokens=set(state['tokens'])
     while True:
         first=directory/(market+'-first.json')
@@ -59,7 +60,7 @@ def scan_market(store,market,cutoff,directory,progress=lambda **kw:None):
         write_json(directory/(market+'-page-'+str(state['pages']+1)+'.json'),data)
         if not state['pages']:state['expected']=data.get('numberOfResults')
         if (state.get('expected') or 0)>1000:
-            write_json(path,state)
+            state['windowed']=True;write_json(path,state)
             return scan_windowed(store,market,cutoff,directory,progress)
         seen.update(save_page(store,market,data['items']))
         cursor=(data.get('pagination') or {}).get('nextToken')
@@ -68,38 +69,65 @@ def scan_market(store,market,cutoff,directory,progress=lambda **kw:None):
         if token_hash:tokens.add(token_hash)
         state.update(pages=state['pages']+1,cursor=cursor,skus=sorted(seen),tokens=sorted(tokens),scan_done=not bool(cursor),updated_at=now().isoformat())
         if not cursor and state.get('expected') is not None and len(seen)!=state['expected']:
-            state['scan_done']=False;state['error']=f"数量核对不一致：预期 {state['expected']}，唯一 SKU {len(seen)}";write_json(path,state);raise AmazonError(state['error'])
+            state['scan_done']=False;state['error']=f"数量核对不一致：预期 {state['expected']}，唯一 SKU {len(seen)}";state['windowed']=True;write_json(path,state)
+            return scan_windowed(store,market,cutoff,directory,progress)
         write_json(path,state);progress(market=market,phase='listings',pages=state['pages'],saved=len(seen),expected=state.get('expected'),done=state['scan_done'])
         if not cursor:return state
 
+def checked_window(store,market,a,b,directory,progress,updated=False):
+    """Retry only a mismatched window, with fresh cursors and a fresh SKU set."""
+    options={'updated':True} if updated else {}
+    for attempt in range(1,4):
+        data=search_page(store,market,b,after=a,**options)
+        count=data.get('numberOfResults')
+        if isinstance(count,bool) or not isinstance(count,int) or count<0:raise AmazonError('窗口搜索缺少有效结果数量')
+        if count>1000:return count,set()
+        found=set();tokens=set();received=0;pages=0
+        while True:
+            pages+=1;received+=len(data['items'])
+            found.update(save_page(store,market,data['items']))
+            progress(phase='listing_windows',market=market,attempt=attempt,expected=count,saved=len(found),pages=pages)
+            cursor=(data.get('pagination') or {}).get('nextToken')
+            if not cursor:break
+            if cursor in tokens:raise AmazonError('窗口搜索分页重复，已保留入库数据')
+            tokens.add(cursor);data=search_page(store,market,b,cursor,after=a,**options)
+        if len(found)==count:return count,found
+        detail={'start':a,'end':b,'attempt':attempt,'expected':count,'actual':len(found),'received':received,'duplicates':received-len(found),'pages':pages,'updated_at':now().isoformat()}
+        write_json(directory/(market+'-count-mismatch.json'),detail)
+        progress(phase='listing_retry',market=market,**detail)
+    raise AmazonError(f"商品数量核对未通过：接口预期 {count} 个，实际读取 {len(found)} 个不同 SKU（重复记录 {received-len(found)} 条）；已自动扫描 3 次，入库数据与已完成分段保留")
+
 def scan_windowed(store,market,cutoff,directory,progress=lambda **kw:None,start=None,updated=False):
-    """Split time ranges until each fits Amazon's 1,000 SKU pagination cap.
-    Inclusive boundaries deliberately overlap and are deduplicated by SKU.
-    """
+    """Split ranges for the 1,000 SKU cap; independently retry inconsistent windows."""
     from datetime import datetime,timezone
     path=directory/(market+'-windows.json')
-    state=json.loads(path.read_text()) if path.exists() else {'pending':[[start or '1970-01-01T00:00:00+00:00',cutoff]],'done':[],'skus':[],'expected':None}
+    beginning=start or '1970-01-01T00:00:00+00:00'
+    state=json.loads(path.read_text()) if path.exists() else {'pending':[[beginning,cutoff]],'done':[],'skus':[],'expected':None}
+    if state.get('scan_done'):return state
     seen=set(state['skus'])
     while state['pending']:
-        a,b=state['pending'][0];data=search_page(store,market,b,after=a,**({'updated':True} if updated else {}))
-        count=data.get('numberOfResults')
-        if not isinstance(count,int):raise AmazonError('窗口搜索缺少结果数量')
+        a,b=state['pending'][0]
+        count,found=checked_window(store,market,a,b,directory,progress,updated)
         if state['expected'] is None:state['expected']=count
         if count>1000:
             da,db=datetime.fromisoformat(a),datetime.fromisoformat(b);mid=da+(db-da)/2
             if (db-da).total_seconds()<0.001:raise AmazonError('同一创建时间超过1000条，需另行拆分')
             state['pending'][0:1]=[[a,mid.isoformat()],[mid.isoformat(),b]];write_json(path,state);continue
-        found=set();tokens=set()
-        while True:
-            found.update(save_page(store,market,data['items']))
-            cursor=(data.get('pagination') or {}).get('nextToken')
-            if not cursor:break
-            if cursor in tokens:raise AmazonError('窗口搜索分页重复')
-            tokens.add(cursor);data=search_page(store,market,b,cursor,after=a,**({'updated':True} if updated else {}))
-        if len(found)!=count:raise AmazonError('窗口商品数量不一致，请重新扫描')
         seen.update(found);state['skus']=sorted(seen);state['done'].append({'start':a,'end':b,'count':count});state['pending'].pop(0);write_json(path,state)
         progress(phase='listing_windows',market=market,saved=len(seen),expected=state['expected'],pending=len(state['pending']))
-    if len(seen)!=state['expected']:raise AmazonError('全量窗口去重数量与预期不一致')
+    if len(seen)!=state['expected']:
+        # A successful window rescan may have a different total than the initial search.
+        # Confirm the current total instead of comparing forever with an obsolete count.
+        latest=search_page(store,market,cutoff,after=beginning,**({'updated':True} if updated else {})).get('numberOfResults')
+        if isinstance(latest,bool) or not isinstance(latest,int) or latest<0:raise AmazonError('全量复核缺少有效结果数量')
+        if len(seen)!=latest:
+            detail={'expected':latest,'actual':len(seen),'initial_expected':state['expected'],'phase':'all_windows','updated_at':now().isoformat()}
+            write_json(directory/(market+'-count-mismatch.json'),detail)
+            # Next attempt must really rescan, not keep failing on completed windows.
+            state.update(pending=[[beginning,cutoff]],done=[],skus=[],expected=None,scan_done=False)
+            write_json(path,state)
+            raise AmazonError(f'全量数量复核未通过：接口预期 {latest} 个，实际读取 {len(seen)} 个不同 SKU；已保留入库数据，下次同步将重新核对')
+        state['expected']=latest
     state['scan_done']=True;write_json(path,state);return state
 
 def ensure_template(store,market,pt):

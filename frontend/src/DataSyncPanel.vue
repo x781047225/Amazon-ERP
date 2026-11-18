@@ -7,26 +7,36 @@ import {api,session,can} from './session'
 import SyncIssue from './SyncIssue.vue'
 import PayoutSchedule from './PayoutSchedule.vue'
 import {ElMessage,ElMessageBox} from 'element-plus'
-const stores=ref<string[]>([]),store=ref(session.value?.current_store||''),rows=ref<any[]>([]),runs=ref<any[]>([]),error=ref(''),loading=ref(false),page=ref(1),pageSize=ref(25),total=ref(0)
+const stores=ref<string[]>([]),store=ref(session.value?.current_store||''),rows=ref<any[]>([]),runs=ref<any[]>([]),error=ref(''),historyError=ref(''),loading=ref(false),historyLoading=ref(false),page=ref(1),pageSize=ref(25),total=ref(0)
 const days=[1,7,14,30,90,180,365],intervals=[1440,720,360,240,60,30,10,5,1]
-const names:Record<string,string>={listing:'Listing',orders:'订单',inventory:'库存',shipments:'货件',finance:'利润结算',advertising:'广告活动',sta:'STA任务',mail:'绩效邮件'}
+const names:Record<string,string>={listing:'Listing',orders:'订单',inventory:'库存',shipments:'货件',finance:'利润结算',advertising:'广告活动',sta:'STA任务',mail:'绩效邮件',fees:'商品费用报告'}
 const statuses:Record<string,string>={retry_pending:'等待继续',queued:'排队中',running:'同步中',waiting:'等待亚马逊报表',succeeded:'已完成',partial:'部分完成',failed:'失败'}
-const recommended:Record<string,number>={orders:5,inventory:1,listing:60,finance:240,shipments:240,sta:240}
+const recommended:Record<string,number>={advertising:1440,fees:1440,orders:5,inventory:1,listing:60,finance:240,shipments:240,sta:240}
 const intervalName=(n:number)=>n>=60?(n/60)+'小时':n+'分钟'
 const time=(v:string)=>v?new Date(v).toLocaleString('zh-CN',{hour12:false}):'—'
 const active=(r:any)=>r.active||['queued','running'].includes(r.latest?.status)
-let timer:ReturnType<typeof setInterval>|undefined,seq=0,disposed=false
-async function load(reset=false){
- if(!store.value)return
- const id=++seq,s=store.value
- if(reset)loading.value=true
- try{
-  const [data,history]=await Promise.all([api('/settings/sync-data?store='+encodeURIComponent(s)),api('/settings/sync-data/runs?'+new URLSearchParams({store:s,page:String(page.value),page_size:String(pageSize.value),paginated:'true'}))])
-  if(disposed||id!==seq)return
+let timer:ReturnType<typeof setInterval>|undefined,seq=0,disposed=false,pending=false,controller:AbortController|undefined
+async function load(reset=false,poll=false){
+ if(!store.value||disposed||(poll&&pending))return
+ controller?.abort()
+ const request=new AbortController();controller=request;pending=true
+ const id=++seq,s=store.value,current=()=>!disposed&&id===seq
+ const timeout=setTimeout(()=>request.abort(),30000)
+ if(reset||!rows.value.length)loading.value=true
+ historyLoading.value=true
+ const message=(e:unknown)=>request.signal.aborted?'加载超过 30 秒，请刷新重试。':(e as Error).message
+ // Settings can render immediately even if the history request is slow or fails.
+ const settings=api('/settings/sync-data?store='+encodeURIComponent(s),undefined,{signal:request.signal}).then(data=>{
+  if(!current())return
   rows.value=data.rows.map((r:any)=>{const old=rows.value.find(x=>x.kind===r.kind);return {...r,draft:!reset&&old?old.draft:{days:r.days,interval_minutes:r.interval_minutes,enabled:r.enabled},draftRevision:!reset&&old?old.draftRevision:r.revision,saving:old?.saving||false,starting:old?.starting||false,resuming:old?.resuming||false}})
-  runs.value=history.rows;total.value=history.total;error.value=''
- }catch(e){if(!disposed&&id===seq)error.value=(e as Error).message}
- finally{if(id===seq)loading.value=false}
+  error.value=''
+ }).catch(e=>{if(current())error.value=message(e)}).finally(()=>{if(current())loading.value=false})
+ const history=api('/settings/sync-data/runs?'+new URLSearchParams({store:s,page:String(page.value),page_size:String(pageSize.value),paginated:'true'}),undefined,{signal:request.signal}).then(data=>{
+  if(!current())return
+  runs.value=data.rows;total.value=data.total;historyError.value=''
+ }).catch(e=>{if(current())historyError.value=message(e)}).finally(()=>{if(current())historyLoading.value=false})
+ await Promise.allSettled([settings,history]);clearTimeout(timeout)
+ if(current())pending=false
 }
 async function save(row:any){
  row.saving=true
@@ -48,13 +58,13 @@ async function resume(row:any,run:any=row.latest){
  catch(e){ElMessage.error((e as Error).message)}finally{row.resuming=false;const current=rows.value.find(r=>r.kind===row.kind);if(current)current.resuming=false}
 }
 function historyRow(run:any){return rows.value.find(r=>r.kind===run.kind)}
-watch(store,()=>{seq++;rows.value=[];runs.value=[];page.value=1;load(true)})
-onMounted(async()=>{try{stores.value=(await api('/options')).stores;if(!stores.value.includes(store.value))store.value=stores.value[0]||'';else await load(true);if(!disposed)timer=setInterval(()=>load(),5000)}catch(e){error.value=(e as Error).message}})
-onUnmounted(()=>{disposed=true;seq++;if(timer)clearInterval(timer)})
+watch(store,()=>{seq++;controller?.abort();rows.value=[];runs.value=[];total.value=0;error.value='';historyError.value='';page.value=1;load(true)})
+onMounted(async()=>{try{stores.value=(await api('/options')).stores;if(!stores.value.includes(store.value))store.value=stores.value[0]||'';else await load(true);if(!disposed)timer=setInterval(()=>load(false,true),5000)}catch(e){error.value=(e as Error).message}})
+onUnmounted(()=>{disposed=true;seq++;controller?.abort();if(timer)clearInterval(timer)})
 </script>
 <template>
 <section class="sync-center">
- <div class="sync-heading"><div><h3>同步数据</h3><p>先在「店铺授权管理」配置授权，再选择店铺初始化。各类数据可以分别设置同步周期。</p></div><div class="sync-controls"><el-select v-model="store" aria-label="同步店铺" :disabled="rows.some(r=>r.saving||r.starting||r.resuming)"><el-option v-for="s in stores" :key="s" :value="s" :label="s"/></el-select><el-button @click="load(true)">刷新设置</el-button><TableReset table-key="DataSyncPanelLists/list-1"/></div></div>
+ <div class="sync-heading"><div><h3>同步数据</h3><p>先在「店铺授权管理」配置授权，再选择店铺初始化。各类数据可以分别设置同步周期。</p></div><div class="sync-controls"><el-select v-model="store" aria-label="同步店铺" :disabled="rows.some(r=>r.saving||r.starting||r.resuming)"><el-option v-for="s in stores" :key="s" :value="s" :label="s"/></el-select><el-button :disabled="loading" @click="load(true)">刷新设置</el-button><TableReset table-key="DataSyncPanelLists/list-1"/></div></div>
  <el-alert v-if="error" :title="error" type="error" :closable="false"/>
  <p class="sync-note">初始化会补充或更新现有数据，不清空已有记录。定时任务由后台执行，服务器需保持运行；同一店铺同一类数据不会重复启动。初始化天数用于手动回溯；定时增量任务从成功位置续读，具体规则见各行。修改设置后请点击该行「保存设置」。</p>
  <template v-if="true"><el-table data-width-key="DataSyncPanelLists/list-1" @header-dragend="(w:number,_:number,c:any)=>listWidths.resize('list-1',w,c)" @header-contextmenu="(c:any,e:MouseEvent)=>listWidths.resetColumn('list-1',c,e)" :data="rows" border v-loading="loading" row-key="kind" class="sync-settings">
@@ -65,7 +75,8 @@ onUnmounted(()=>{disposed=true;seq++;if(timer)clearInterval(timer)})
  </el-table></template>
  <PayoutSchedule :key="store" :store="store"/>
  <div class="sync-heading history-heading"><h3>任务记录</h3><span class="sync-note">每 5 秒更新状态</span><TableReset table-key="DataSyncPanelLists/list-2"/></div>
- <template v-if="true"><el-table data-width-key="DataSyncPanelLists/list-2" @header-dragend="(w:number,_:number,c:any)=>listWidths.resize('list-2',w,c)" @header-contextmenu="(c:any,e:MouseEvent)=>listWidths.resetColumn('list-2',c,e)" :data="runs" border row-key="id">
+ <el-alert v-if="historyError" :title="'任务记录：'+historyError" type="error" :closable="false"/>
+ <template v-if="true"><el-table v-loading="historyLoading && !runs.length" data-width-key="DataSyncPanelLists/list-2" @header-dragend="(w:number,_:number,c:any)=>listWidths.resize('list-2',w,c)" @header-contextmenu="(c:any,e:MouseEvent)=>listWidths.resetColumn('list-2',c,e)" :data="runs" border row-key="id">
   <el-table-column :column-key="'column-1'" :width="listWidths.width('list-2','column-1',undefined)" type="expand"><template #default="{row}"><div class="sync-detail"><p>请求范围：{{time(row.start_at)}} 至 {{time(row.end_at)}}</p><p v-if="row.warning">{{row.warning}}</p><SyncIssue :message="row.error"/><template v-if="true"><TableReset table-key="DataSyncPanelLists/list-3"/><el-table data-width-key="DataSyncPanelLists/list-3" @header-dragend="(w:number,_:number,c:any)=>listWidths.resize('list-3',w,c)" @header-contextmenu="(c:any,e:MouseEvent)=>listWidths.resetColumn('list-3',c,e)" :data="row.steps"><el-table-column :column-key="'column-1'" :width="listWidths.width('list-3','column-1',undefined)" label="分段 / 广告账户" min-width="300"><template #default="{row:step}">{{step.country?step.country+' · '+step.profile_id+' · ':''}}{{time(step.start)}} 至 {{time(step.end)}}</template></el-table-column><el-table-column :column-key="'column-2'" :width="listWidths.width('list-3','column-2','170')" label="状态" ><template #default="{row:step}">{{statuses[step.status]||'待执行'}}</template></el-table-column><el-table-column :column-key="'error'" :width="listWidths.width('list-3','error',undefined)" label="说明" min-width="250"><template #default="{row:step}"><SyncIssue :message="step.error"/></template></el-table-column></el-table></template></div></template></el-table-column>
   <el-table-column :column-key="'column-2'" :width="listWidths.width('list-2','column-2','120')" label="数据" ><template #default="{row}">{{names[row.kind]}}</template></el-table-column><el-table-column :column-key="'column-3'" :width="listWidths.width('list-2','column-3','130')" label="任务" ><template #default="{row}">{{row.mode==='initialize'?'初始化':'定时同步'}}</template></el-table-column><el-table-column :column-key="'column-4'" :width="listWidths.width('list-2','column-4','130')" label="状态" ><template #default="{row}">{{statuses[row.status]||row.status}}</template></el-table-column><el-table-column :column-key="'column-5'" :width="listWidths.width('list-2','column-5',undefined)" label="发起时间" min-width="175"><template #default="{row}">{{time(row.created_at)}}</template></el-table-column><el-table-column :column-key="'column-6'" :width="listWidths.width('list-2','column-6',undefined)" label="完成时间" min-width="175"><template #default="{row}">{{time(row.finished_at)}}</template></el-table-column><el-table-column :column-key="'actor'" :width="listWidths.width('list-2','actor','140')" prop="actor" label="发起人" /><el-table-column :column-key="'column-8'" :width="listWidths.width('list-2','column-8',undefined)" label="说明" min-width="260"><template #default="{row}"><SyncIssue v-if="row.error" :message="row.error"/><span v-else>{{row.warning||'—'}}</span><el-button v-if="row.status==='failed'&&historyRow(row)&&can('settings.sync-data','operate')" link type="primary" :disabled="!historyRow(row).ready||active(historyRow(row))||historyRow(row).starting||historyRow(row).resuming" @click="resume(historyRow(row),row)">继续同步</el-button></template></el-table-column>
  </el-table></template><AppPagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" @change="load()"/>

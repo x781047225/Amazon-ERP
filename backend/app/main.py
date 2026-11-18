@@ -29,6 +29,26 @@ from fastapi.exception_handlers import request_validation_exception_handler
 async def validation_error(request,exc):
     if request.url.path.startswith('/api/settings/stores'):
         return JSONResponse({'detail':'授权配置字段格式无效，请检查输入内容'},status_code=422)
+    if request.url.path.startswith('/api/logistics/invoices'):
+        from .logistics import COLUMNS,SCALARS
+        messages=[]
+        for err in exc.errors():
+            loc=err.get('loc',[]);field=str(loc[-1]) if loc else ''
+            label={**COLUMNS,**SCALARS,'quantity':'单箱申报数量','total_quantity':'产品总数量','country':'国家（二字代码）','template_id':'发票模板'}.get(field,'发票资料')
+            row=next((v for v in loc if isinstance(v,int)),None)
+            message=(f'第 {row+1} 行：' if row is not None else '')+label+'格式不正确，请检查输入。'
+            if message not in messages:messages.append(message)
+        return JSONResponse({'detail':'；'.join(messages[:5])},status_code=422)
+    if request.url.path.startswith(('/api/customs/profiles','/api/products')):
+        labels={'name':'商品名称','code':'标品编码','clearance_url_uk':'英国清关url','clearance_url_de':'德国清关url','hs_code':'HSCODE','tax_rate':'税率','unit_price':'单价','currency':'币种','revision':'资料版本'}
+        messages=[]
+        for err in exc.errors():
+            field=str(err.get('loc',[''])[-1]);label=labels.get(field,'资料字段')
+            if field.startswith('clearance_url_'):message=label+'格式不正确，请填写有效的 http/https 链接，或留空。'
+            elif field in ('name','code') and err.get('type') in ('missing','string_too_short'):message='请填写'+label+'。'
+            else:message=label+'格式不正确，请检查输入内容。'
+            if message not in messages:messages.append(message)
+        return JSONResponse({'detail':'；'.join(messages[:5])},status_code=422)
     return await request_validation_exception_handler(request,exc)
 app.include_router(auth.router)
 from .todos import router as todos_router
@@ -220,6 +240,8 @@ app.include_router(listing_sync_router)
 from .logistics import router as logistics_router
 from .operations_settings import router as operations_settings_router
 app.include_router(logistics_router)
+from .clearance_invoices import router as clearance_invoices_router
+app.include_router(clearance_invoices_router)
 app.include_router(operations_settings_router)
 
 from .product_data import router as product_data_router

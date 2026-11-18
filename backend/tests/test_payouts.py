@@ -179,3 +179,19 @@ def test_duplicate_worker_during_read_does_not_post_twice(fake,monkeypatch):
   return Decimal(12),'EUR'
  monkeypatch.setattr(a,'expected',reading);p.run(j)
  assert len(fake)==1
+
+
+@pytest.mark.parametrize('amount',[
+ {'value':'12.34','unit':'EUR'}, {'currencyAmount':12.34,'currencyCode':'EUR'},
+ {'value':0,'unit':'EUR'}, {'value':'-1','unit':'EUR'},
+ {'value':'12.34','unit':'EUR','currencyAmount':'12.340','currencyCode':'EUR'}])
+def test_expected_money_variants(amount,monkeypatch):
+ r=expected_data();r['amount']=amount
+ monkeypatch.setattr(a,'request',lambda *args:{'expectedPayouts':[r]})
+ assert a.expected('DemoStoreA','TEST-SELLER','DE')==(Decimal(str(amount.get('value',amount.get('currencyAmount')))),'EUR')
+
+@pytest.mark.parametrize('amount',[None,[],{}, {'value':None,'unit':'EUR'}, {'value':True,'unit':'EUR'}, {'value':'NaN','unit':'EUR'}, {'value':'1','unit':'bad'}, {'value':'1','currencyCode':'EUR'}, {'value':'1','unit':'EUR','currencyAmount':2,'currencyCode':'EUR'}])
+def test_expected_money_invalid_still_stops(amount,monkeypatch):
+ r=expected_data();r['amount']=amount
+ monkeypatch.setattr(a,'request',lambda *args:{'expectedPayouts':[r]})
+ with pytest.raises(a.PayoutError):a.expected('DemoStoreA','TEST-SELLER','DE')

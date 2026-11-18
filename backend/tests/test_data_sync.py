@@ -23,7 +23,7 @@ def gate(monkeypatch):
 
 def test_defaults_ranges_and_readiness():
  r=client.get(BASE+'?store=DemoStoreB');assert r.status_code==200
- d=r.json();assert len(d['rows'])==8 and d['days']==[1,7,14,30,90,180,365]
+ d=r.json();assert len(d['rows'])==9 and d['days']==[1,7,14,30,90,180,365]
  assert d['intervals']==[1440,720,360,240,60,30,10,5,1]
  assert not any(x['enabled'] for x in d['rows'])
  assert all(x['interval_minutes']==1440 for x in d['rows'])
@@ -526,3 +526,20 @@ def test_previously_recorded_403_blocks_new_segments(gate):
  with Session() as db:
   assert db.get(Run,r.id).status=='failed'
   assert len(list(db.scalars(select(FinanceJob))))==1
+
+def test_overview_batched_latest_active_and_single_credentials_read(monkeypatch):
+ from app.models import now
+ old=run('orders')
+ with Session.begin() as db:
+  db.add(Run(id='newer-complete',store='DemoStoreB',kind='orders',mode='initialize',days=1,status='succeeded',start_at=old.start_at,end_at=old.end_at,actor='tester',plans=[]))
+  db.add(Run(id='other-store-latest',store='DemoStoreA',kind='orders',mode='initialize',days=1,status='failed',start_at=old.start_at,end_at=old.end_at,actor='tester',plans=[]))
+  db.add(Config(store='DemoStoreB',kind='orders',enabled=True,days=7,interval_minutes=5,revision=3))
+ original=sync.get;calls=[]
+ def get_once(store):calls.append(store);return original(store)
+ monkeypatch.setattr(sync,'get',get_once)
+ response=client.get(BASE+'?store=DemoStoreB')
+ assert response.status_code==200,response.text
+ assert calls==['DemoStoreB']
+ rows=response.json()['rows'];orders=next(r for r in rows if r['kind']=='orders')
+ assert len(rows)==9 and orders['latest']['id']=='newer-complete' and orders['active']
+ assert orders['enabled'] and orders['interval_minutes']==5 and orders['revision']==3

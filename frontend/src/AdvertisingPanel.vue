@@ -2,11 +2,12 @@
 import {useTableWidths} from './tableWidths'
 const tableWidths=useTableWidths('AdvertisingPanel')
 
-import {ref,computed,onMounted,onUnmounted} from 'vue'
+import {ref,computed,onMounted,onUnmounted,watch} from 'vue'
 import {ElMessage} from 'element-plus'
 import {Search,Refresh,ArrowRight,EditPen,Check} from '@element-plus/icons-vue'
 import {api,session,can,firstAllowed} from './session'
 import AdsCreatePage from './AdsCreatePage.vue'
+const props=defineProps<{focus?:{store:string,marketplace:string,asin:string,request:number}|null}>()
 const createMode=ref('')
 const canEditAds=computed(()=>can(level.value==='detail'?'advertising.'+tab.value:'advertising','operate'))
 const profiles=ref<any[]>([]),profile=ref(''),country=ref('FR'),store=ref(''),level=ref('campaign'),tab=ref(firstAllowed('advertising',['ad','target','negative','search','logs'])),campaign=ref<any>(null),group=ref<any>(null)
@@ -59,6 +60,17 @@ function openEntity(next:string,row:any,parent:any=null){
  saveView();const v=captureView();Object.assign(v,{level:next==='campaign'?'adgroup':'detail',tab:firstAllowed('advertising',['ad','target','negative','search','logs']),campaign:next==='campaign'?row:parent,group:next==='adgroup'?row:null,q:'',state:'',page:1,sort:'',direction:'desc',inlineValues:{},data:{rows:[],total:0}})
  workspaceTabs.value.push({id,label:row.name,kind:next,snapshot:v});activateTab(id)
 }
+function openFocusedAsin(){
+ const f=props.focus;if(!f||!profiles.value.length)return
+ const p=profiles.value.find(p=>p.account===f.store&&(p.country==='GB'?'UK':p.country)===f.marketplace)
+ if(!p){error.value='该店铺站点尚未同步广告账户，请先在同步设置中初始化广告活动';return}
+ saveView();const id=p.id+':asin:'+f.asin;const end=new Date(new Intl.DateTimeFormat('en-CA',{timeZone:p.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())+'T12:00:00Z');end.setUTCDate(end.getUTCDate()-1);const start=new Date(end);start.setUTCDate(start.getUTCDate()-6)
+ const v={...captureView(),profile:p.id,country:p.country,store:p.account,level:'adgroup',campaign:null,group:null,q:f.asin,searchType:'asin',state:'',page:1,preset:'custom',dates:[iso(start),iso(end)],inlineValues:{},data:{rows:[],total:0}}
+ const entry=workspaceTabs.value.find(t=>t.id===id)
+ if(entry)entry.snapshot=v;else workspaceTabs.value.splice(workspaceTabs.value.findIndex(t=>t.id===activeTab.value)+1,0,{id,label:f.asin+' · 广告组',snapshot:v})
+ request++;activeTab.value=id;restoreView(v);load();loadJobs();loadPreferences()
+}
+watch(()=>props.focus,openFocusedAsin)
 function go(next:string){if(next==='campaign'){activateTab('home')}else if(next==='adgroup'&&campaign.value){openEntity('campaign',campaign.value)}}
 function drill(row:any){if(level.value==='campaign')openEntity('campaign',row);else if(level.value==='adgroup')openEntity('adgroup',row,campaign.value||{id:row.campaign_id,name:row.campaign_name})}
 function all(){activateTab('home')}
@@ -80,7 +92,7 @@ async function preview(){editBusy.value=true;editError.value='';try{let changes:
 async function confirm(){if(!previewData.value)return;editBusy.value=true;editError.value='';try{const changed={...previewData.value.changes};const r=await api('/advertising/edit/confirm',{id:previewData.value.id});previewData.value=null;if(r.status==='succeeded'){if(editKind.value==='adgroup'&&group.value?.id===editRow.value.id)group.value={...group.value,...changed,default_bid:changed.defaultBid??group.value.default_bid};ElMessage.success(r.message);editOpen.value=false;delete inlineValues.value[editRow.value.key];await load()}else{editError.value=r.message;await load()}}catch(e){editError.value=(e as Error).message;previewData.value=null}finally{editBusy.value=false}}
 async function refreshSuggestions(){const group_ids=[...new Set(data.value.rows.map((r:any)=>r.adgroup_id).filter(Boolean))];if(!group_ids.length)return;suggestLoading.value=true;try{const r=await api('/advertising/target-suggestions/refresh',{profile_id:profile.value,group_ids});await load();if(r.errors.length)ElMessage.warning(r.errors.map((e:any)=>e.message).join('；'));else ElMessage.success('建议竞价已更新；未返回建议的投放项保留为空')}catch(e){ElMessage.error((e as Error).message)}finally{suggestLoading.value=false}}
 function applySuggestion(row:any,key:string){const value=row.suggestion?.[key];if(value!=null){changeInline(row,'bid',value);ElMessage.success('已填入竞价框，点击保存后确认提交')}}
-onMounted(async()=>{try{const r=await api('/advertising/profiles');profiles.value=r.profiles;profile.value=r.profiles[0]?.id||'';country.value=r.profiles[0]?.country||'FR';store.value=r.profiles[0]?.account||'';dates.value=periodDates('7');await Promise.all([load(),loadJobs(),loadPreferences()]);timer=setInterval(async()=>{try{const wasActive=active.value;await loadJobs();if(wasActive||active.value)await load()}catch{}},15000)}catch(e){error.value=(e as Error).message}})
+onMounted(async()=>{try{const r=await api('/advertising/profiles');profiles.value=r.profiles;profile.value=r.profiles[0]?.id||'';country.value=r.profiles[0]?.country||'FR';store.value=r.profiles[0]?.account||'';dates.value=periodDates('7');await Promise.all([load(),loadJobs(),loadPreferences()]);openFocusedAsin();timer=setInterval(async()=>{try{if(!active.value||document.hidden)return;await loadJobs();if(!active.value)await load()}catch{}},15000)}catch(e){error.value=(e as Error).message}})
 onUnmounted(()=>{if(timer)clearInterval(timer);request++})
 const metricColumns=[{key:'impressions',label:'曝光',type:'number'},{key:'clicks',label:'点击量',type:'number'},{key:'ctr',label:'点击率',type:'percent'},{key:'cost',label:'总成本',type:'money'},{key:'cpc',label:'CPC',type:'money'},{key:'purchases',label:'购买量',type:'number'},{key:'sales',label:'销售额',type:'money'},{key:'acos',label:'ACOS',type:'percent'},{key:'roas',label:'ROAS',type:'ratio'}]
 function format(v:any,t:string){return v==null?'—':t==='money'?money(v):t==='percent'?percent(v):t==='ratio'?Number(v).toFixed(2):number(v)}

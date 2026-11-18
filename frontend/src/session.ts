@@ -1,9 +1,9 @@
 import {ref} from 'vue'
 export type User={id:number,username:string,is_admin:boolean,active:boolean,stores:string[],default_store:string,current_store:string,roles?:{id:number,name:string}[],permissions?:string[],warehouse_ids?:number[]}
 export const session=ref<User|null>(null)
-export async function api(path:string,body?:unknown){
+export async function api(path:string,body?:unknown,options?:{signal?:AbortSignal}){
  let r:Response
- try{r=await fetch('/api'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-ERP-Client':'web'},body:body===undefined?undefined:JSON.stringify(body)})}
+ try{r=await fetch('/api'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-ERP-Client':'web'},body:body===undefined?undefined:JSON.stringify(body),signal:options?.signal})}
  catch{throw new Error('暂时无法连接服务器，请检查网络后刷新。')}
  if(r.status===401&&!path.startsWith('/auth/login'))window.dispatchEvent(new Event('erp:unauthorized'))
  let data:any
@@ -13,5 +13,5 @@ export async function api(path:string,body?:unknown){
  return data
 }
 
-export function can(key:string,action='view'){const u=session.value;return !!u&&(u.is_admin||!!u.permissions?.includes(key+'.'+action))}
+export function can(key:string,action='view'){const u=session.value;return !!u&&(u.is_admin||!!u.permissions?.includes(key+'.'+action)||(key==='products'&&action==='view'&&['settings.clearance.view','settings.declaration.view'].some(p=>u.permissions?.includes(p))))}
 export function firstAllowed(menu:string,tabs:string[]){return tabs.find(t=>can(menu+'.'+t))||''}

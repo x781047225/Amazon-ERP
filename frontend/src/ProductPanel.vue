@@ -5,11 +5,12 @@ const tableWidths=useTableWidths('ProductPanel')
 
 import SupplierPanel from './SupplierPanel.vue'
 import CustomsProfilePanel from './CustomsProfilePanel.vue'
+import CustomsCodesPanel from './CustomsCodesPanel.vue'
 import {ref,reactive,onMounted,computed} from 'vue'
 import {ElMessage,ElMessageBox} from 'element-plus'
 import {api,session} from './session'
 const props=defineProps<{initialStore:string}>()
-const tab=ref(firstAllowed('products',['products', 'suppliers', 'declaration', 'clearance']))
+const tab=ref(can('products.products')?'products':can('products.suppliers')?'suppliers':can('settings.clearance')?'clearance-codes':can('settings.declaration')?'declaration-codes':firstAllowed('products',['declaration','clearance']))
 const rows=ref<any[]>([]),total=ref(0),page=ref(1),pageSize=ref(25),loading=ref(false),error=ref('')
 const summary=reactive({active_count:0,unlinked_listings:0}),options=reactive({suppliers:[] as string[],stores:[] as string[],markets:[] as string[]})
 const filter=reactive({q:'',supplier:'',archived:false,unlinked:false,review:false})
@@ -29,9 +30,10 @@ async function refreshOptions(){if(!can('products.products'))return;const [o,p]=
 const linkedDialog=ref(false),linkedRows=ref<any[]>([]),linkedTotal=ref(0),linkedPage=ref(1),linkedPageSize=ref(25),linkedId=ref(0),linkedBusy=ref(false)
 async function showLinks(row:any){linkedId.value=row.id;linkedPage.value=1;focusedProduct.value=row.code;linkedDialog.value=true;await loadLinks()}
 async function loadLinks(){linkedBusy.value=true;try{const d=await api('/products/listings?'+new URLSearchParams({product_id:String(linkedId.value),state:'all',page:String(linkedPage.value),page_size:String(linkedPageSize.value)}));linkedRows.value=d.rows;linkedTotal.value=d.total}catch(e){ElMessage.error((e as Error).message)}finally{linkedBusy.value=false}}
-const emit=defineEmits(['open-product'])
+const emit=defineEmits(['open-product','open-customs'])
+const customsLibrary=ref<{refresh:()=>void}|null>(null)
 function edit(row?:any){emit('open-product',row?.id)}
-defineExpose({canLeave:async()=>true,refresh:()=>{load();refreshOptions()}})
+defineExpose({canLeave:async()=>true,refresh:()=>{load();refreshOptions();customsLibrary.value?.refresh()}})
 async function archiveProduct(row:any,restore=false){
  try{await ElMessageBox.confirm(restore?'恢复后即可编辑和关联店铺 SKU。':'将「'+row.code+'」移入回收站？以后可以恢复；已关联 SKU 的商品不能删除。',restore?'恢复标品':'删除标品',{type:'warning',confirmButtonText:restore?'恢复':'移入回收站',cancelButtonText:'取消'})}catch{return}
  try{await api('/products/'+row.id+(restore?'/restore':'/archive'),{revision:row.revision});ElMessage.success(restore?'标品已恢复':'已移入回收站');await Promise.all([load(),refreshOptions()])}catch(e){ElMessage.error((e as Error).message)}
@@ -45,7 +47,7 @@ onMounted(async()=>{try{await refreshOptions()}catch(e){error.value=(e as Error)
 <template>
 <div class="product-center">
  
- <div class="catalog-nav"><el-radio-group v-model="tab"><el-radio-button v-if="can('products.products')" value="products">产品信息</el-radio-button><el-radio-button v-if="can('products.suppliers')" value="suppliers">供应商</el-radio-button><el-radio-button v-if="can('products.declaration')||can('products.clearance')" :value="can('products.declaration')?'declaration':'clearance'">清关&amp;报关资料</el-radio-button></el-radio-group></div><SupplierPanel v-if="tab==='suppliers'"/><CustomsProfilePanel v-else-if="tab==='declaration'||tab==='clearance'"/><template v-else>
+ <div class="catalog-nav"><el-radio-group v-model="tab"><el-radio-button v-if="can('products.products')" value="products">产品信息</el-radio-button><el-radio-button v-if="can('products.suppliers')" value="suppliers">供应商</el-radio-button><el-radio-button v-if="can('settings.clearance')" value="clearance-codes">清关编码</el-radio-button><el-radio-button v-if="can('settings.declaration')" value="declaration-codes">报关编码</el-radio-button><el-radio-button v-if="can('products.declaration')||can('products.clearance')" :value="can('products.declaration')?'declaration':'clearance'">清关&amp;报关资料</el-radio-button></el-radio-group></div><SupplierPanel v-if="tab==='suppliers'"/><CustomsCodesPanel v-else-if="tab==='clearance-codes'||tab==='declaration-codes'" :kind="tab==='clearance-codes'?'clearance':'declaration'"/><CustomsProfilePanel v-else-if="tab==='declaration'||tab==='clearance'" ref="customsLibrary" @open="id=>emit('open-customs',id)"/><template v-else>
  <div class="catalog-stats"><span>在用标品 <b>{{summary.active_count.toLocaleString()}}</b></span><span>可访问店铺待关联 SKU <b>{{summary.unlinked_listings.toLocaleString()}}</b></span></div>
  <section class="catalog-card">
   <div class="catalog-filters"><el-input v-model="filter.q" placeholder="搜索 GM 编码 / 原编码 / 品名" clearable @keyup.enter="search"/><el-select v-model="filter.supplier" placeholder="全部供应商" clearable filterable><el-option v-for="s in options.suppliers" :key="s" :label="s" :value="s"/></el-select><el-checkbox v-model="filter.unlinked" @change="search">未关联</el-checkbox><el-checkbox v-model="filter.review" @change="search">待核对</el-checkbox><el-switch v-model="filter.archived" active-text="回收站" @change="search"/><el-button type="primary" @click="search">查询</el-button><el-button @click="reset">重置</el-button><el-button v-if="admin" type="primary" @click="edit()">新增产品</el-button><TableReset table-key="ProductPanel/table-1"/></div>

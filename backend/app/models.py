@@ -469,3 +469,5 @@ from .mail_models import MailApplication,MailConnection,MailMessage
 from .todo_models import Todo,TodoEvent,TodoImage,TodoCc
 
 from .payout_models import PayoutConfig,PayoutRun
+
+from .fee_reports import FeeReport

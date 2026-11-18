@@ -31,10 +31,10 @@ async function canLeave(){if(!drawer.value||baseline===state())return true;try{a
 async function closeDrawer(done:()=>void){if(await canLeave())done()}
 defineExpose({canLeave})
 async function save(){
- if(imageBusy.value)return
+ if(imageBusy.value||saving.value)return
  if(!form.code.trim()||!form.name.trim()){ElMessage.warning('请填写标品编码和品名');return}
  saving.value=true
- try{const customs:any={};for(const kind of ['declaration','clearance'] as const){const value={...form[kind]};for(const k of Object.keys(sharedFields))if(!editingId.value||profileApplied||common[k]!==renderedCommon[k])value[k]=common[k];const patch:any={};for(const [k,v] of Object.entries(value))if(!editingId.value||profileApplied||JSON.stringify(v)!==JSON.stringify(rendered[kind]?.[k]))patch[k]=v;if(Object.keys(patch).length)customs[kind]=patch}form.suppliers=form.primary_supplier?[form.primary_supplier]:[];const d=await api('/products'+(editingId.value?'/'+editingId.value:''),{...Object.fromEntries(Object.entries(form).filter(([k])=>!['declaration','clearance'].includes(k))),...customs});await edit({id:editingId.value||d.id});emit('saved',{id:editingId.value!,name:form.name});ElMessage.success('产品已保存')}catch(e){ElMessage.error((e as Error).message)}finally{saving.value=false}
+ try{const customs:any={};for(const kind of ['declaration','clearance'] as const){const value={...form[kind]};for(const k of Object.keys(sharedFields))if(!editingId.value||profileApplied||common[k]!==renderedCommon[k])value[k]=common[k];const patch:any={};for(const [k,v] of Object.entries(value))if(!editingId.value||profileApplied||JSON.stringify(v)!==JSON.stringify(rendered[kind]?.[k]))patch[k]=v;if(Object.keys(patch).length)customs[kind]=patch}form.suppliers=form.primary_supplier?[form.primary_supplier]:[];const d=await api('/products'+(editingId.value?'/'+editingId.value:''),{...Object.fromEntries(Object.entries(form).filter(([k])=>!['declaration','clearance'].includes(k))),...customs});editingId.value=editingId.value||d.id;baseline=state();emit('saved',{id:editingId.value!,name:form.name});ElMessage.success('产品已保存')}catch(e){ElMessage.error((e as Error).message)}finally{saving.value=false}
 }
 const cost=(n:any)=>n==null?'未维护':'¥'+Number(n).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:4})
 const time=(s:string)=>s?new Date(s).toLocaleString('zh-CN',{hour12:false}):'—'

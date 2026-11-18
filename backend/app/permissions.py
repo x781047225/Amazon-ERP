@@ -18,6 +18,9 @@ MENU={
  'settings':('设置',{'warehouses':'仓库管理','stores':'店铺授权管理','addresses':'FBA发货地址','profiles':'合规信息','clearance':'清关编码','declaration':'报关编码','sync-data':'同步数据','mail':'绩效邮件'})}
 CATALOG=[{'key':key,'menu':label,'tab':'菜单','parent':None} for key,(label,tabs) in MENU.items()]
 for key,(label,tabs) in MENU.items():CATALOG.extend({'key':key+'.'+t,'menu':label,'tab':name,'parent':key} for t,name in tabs.items())
+# Keep persisted grants/API guards stable while moving code catalogues in the UI.
+for entry in CATALOG:
+ if entry['key'] in ('settings.clearance','settings.declaration'):entry.update(menu='产品管理',parent='products')
 KEYS={r['key'] for r in CATALOG}
 ALL={k+'.'+a for k in KEYS for a in ('view','operate')}
 operation_grant=ContextVar('erp_operation_grant',default=False)
@@ -56,7 +59,7 @@ def route_keys(path,query,body,method):
  if path.startswith('/api/todos'):return ['todos']
  if path.startswith('/api/users'):return ['users.users']
  if path=='/api/integration/capabilities':return ['listing','orders','fba.list','warehouse']
- if path.startswith('/api/customs/profiles'):return ['products.products','products.declaration','products.clearance'] if read else ['products.declaration','products.clearance']
+ if path.startswith('/api/customs/profiles'):return ['products.products','products.declaration','products.clearance','fba.invoice'] if read else ['products.declaration','products.clearance']
  if path.startswith('/api/customs/choices'):return ['products.products','products.declaration','products.clearance']
  if path.startswith('/api/customs/'):
   kind=path.split('/')[-1]
@@ -67,6 +70,7 @@ def route_keys(path,query,body,method):
  if path.startswith('/api/product-data/'):
   return ['products.'+path.split('/')[-1]]
  if path=='/api/products/links/apply':return ['listing','products.products']
+ if read and path.startswith('/api/products/images/'):return ['products.products','products.declaration','products.clearance','listing','shipping','warehouse','procurement.plans','procurement.orders','replenishment','fba.invoice']
  if path.startswith('/api/products'):
   if read:return ['products.products','products.declaration','products.clearance','listing','shipping','warehouse','procurement.plans','procurement.orders','replenishment']
   return ['products.products']
@@ -80,6 +84,7 @@ def route_keys(path,query,body,method):
  if path.startswith('/api/shipping'):return ['shipping']
  if path.startswith('/api/sta/addresses'):return ['settings.addresses'] if not read else ['settings.addresses','fba.sta','shipping']
  if path.startswith('/api/sta'):return ['fba.sta','shipping']
+ if path.startswith('/api/logistics/invoices'):return ['fba.invoice']
  if path.startswith('/api/logistics/'):
   leaf=path.split('/')[3]
   if leaf in ('options','channels'):return ['logistics.channels'] if not read else ['logistics.channels','logistics.settlements','logistics.invoice','logistics.declaration']

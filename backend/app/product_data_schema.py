@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 from typing import Literal
 from urllib.parse import urlsplit
@@ -8,6 +9,12 @@ def web_link(value):
   u=urlsplit(value)
   if u.scheme not in ('http','https') or not u.hostname or u.username or u.password:raise ValueError('请输入有效的 http/https 链接')
  return value
+def clearance_link(value):
+ if value:
+  if re.match(r'^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:[/?#]|$)',value):value='https://'+value
+  if re.search(r'\s',value):raise ValueError('请输入有效的 http/https 链接')
+ return web_link(value)
+
 class CustomsInfo(BaseModel):
  model_config=ConfigDict(extra='forbid',str_strip_whitespace=True)
  name_cn:str=Field(default='',max_length=500)
@@ -17,6 +24,7 @@ class CustomsInfo(BaseModel):
  usage_cn:str=Field(default='',max_length=500)
  usage_en:str=Field(default='',max_length=500)
  brand_type:str=Field(default='',max_length=100)
+ brand:str=Field(default='',max_length=500)
  export_preference:str=Field(default='',max_length=100)
  internal_code:str=Field(default='',max_length=100)
  hs_code:str=Field(default='',max_length=30,pattern=r'^[0-9. ]*$')
@@ -32,4 +40,4 @@ class CustomsInfo(BaseModel):
 
  clearance_url_uk:str=Field(default='',max_length=2000)
  clearance_url_de:str=Field(default='',max_length=2000)
- _clearance_links=field_validator('clearance_url_uk','clearance_url_de')(web_link)
+ _clearance_links=field_validator('clearance_url_uk','clearance_url_de')(clearance_link)

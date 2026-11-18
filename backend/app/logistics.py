@@ -1,9 +1,10 @@
 """Local freight settlement and reusable Excel documents; never writes to Amazon."""
-from copy import copy
+from copy import copy,deepcopy
 from io import BytesIO
 from decimal import Decimal
 from datetime import date
 from zoneinfo import ZoneInfo
+from typing import Literal
 import re,zipfile,base64
 from fastapi import APIRouter,HTTPException,UploadFile,File,Form,Query
 from pydantic import BaseModel,Field,ConfigDict,field_validator
@@ -12,7 +13,7 @@ from openpyxl import load_workbook
 from openpyxl.utils.cell import column_index_from_string
 from .db import Session
 from .models import Shipment,ShipmentItem,Listing,ProductLink,LocalProduct,now
-from .sta_models import StaTask
+from .sta_models import StaTask,AmazonInboundPlan
 from .shipping_models import ShippingTask,ShippingPacking
 from .operations_models import LogisticsChannel as Channel,LogisticsTemplate as Template,LogisticsDocument as Document,LogisticsSettlement as Settlement
 from .auth import require_admin,require_store,allowed_stores,principal
@@ -27,9 +28,27 @@ router=APIRouter(prefix='/api/logistics')
 SCALARS={'warehouse_code':'亚马逊仓库代码','vat':'VAT','eori':'EORI号','shipment_id':'FBA号','name':'货件名称','store':'店铺','country':'国家','date':'日期','weight':'装箱单重量 kg','boxes':'箱数','supplier':'货代名称','currency':'币种','invoice_number':'发票号码','shipper':'发货人','consignee':'收货人','address':'收货地址','total':'商品总价'}
 COLUMNS={'code':'标品编码','sku':'SKU','fnsku':'FNSKU','name':'品名','quantity':'数量','unit_price':'申报单价','amount':'商品金额','material':'材质','usage':'用途','hs_code':'HS编码','origin':'原产国','weight':'商品重量 kg'}
 COLUMNS.update({'name_cn':'中文名称','name_en':'英文名称','material_cn':'中文材质','material_en':'英文材质','usage_cn':'中文用途','usage_en':'英文用途','brand_type':'品牌类型','export_preference':'出口享惠情况','internal_code':'内部编码','model':'型号','domestic_source':'境内货源地','unit':'成交单位','exemption':'征免','other_elements':'其他申报要素','tax_rate':'清关税率 (%)','currency':'单价币种'})
-SCALAR_KEYS=('shipment_id','country','warehouse_code','vat','eori','boxes')
-COLUMNS.update({'box_label':'箱号（FBA号+U000001，按箱展开）','product_name':'商品名称','clearance_url':'清关url（按目的国）'})
-DETAIL_KEYS=('box_label','product_name','material_cn','material_en','usage_cn','usage_en','origin','domestic_source','unit','model','name_cn','name_en','brand_type','hs_code','tax_rate','unit_price','currency','clearance_url','quantity','amount','sku','fnsku','weight')
+SCALARS.update({'consignee':'收件人','address':'地址','province':'省份','city':'城市','postal_code':'邮编','declaration_mode':'报关方式','tax_mode':'交税方式','currency':'申报币种'})
+SCALAR_KEYS=('shipment_id','country','warehouse_code','boxes','vat','eori','consignee','address','province','city','postal_code','declaration_mode','tax_mode','currency')
+COLUMNS.update({'box_label':'箱号','product_name':'商品名称','clearance_url':'清关url（按目的国）','brand':'品牌','tracking_code':'货件追踪编码','box_length_cm':'箱长（cm）','box_width_cm':'箱宽（cm）','box_height_cm':'箱高（cm）','box_weight_kg':'箱重（kg）','weight_g':'商品重量（g）','quantity':'申报数量','total_quantity':'申报总量'})
+DETAIL_KEYS=('box_label','box_length_cm','box_width_cm','box_height_cm','box_weight_kg','product_name','sku','fnsku','brand','brand_type','model','name_cn','name_en','hs_code','quantity','total_quantity','unit','unit_price','currency','tax_rate','weight_g','origin','domestic_source','material_cn','material_en','usage_cn','usage_en','clearance_url')
+SCALARS.update({'total_quantity':'装箱单总数量','estimated_tax':'预计关税','dispatched_on':'发货日期'})
+COLUMNS.update({'amount':'产品申报总价','image_url':'产品图片','battery':'是否带电','magnet':'是否带磁'})
+SCALARS['tracking_code']='货件追踪编码（Reference ID）'
+SCALAR_KEYS=(*SCALAR_KEYS,'tracking_code','total_quantity','estimated_tax','dispatched_on')
+DETAIL_KEYS=(*DETAIL_KEYS,'amount','image_url','battery','magnet')
+BOX_COLUMNS={'box_label','box_length_cm','box_width_cm','box_height_cm','box_weight_kg'}
+def uses_boxes(mapping):return mapping.get('row_mode')=='box' or bool(BOX_COLUMNS & set(mapping.get('columns',{}))) or 'total_quantity' in mapping.get('columns',{})
+def box_metrics(box):
+ dims=box.get('dimensions') or {};w=box.get('weight') or {}
+ factor={'CM':1,'CENTIMETERS':1,'IN':2.54,'INCHES':2.54}.get(dims.get('unitOfMeasurement'))
+ out={}
+ for key in ('length','width','height'):
+  value=dims.get(key)
+  out['box_'+key+'_cm']=float(Decimal(str(value))*Decimal(str(factor))) if value is not None and factor is not None else box.get(key+'_cm')
+ factor={'KG':1,'KILOGRAMS':1,'LB':.45359237,'POUNDS':.45359237}.get(w.get('unit'))
+ out['box_weight_kg']=float(Decimal(str(w['value']))*Decimal(str(factor))) if w.get('value') is not None and factor is not None else box.get('weight_kg')
+ return out
 @router.get('/options')
 def channel_options():return {'countries':{c:COUNTRY_NAMES.get(c,c) for c in ORDER_MARKETS},'channels':CHANNELS,'tax_modes':TAX_MODES,'last_mile_modes':LAST_MILE}
 class Body(BaseModel):model_config=ConfigDict(extra='forbid',str_strip_whitespace=True)
@@ -80,6 +99,17 @@ def delete_channel(pk:int):
   audit(db,'logistics_channel_delete',pk,channel_json(c));db.delete(c)
  return {'ok':True}
 
+def shipment_reference(db,store,sid):
+ # A shipment Reference ID is shared by every SKU; carrier tracking is separate.
+ for model,column in ((StaTask,StaTask.updated_at),(AmazonInboundPlan,AmazonInboundPlan.synced_at)):
+  query=select(model).where(model.store==store)
+  if model is StaTask:query=query.where(StaTask.status!='cancelled')
+  for record in db.scalars(query.order_by(column.desc())):
+   payload=record.result if model is StaTask else record.data
+   for ship in (payload or {}).get('shipments',[]):
+    if ship.get('shipmentConfirmationId')==sid and str(ship.get('amazonReferenceId') or '').strip():return str(ship['amazonReferenceId']).strip()
+ return ''
+
 def shipment_context(db,store,sid,kind='invoice'):
  require_store(store)
  s=db.scalar(select(Shipment).where(Shipment.store==store,Shipment.shipment_id==sid))
@@ -95,15 +125,25 @@ def shipment_context(db,store,sid,kind='invoice'):
   info=(p.declaration if kind=='declaration' else p.clearance) if p else {}
   profile=db.get(CustomsProfile,p.customs_profile_id) if p and p.customs_profile_id else None
   url=info.get('clearance_url_uk' if country=='UK' else 'clearance_url_de','') if country in ('UK','DE') else ''
-  items.append({**info,'product_name':profile.name if profile else p.name if p else '', 'clearance_url':url,'sku':item.sku,'fnsku':item.fnsku or '', 'code':p.code if p else '', 'name':info.get('name_en') or info.get('name_cn') or (p.name if p else (l.title if l else '')),'quantity':item.shipped or 0,'unit_price':float(info['unit_price']) if info.get('unit_price') is not None else None,'material':info.get('material_en') or info.get('material_cn',''),'usage':info.get('usage_en') or info.get('usage_cn',''),'hs_code':info.get('hs_code',''),'origin':info.get('origin',''),'currency':info.get('currency','CNY'),'tax_rate':float(info['tax_rate']) if info.get('tax_rate') is not None else None,'weight':float(p.gross_weight_g)/1000 if p and p.gross_weight_g is not None else None})
- weight=None;box_count=None;box_contents=[]
+  items.append({**info,'profile_id':p.customs_profile_id if p else None,'image_url':(p.image_path if p else None) or (l.image_url if l else '') or '', 'product_name':profile.name if profile else p.name if p else '', 'clearance_url':url,'sku':item.sku,'fnsku':item.fnsku or '', 'code':p.code if p else '', 'name':info.get('name_en') or info.get('name_cn') or (p.name if p else (l.title if l else '')),'brand':info.get('brand') or (l.brand or '' if l else ''), 'total_quantity':item.shipped or 0,'weight_g':float(p.gross_weight_g) if p and p.gross_weight_g is not None else None,'quantity':item.shipped or 0,'unit_price':float(info['unit_price']) if info.get('unit_price') is not None else None,'material':info.get('material_en') or info.get('material_cn',''),'usage':info.get('usage_en') or info.get('usage_cn',''),'hs_code':info.get('hs_code',''),'origin':info.get('origin',''),'currency':info.get('currency','CNY'),'tax_rate':float(info['tax_rate']) if info.get('tax_rate') is not None else None,'weight':float(p.gross_weight_g)/1000 if p and p.gross_weight_g is not None else None})
+ weight=None;box_count=None;box_contents=[];destination={};tracking={};shipment_tracking=''
  for sta in db.scalars(select(StaTask).where(StaTask.store==store,StaTask.status!='cancelled')):
   ships=sta.result.get('shipments',[]);ship=next((r for r in ships if r.get('shipmentConfirmationId')==sid),None)
   if not ship:continue
+  destination=(ship.get('destination') or {}).get('address') or {}
+  tracking=sta.result.get('trackingInputs',{}).get(ship.get('shipmentId'),{})
+  shipment_tracking=tracking.get('freightBillNumber','') if tracking.get('type')=='LTL' else ''
   boxes=ship.get('boxes',[])
   if boxes:
-   box_contents=boxes
-   if not all(b.get('items') for b in boxes) and len(ships)==1 and len(sta.snapshot.get('boxes',[]))==len(boxes):box_contents=sta.snapshot['boxes']
+   box_contents=deepcopy(boxes)
+   # Retain remote carton identity/measurements; only match local packing by its box ID.
+   snapshots=sta.snapshot.get('boxes',[])
+   for box in box_contents:
+    local=next((b for b in snapshots if b.get('boxId') and b.get('boxId')==box.get('boxId')),None)
+    if local is None and len(boxes)==len(snapshots)==1 and len(ships)==1:local=snapshots[0]
+    if local:
+     for key,value in local.items():
+      if not box.get(key):box[key]=deepcopy(value)
    weights=[]
    for b in boxes:
     v=b.get('weight') or {};value=v.get('value');unit=v.get('unit')
@@ -111,10 +151,21 @@ def shipment_context(db,store,sid,kind='invoice'):
     weights.append(Decimal(str(value))*(Decimal('.45359237') if unit in ('LB','POUNDS') else 1))
    box_count=len(boxes);weight=str(sum(weights)) if weights else None
   elif len(ships)==1:
-   boxes=sta.snapshot.get('boxes',[]);box_count=len(boxes) or None;box_contents=boxes
+   boxes=sta.snapshot.get('boxes',[]);box_count=len(boxes) or None;box_contents=deepcopy(boxes)
    if boxes and all(b.get('weight_kg') is not None for b in boxes):weight=str(sum(Decimal(str(b['weight_kg'])) for b in boxes))
   break
- return {'warehouse_code':s.destination or '', 'vat':vat.vat if vat else '', 'eori':vat.eori if vat else '', 'box_contents':box_contents,'shipment_pk':s.id,'shipment_id':sid,'store':store,'name':s.name or sid,'country':s.destination_country or '', 'date':now().astimezone(ZoneInfo('Asia/Shanghai')).date().isoformat(),'weight':weight,'boxes':box_count,'items':items,'currency':next(iter({i['currency'] for i in items})) if len({i['currency'] for i in items})==1 else ''}
+ if not destination or not box_contents:
+  for plan in db.scalars(select(AmazonInboundPlan).where(AmazonInboundPlan.store==store).order_by(AmazonInboundPlan.synced_at.desc())):
+   ship=next((x for x in plan.data.get('shipments',[]) if x.get('shipmentConfirmationId')==sid),None)
+   if ship:
+    if not destination:destination=(ship.get('destination') or {}).get('address') or {}
+    if not box_contents and ship.get('boxes'):box_contents=deepcopy(ship['boxes']);box_count=len(box_contents)
+    break
+ tracking_by_box={x.get('boxId'):x.get('trackingId','') for x in tracking.get('items',[]) if x.get('boxId')}
+ for box in box_contents:box['tracking_code']=tracking_by_box.get(box.get('boxId'),shipment_tracking)
+ settlement=db.scalar(select(Settlement).where(Settlement.store==store,Settlement.shipment_id==sid))
+ tax_mode=((settlement.detail or {}).get('channel') or {}).get('tax_mode','') if settlement else ''
+ return {'tracking_code':shipment_reference(db,store,sid),'dispatched_on':s.dispatched_on.isoformat() if s.dispatched_on else '', 'consignee':destination.get('name',''),'address':' '.join(str(destination[k]) for k in ('addressLine1','addressLine2','addressLine3') if destination.get(k)),'province':destination.get('stateOrProvinceCode',''),'city':destination.get('city',''),'postal_code':destination.get('postalCode',''),'declaration_mode':'','tax_mode':tax_mode,'warehouse_code':s.destination or '', 'vat':vat.vat if vat else '', 'eori':vat.eori if vat else '', 'box_contents':box_contents,'shipment_pk':s.id,'shipment_id':sid,'store':store,'name':s.name or sid,'country':s.destination_country or '', 'date':now().astimezone(ZoneInfo('Asia/Shanghai')).date().isoformat(),'weight':weight,'boxes':box_count,'items':items,'currency':next(iter({i['currency'] for i in items})) if len({i['currency'] for i in items})==1 else ''}
 @router.get('/shipments')
 def search_shipments(q:str='',page:int=Query(1,ge=1),store:str='',page_size:int=Query(20,ge=1,le=100)):
  with Session() as db:
@@ -203,8 +254,9 @@ def template_preview(pk:int,sheet:str=''):
   t=db.get(Template,pk)
   if not t:raise HTTPException(404,'模板不存在')
   wb=workbook(t.content);s=wb[sheet] if sheet in wb.sheetnames else wb.active
-  return {'sheets':wb.sheetnames,'sheet':s.title,'scalars':{k:SCALARS[k] for k in dict.fromkeys([*SCALAR_KEYS,*t.mapping.get('fields',{})]) if k in SCALARS},'columns':{k:COLUMNS[k] for k in dict.fromkeys([*DETAIL_KEYS,*(('export_preference','exemption','other_elements') if t.kind=='declaration' else ()),*t.mapping.get('columns',{})]) if k in COLUMNS},'rows':[[{'cell':c.coordinate,'value':str(c.value or '')[:500]} for c in row] for row in s.iter_rows(max_row=min(s.max_row,100),max_col=min(s.max_column,30))]}
+  return {'sheets':wb.sheetnames,'sheet':s.title,'scalars':{k:SCALARS[k] for k in dict.fromkeys([*SCALAR_KEYS,*t.mapping.get('fields',{})]) if k in SCALARS},'columns':{k:COLUMNS[k] for k in dict.fromkeys([*DETAIL_KEYS,*(('export_preference','exemption','other_elements') if t.kind=='declaration' else ()),*t.mapping.get('columns',{})]) if k in COLUMNS},'row_mode':t.mapping.get('row_mode','box' if not t.mapping else ('box' if uses_boxes(t.mapping) else 'sku')),'rows':[[{'cell':c.coordinate,'value':str(c.value or '')[:500]} for c in row] for row in s.iter_rows(max_row=min(s.max_row,100),max_col=min(s.max_column,30))]}
 class Mapping(Body):
+ row_mode:Literal['sku','box']='sku'
  sheet:str
  fields:dict[str,str]=Field(default_factory=dict)
  columns:dict[str,str]=Field(default_factory=dict)
@@ -219,7 +271,7 @@ def save_mapping(pk:int,b:Mapping):
   wb=workbook(t.content)
   if b.sheet not in wb.sheetnames or b.start_row>b.end_row or set(b.fields)-set(SCALARS) or set(b.columns)-set(COLUMNS):raise HTTPException(422,'模板映射无效')
   b.fields={k:v.strip().upper() for k,v in b.fields.items() if v.strip()};b.columns={k:v.strip().upper() for k,v in b.columns.items() if v.strip()}
-  if not b.columns or 'quantity' not in b.columns:raise HTTPException(422,'请配置商品明细列，至少包含数量')
+  if not b.columns or 'quantity' not in b.columns:raise HTTPException(422,'请配置商品明细列，至少包含申报数量')
   if len(set(b.columns.values()))!=len(b.columns) or len(set(b.fields.values()))!=len(b.fields):raise HTTPException(422,'不同字段不能写入同一位置')
   sheet=wb[b.sheet]
   from openpyxl.cell.cell import MergedCell
@@ -233,6 +285,7 @@ def save_mapping(pk:int,b:Mapping):
    if not re.fullmatch('[A-Z]{1,2}',col):raise HTTPException(422,f'{COLUMNS[key]}：商品明细请填写列字母（例如 A），不要带行号')
    for r in range(b.start_row,b.end_row+1):
     if isinstance(sheet[f'{col}{r}'],MergedCell):raise HTTPException(422,f'{COLUMNS[key]}：{col}{r} 是合并单元格内部，请调整列或明细结束行，避免覆盖表尾')
+  if uses_boxes(b.model_dump()):b.row_mode='box'
   t.mapping=b.model_dump();audit(db,'logistics_template_mapping',pk,t.mapping)
  return {'ok':True}
 @router.post('/templates/{pk}/delete')
@@ -281,7 +334,7 @@ def expand_box_items(items,ctx):
    if sku not in source or isinstance(quantity,bool) or not isinstance(quantity,int) or quantity<=0:raise HTTPException(422,'箱内商品或数量无效，请核对装箱资料')
    combined[sku]+=quantity
   for sku,quantity in combined.items():
-   counts[sku]+=quantity;expanded.append({**source[sku],'quantity':quantity,'box_label':labels[number-1]})
+   counts[sku]+=quantity;expanded.append({**source[sku],**box_metrics(box),'tracking_code':ctx.get('tracking_code',''),'total_quantity':source[sku]['quantity'],'quantity':quantity,'box_label':labels[number-1]})
  if counts!=Counter({i['sku']:i['quantity'] for i in items}):raise HTTPException(409,'装箱数量与货件不一致，请重新同步后生成')
  return expanded
 
@@ -299,8 +352,8 @@ def generate(b:Generate):
   if not items:raise HTTPException(422,'货件明细尚未同步')
   # Derived fields always come from this shipment, never a previous template or client value.
   current={i['sku']:i for i in ctx['items']}
-  items=[{**i,'clearance_url':current[i['sku']].get('clearance_url','')} for i in items]
-  if 'box_label' in m['columns']:items=expand_box_items(items,ctx)
+  items=[{**i,'tracking_code':b.values.get('tracking_code') or ctx.get('tracking_code',''),'total_quantity':expected[i['sku']],'clearance_url':current[i['sku']].get('clearance_url','')} for i in items]
+  if uses_boxes(m):items=expand_box_items(items,ctx)
   if len(items)>m['end_row']-m['start_row']+1:raise HTTPException(422,'模板预留明细行不足，请扩大模板的明细结束行后再生成')
   currencies={i.get('currency') or next((x['currency'] for x in ctx['items'] if x['sku']==i['sku']),'CNY') for i in items}
   if len(currencies)!=1 or not currencies.issubset({'CNY','EUR','GBP'}):raise HTTPException(422,'同一单据的单价币种必须统一为人民币、欧元或英镑')
@@ -338,4 +391,6 @@ def download_document(pk:int):
  with Session() as db:
   d=db.get(Document,pk)
   if not d:raise HTTPException(404,'文件不存在')
-  require_store(d.store);return attachment(d.content,d.filename,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  require_store(d.store)
+  if not d.content:raise HTTPException(422,'请在清关发票列表选择模板后下载')
+  return attachment(d.content,d.filename,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
