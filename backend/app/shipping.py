@@ -709,3 +709,28 @@ def edit_packing(pk:int,b:PackingEdit):
 @router.post('/{pk}/packing-delete')
 def delete_packing(pk:int,b:Version):
  return repack(pk,b)
+
+
+class PlanUpload(Body):
+ request_id:UUID
+ store:str
+ country:str
+ channel:str
+ warehouse_id:int=Field(gt=0)
+ ship_date:date
+ lock_inventory:bool=False
+ filename:str=Field(min_length=1,max_length=255)
+ content:str=Field(max_length=15000000)
+ confirm:bool=False
+ preview_token:str=Field(default='',max_length=64)
+
+@router.get('/import-template')
+def import_template():
+ from .shipping_import import template
+ return attachment(template(),'发货计划上传模板.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+@router.post('/import-plan')
+def import_plan(b:PlanUpload):
+ require_admin()
+ from .shipping_import import run
+ return run(b)
