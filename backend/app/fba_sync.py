@@ -1,5 +1,6 @@
 import hashlib,json,time
 from uuid import uuid4
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import select,delete,func,text
 from .db import Session
 from .models import Shipment,ShipmentItem,ShipmentMarket,ShipmentSnapshot,FbaJob,FbaWork,now
@@ -13,12 +14,12 @@ def header(data):
 
 def save_header(db,store,data,markets):
     data=header(data)
-    row=db.scalar(select(Shipment).where(Shipment.store==store,Shipment.shipment_id==data['ShipmentId']))
-    if not row:row=Shipment(store=store,shipment_id=data['ShipmentId']);db.add(row)
+    db.execute(insert(Shipment).values(store=store,shipment_id=data['ShipmentId'],status=data['ShipmentStatus']).on_conflict_do_nothing(index_elements=['store','shipment_id']))
+    row=db.scalar(select(Shipment).where(Shipment.store==store,Shipment.shipment_id==data['ShipmentId']).with_for_update())
     row.name=data.get('ShipmentName');row.status=data['ShipmentStatus'];row.destination=data.get('DestinationFulfillmentCenterId');row.synced_at=now()
     db.flush()
     for market in set(markets):
-        if not db.get(ShipmentMarket,(row.id,market)):db.add(ShipmentMarket(shipment_pk=row.id,marketplace=market))
+        db.execute(insert(ShipmentMarket).values(shipment_pk=row.id,marketplace=market).on_conflict_do_nothing())
     db.flush();return row
 
 def normalize_items(raw):

@@ -133,3 +133,40 @@ def test_outbound_log_visible_by_reserved_lot():
  r=client.get(f'/api/warehouse/logs?warehouse_id={wid}&product_id={pid}&lot_id={lid}')
  assert r.status_code==200,r.text
  assert r.json()['total']==1 and r.json()['rows'][0]['actor']=='test-admin'
+
+
+def test_completed_sta_publishes_fba_immediately_and_idempotently():
+ from app.models import Shipment,ShipmentItem
+ pk,id=prepared()
+ with Session.begin() as db:
+  t=db.get(StaTask,id);t.country='DE';result=deepcopy(t.result);s=result['shipments'][0]
+  s.update(name='Local ready shipment',status='WORKING',destination={'warehouseId':'HAJ1','address':{'countryCode':'DE'}},items=[{'msku':'LOCAL-SKU','fnsku':'X123','quantity':4},{'msku':'LOCAL-SKU','fnsku':'X123','quantity':6}])
+  result['shipments'].append({'shipmentId':'alternative','shipmentConfirmationId':'FBAOTHER','placementOptionId':'other'})
+  t.result=result
+ assert dispatch(pk,id).status_code==200
+ data=client.get('/api/fba/shipments?store=DemoStoreA&marketplace=DE&q=FBA123').json()
+ assert data['total']==1,data
+ s=data['shipments'][0]
+ assert (s['destination'],s['status'],s['name'],s['shipped'])==('HAJ1','WORKING','Local ready shipment',10)
+ assert s['received'] is None and s['details_synced_at'] is None
+ assert client.get('/api/fba/shipments?q=LOCAL-SKU').json()['total']==1
+ assert dispatch(pk,id).status_code==200
+ with Session() as db:
+  assert db.scalar(select(func.count()).select_from(Shipment))==1
+  assert db.scalar(select(func.count()).select_from(ShipmentItem))==1
+
+
+def test_completed_sta_preserves_synced_receipts_and_local_logistics():
+ from datetime import date
+ from app.fba_sync import save_complete
+ from app.models import Shipment,ShipmentItem
+ pk,id=prepared()
+ with Session.begin() as db:
+  row=save_complete(db,'DemoStoreA',{'ShipmentId':'FBA123','ShipmentName':'Newer remote name','ShipmentStatus':'RECEIVING','DestinationFulfillmentCenterId':'HAJ2'},['DE'],[{'SellerSKU':'SKU','FulfillmentNetworkSKU':'X','QuantityShipped':10,'QuantityReceived':7}])
+  row.dispatched_on=date(2026,11,20);row.logistics_flags={'tracking_review':'complete'}
+ assert dispatch(pk,id).status_code==200
+ with Session() as db:
+  row=db.scalar(select(Shipment))
+  assert (row.name,row.status,row.destination,row.received)==('Newer remote name','RECEIVING','HAJ2',7)
+  assert row.dispatched_on==date(2026,11,20) and row.logistics_flags=={'tracking_review':'complete'}
+  assert db.scalar(select(ShipmentItem)).received==7

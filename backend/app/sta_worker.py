@@ -10,7 +10,7 @@ from .models import now
 from .sta_models import StaTask
 from .settings import MARKETS
 from .sta_amazon import call,pages,BASE,StaError,UncertainWrite
-from .sta_delivery import shipment_ids,validate_transport_request,validate_windows,ready_to_ship_start
+from .sta_delivery import shipment_ids,validate_transport_request,validate_windows,ready_to_ship_start,validate_ready_date,requires_window,validate_quote
 
 class Pending(Exception):pass
 
@@ -82,13 +82,16 @@ class Runner:
   self.write('generate_placement','POST',self.path+'/placementOptions',{})
   opts=pages(self.t.store,self.path+'/placementOptions','placementOptions')
   for o in opts:o['shipments']=self.read_shipments(o.get('shipmentIds',[]))
-  self.put(placementOptions=opts);self.t.stage='placement'
+  self.put(placementOptions=opts,placementTransport=None);self.t.stage='placement'
  def complete_tracking(self):
   from .sta_shipment import tracking_complete
   if not self.t.completed_at and tracking_complete(self.t):
    self.t.completed_at=now()
    from .models import AccessAudit
    self.db.add(AccessAudit(actor=self.t.command.get('actor') or self.t.actor,action='shipping_sta_complete',target=str(self.t.shipping_id),detail={'sta_id':self.t.id,'message':'全部货件追踪信息已提交成功，本地标记已完成'}))
+  if self.t.completed_at:
+   from .sta_projection import publish_completed
+   publish_completed(self.db,self.t)
  def finish_cancellation(self):
   from fastapi import HTTPException
   from .shipping import restore_outbound
@@ -123,6 +126,22 @@ class Runner:
    self.write('windows_'+sid,'POST',self.path+'/shipments/'+sid+'/deliveryWindowOptions')
    windows[sid]=pages(self.t.store,self.path+'/shipments/'+sid+'/deliveryWindowOptions','deliveryWindowOptions')
   self.put(deliveryWindows=windows,transportationOptions=[],transportRequest=None,selectedDeliveryWindows={})
+ def transportation_options(self,placement_id,ids,p,key):
+  t=self.t;ready=validate_ready_date(p)
+  configs=[]
+  address=t.form['sourceAddress'];contact={k:address[k] for k in ['name','phoneNumber','email'] if address.get(k)}
+  for sid in ids:
+   config={'shipmentId':sid,'readyToShipWindow':{'start':ready_to_ship_start(ready)},'contactInformation':contact}
+   freight=p.get('freight',{}).get(sid)
+   if freight:
+    amount=float(freight.get('declaredValue',0));count=int(freight.get('pallets',0))
+    if amount<0 or count<0:raise StaError('货值和托盘数量不能为负数')
+    config['freightInformation']={'declaredValue':{'amount':amount,'code':'GBP' if t.country=='UK' else 'EUR'},'freightClass':'NONE'}
+    if count:config['pallets']=[{'quantity':count}]
+   configs.append(config)
+  self.write(key,'POST',self.path+'/transportationOptions',{'placementOptionId':placement_id,'shipmentTransportationConfigurations':configs})
+  opts=pages(t.store,self.path+'/transportationOptions','transportationOptions',{'placementOptionId':placement_id})
+  return opts
  def execute(self):
   t=self.t;a=t.command['action'];p=t.command.get('payload',{})
   if a=='create':
@@ -130,7 +149,7 @@ class Runner:
     from .sta_preparation import resolve
     items,details=resolve(t.store,t.country,t.form['items'])
     t.form={**t.form,'items':items};self.put(preparationDetails=details)
-   self.write('create','POST',BASE+'/inboundPlans',{'name':t.name,'destinationMarketplaces':[MARKETS[t.country]],'items':t.form['items'],'sourceAddress':t.form['sourceAddress']})
+   self.write('create','POST',BASE+'/inboundPlans',{'name':t.name,'destinationMarketplaces':[MARKETS[t.country]],'items':t.form['items'],'sourceAddress':{k:v for k,v in t.form['sourceAddress'].items() if k not in ('companyName','addressLine2','stateOrProvinceCode','email') or (isinstance(v,str) and v.strip())}})
    if not t.inbound_plan_id:raise UncertainWrite('未返回入库计划 ID，请在亚马逊核对')
    if t.mode=='packing_first':
     self.write('generate_packing','POST',self.path+'/packingOptions')
@@ -149,6 +168,18 @@ class Runner:
    self.write('packing','POST',self.path+'/packingInformation',{'packageGroupings':[{'packingGroupId':opt['packingGroups'][0],'boxes':[box_payload(t,b) for b in t.snapshot['boxes']]}]})
    self.put(packingConfirmed=opt['packingOptionId']);self.placements()
   elif a=='placement_options':self.placements()
+  elif a=='placement_transport_options':
+   if t.mode!='packing_first':raise StaError('请先提交装箱资料，再获取运费')
+   validate_ready_date(p)
+   # Persist each completed option; retry keeps journal entries and never repeats uncertain writes.
+   preview=t.result.get('placementTransport') or {}
+   if preview.get('request')!=p:preview={'request':p,'options':{}}
+   self.put(placementTransport=preview)
+   for option in t.result.get('placementOptions',[]):
+    pid=option['placementOptionId'];ids=option.get('shipmentIds') or [x['shipmentId'] for x in option.get('shipments',[])]
+    opts=self.transportation_options(pid,ids,p,'preview_'+pid)
+    preview={**preview,'options':{**preview['options'],pid:opts}}
+    self.put(placementTransport=preview)
   elif a=='placement':
    opt=next((x for x in t.result.get('placementOptions',[]) if x['placementOptionId']==p.get('optionId')),None)
    if not opt:raise StaError('请选择已返回的分仓方案')
@@ -156,42 +187,40 @@ class Runner:
    self.write('confirm_placement','POST',self.path+'/placementOptions/'+opt['placementOptionId']+'/confirmation')
    self.put(placementConfirmed=opt['placementOptionId'])
    if groups:self.write('packing','POST',self.path+'/packingInformation',{'packageGroupings':groups})
-   t.stage='delivery';self.refresh();self.delivery_windows()
+   t.stage='delivery';self.refresh()
+   preview=t.result.get('placementTransport') or {};opts=preview.get('options',{}).get(opt['placementOptionId'])
+   if opts is not None:
+    request={**preview['request'],'selections':[{'shipmentId':x['shipmentId'],'deliveryWindowOptionId':''} for x in opt['shipments']]}
+    self.put(transportationOptions=opts,transportRequest=request,readyDate=request['readyDate'],selectedDeliveryWindows={})
   elif a=='delivery_windows':self.delivery_windows()
   elif a=='transport_options':
    ids=shipment_ids(t)
    ready,selected_windows=validate_transport_request(t,p)
-   configs=[]
-   address=t.form['sourceAddress'];contact={k:address[k] for k in ['name','phoneNumber','email'] if address.get(k)}
-   for sid in ids:
-    config={'shipmentId':sid,'readyToShipWindow':{'start':ready_to_ship_start(ready)},'contactInformation':contact}
-    freight=p.get('freight',{}).get(sid)
-    if freight:
-     amount=float(freight.get('declaredValue',0));count=int(freight.get('pallets',0))
-     if amount<0 or count<0:raise StaError('货值和托盘数量不能为负数')
-     config['freightInformation']={'declaredValue':{'amount':amount,'code':'GBP' if t.country=='UK' else 'EUR'},'freightClass':'NONE'}
-     if count:config['pallets']=[{'quantity':count}]
-    configs.append(config)
-   self.write('transport_options','POST',self.path+'/transportationOptions',{'placementOptionId':t.result['placementConfirmed'],'shipmentTransportationConfigurations':configs})
-   opts=pages(t.store,self.path+'/transportationOptions','transportationOptions',{'placementOptionId':t.result['placementConfirmed']})
+   opts=self.transportation_options(t.result['placementConfirmed'],ids,p,'transport_options')
    self.put(transportationOptions=opts,selectedDeliveryWindows=selected_windows,readyDate=p['readyDate'],transportRequest=p)
   elif a=='transport':
    expected={s['shipmentId'] for s in t.result.get('shipments',[]) if s.get('placementOptionId')==t.result.get('placementConfirmed')}
    selected=p.get('selections',[])
    if len(selected)!=len(expected) or {x.get('shipmentId') for x in selected}!=expected:raise StaError('请为每个货件选择配送方案')
-   selected_windows=validate_windows(t,selected)
-   if selected_windows!=t.result.get('selectedDeliveryWindows'):raise StaError('送达时段已变更，请重新获取承运人后再确认配送服务')
+   request=t.result.get('transportRequest')
+   if not request:raise StaError('请重新获取承运人后再确认配送服务')
+   ready=validate_ready_date(request)
    choices=[];details={}
    for x in selected:
     sid=x['shipmentId'];opt=next((o for o in t.result.get('transportationOptions',[]) if o['shipmentId']==sid and o['transportationOptionId']==x.get('transportationOptionId')),None)
     if not opt:raise StaError('配送方案无效，请重新获取')
-    win=x.get('deliveryWindowOptionId')
+    validate_quote(opt)
+    if opt.get('shippingSolution')=='AMAZON_PARTNERED_CARRIER' and x.get('acceptedQuote')!=opt['quote']['cost']:raise StaError('报价已更新，请刷新并核对最新运费后再确认')
+    win=x.get('deliveryWindowOptionId') if requires_window(opt) else None
     if 'CONFIRMED_DELIVERY_WINDOW' in opt.get('preconditions',[]) and not win:raise StaError('请选择送达时段')
     if win and not any(w['deliveryWindowOptionId']==win for w in t.result.get('deliveryWindows',{}).get(sid,[])):raise StaError('送达时段已失效，请重新获取')
     method=x.get('shippingMethod') or t.snapshot.get('channel')
     if method is not None and method not in ('air','sea','truck'):raise StaError('请选择有效运输方式')
-    details[sid]={'shippingMethod':method,'shippingMode':opt.get('shippingMode'),'shippingSolution':opt.get('shippingSolution'),'carrier':opt.get('carrier',{}),'transportationOptionId':opt['transportationOptionId']}
+    details[sid]={'shippingMethod':method,'shippingMode':opt.get('shippingMode'),'shippingSolution':opt.get('shippingSolution'),'carrier':opt.get('carrier',{}),'quote':opt.get('quote'),'transportationOptionId':opt['transportationOptionId']}
     choices.append((sid,opt,win))
+   required={sid for sid,opt,win in choices if requires_window(opt)}
+   windows=validate_windows(t,[{'shipmentId':sid,'deliveryWindowOptionId':win} for sid,opt,win in choices],ready,optional_ids=expected-required)
+   if any(windows.get(sid)!=t.result.get('selectedDeliveryWindows',{}).get(sid) for sid in required):raise StaError('送达时段已变更，请重新获取承运人后再确认配送服务')
    for sid,opt,win in choices:
     if win:self.write('window_'+sid,'POST',self.path+'/shipments/'+sid+'/deliveryWindowOptions/'+win+'/confirmation')
    self.write('transport','POST',self.path+'/transportationOptions/confirmation',{'transportationSelections':[{'shipmentId':sid,'transportationOptionId':o['transportationOptionId']} for sid,o,w in choices]})

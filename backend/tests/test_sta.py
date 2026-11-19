@@ -132,6 +132,7 @@ def test_full_flow_payloads_and_remote_cancellation(monkeypatch,mode):
  step('create')
  if mode=='packing_first':step('packing',{'optionId':packing})
  assert step('placement',{'optionId':placement})['stage']=='delivery'
+ step('delivery_windows')
  step('transport_options',{'readyDate':datetime.now(__import__('zoneinfo').ZoneInfo('Asia/Shanghai')).date().isoformat(),'freight':{sid:{'declaredValue':50,'pallets':1}},'selections':[{'shipmentId':sid,'deliveryWindowOptionId':window}]})
  assert step('transport',{'selections':[{'shipmentId':sid,'transportationOptionId':transport_id,'deliveryWindowOptionId':window,'shippingMethod':'sea'}]})['stage']=='labels'
  assert task(id)['result']['deliveryDetails'][sid]['shippingMethod']=='sea'
@@ -249,8 +250,8 @@ def delivery_payload():
  from datetime import datetime,timezone
  return {'readyDate':datetime.now(__import__('zoneinfo').ZoneInfo('Asia/Shanghai')).date().isoformat(),'selections':[{'shipmentId':'s1','deliveryWindowOptionId':'win-1'}],'freight':{}}
 
-@pytest.mark.parametrize('selections',[None,[],[{'shipmentId':'s1'}],[{'shipmentId':'foreign','deliveryWindowOptionId':'win-1'}],[{'shipmentId':'s1','deliveryWindowOptionId':'foreign'}]])
-def test_carriers_require_complete_windows_before_queue(selections,monkeypatch):
+@pytest.mark.parametrize('selections',[None,[],[{'shipmentId':'foreign','deliveryWindowOptionId':'win-1'}],[{'shipmentId':'s1','deliveryWindowOptionId':'foreign'}]])
+def test_carriers_reject_invalid_shipments_or_supplied_windows_before_queue(selections,monkeypatch):
  id=delivery_task();payload=delivery_payload();payload['selections']=selections
  monkeypatch.setattr(worker,'call',lambda *a,**k:pytest.fail('invalid windows must never call Amazon'))
  r=action(id,'transport_options',payload);assert r.status_code==422,r.text
@@ -414,3 +415,105 @@ def test_rename_empty_204_response(monkeypatch):
  monkeypatch.setattr(transport.requests,'Session',Http);monkeypatch.setattr(transport,'token',lambda *a:'test');monkeypatch.setattr(transport.redis,'eval',lambda *a:0);monkeypatch.setattr(transport,'build_request_proxies',lambda *a:None)
  assert transport.call('DemoStoreA','PUT',transport.BASE+'/inboundPlans/plan/shipments/ship/name',{'name':'New'})=={'_httpStatus':204}
  with pytest.raises(transport.UncertainWrite):transport.call('DemoStoreA','POST',transport.BASE+'/inboundPlans',{})
+
+
+@pytest.mark.parametrize('label', [None, '', '   ', '德国地址'])
+def test_saved_address_optional_label(label):
+ payload={'store':'DemoStoreA','country':'DE','detail':{**ADDRESS,'countryCode':'DE'}}
+ if label is not None:payload['label']=label
+ response=request('/addresses',payload)
+ assert response.status_code==200,response.text
+ saved=response.json()
+ assert saved['label']==('德国地址' if label=='德国地址' else 'Shenzhen · 1 Test Road')
+ assert saved['detail']['addressLine1']==ADDRESS['addressLine1']
+ assert 'label' not in saved['detail']
+ assert any(row['id']==saved['id'] for row in client.get('/api/sta/addresses',params={'store':'DemoStoreA'}).json())
+
+
+def test_create_omits_blank_optional_address_fields(monkeypatch):
+ _,id=fixture_task()
+ with Session.begin() as db:
+  t=db.get(StaTask,id)
+  t.form={**t.form,'sourceAddress':{**t.form['sourceAddress'],'companyName':'','addressLine2':'   ','stateOrProvinceCode':'','email':''}}
+ captured=[]
+ def capture(store,method,path,body=None,params=None):
+  if path.endswith('/inboundPlans'):
+   captured.append(body)
+   raise worker.StaError('test stop after payload capture')
+  raise AssertionError(path)
+ monkeypatch.setattr(worker,'call',capture)
+ action(id,'create');worker.run(id)
+ assert len(captured)==1
+ assert captured[0]['sourceAddress']==ADDRESS
+ assert task(id)['form']['sourceAddress']['stateOrProvinceCode']==''
+
+
+def test_quote_generation_allows_no_delivery_window(monkeypatch):
+ id=delivery_task();payload=delivery_payload();payload['selections']=[{'shipmentId':'s1'}];calls=[]
+ monkeypatch.setattr(worker,'call',lambda store,method,path,body=None: calls.append((method,path,body)) or ({'operationStatus':'SUCCESS'} if method=='GET' else {'operationId':'op'}))
+ monkeypatch.setattr(worker,'pages',lambda *a,**k:[])
+ assert action(id,'transport_options',payload).status_code==200
+ worker.run(id);assert task(id)['status']=='ready',task(id)['error']
+ assert task(id)['result']['selectedDeliveryWindows']=={}
+ assert all('/deliveryWindowOptions' not in path for _,path,_ in calls)
+
+
+def partner_option(**changes):
+ return {'shipmentId':'s1','transportationOptionId':'tr1','shippingSolution':'AMAZON_PARTNERED_CARRIER','shippingMode':'GROUND_SMALL_PARCEL','carrier':{'name':'UPS'},'preconditions':[], 'quote':{'cost':{'amount':19.09,'code':'EUR'},'expiration':delivery_window()['validUntil']},**changes}
+
+@pytest.mark.parametrize('problem',['none','missing_quote','expired','price_changed','own_no_window','partner_requires_window'])
+def test_partner_confirmation_validates_quote_and_only_required_windows(monkeypatch,problem):
+ id=delivery_task();option=partner_option();calls=[]
+ if problem=='missing_quote':option.pop('quote')
+ if problem=='expired':option['quote']['expiration']='2000-01-01T00:00:00Z'
+ if problem=='own_no_window':option['shippingSolution']='USE_YOUR_OWN_CARRIER'
+ if problem=='partner_requires_window':option['preconditions']=['CONFIRMED_DELIVERY_WINDOW']
+ with Session.begin() as db:
+  t=db.get(StaTask,id);t.result={**t.result,'transportationOptions':[option],'transportRequest':delivery_payload(),'selectedDeliveryWindows':{}}
+ monkeypatch.setattr(worker.Runner,'refresh',lambda self:None)
+ monkeypatch.setattr(worker,'call',lambda store,method,path,body=None: calls.append((method,path,body)) or ({'operationStatus':'SUCCESS'} if method=='GET' else {'operationId':'op'}))
+ selection={'shipmentId':'s1','transportationOptionId':'tr1','acceptedQuote':{'amount':19.09 if problem!='price_changed' else 12,'code':'EUR'}}
+ assert action(id,'transport',{'selections':[selection]}).status_code==200
+ worker.run(id);t=task(id)
+ if problem!='none':
+  assert t['status']=='failed';assert not calls;assert not t['result'].get('transportConfirmed');assert t['can_edit_delivery']
+ else:
+  assert t['status']=='ready',t['error'];assert t['stage']=='labels'
+  assert t['result']['deliveryDetails']['s1']['quote']['cost']=={'amount':19.09,'code':'EUR'}
+  assert sum(m=='POST' for m,_,_ in calls)==1
+  assert not any('deliveryWindowOptions' in path for _,path,_ in calls)
+
+
+def test_preview_keeps_identical_destinations_separate_and_resumes_without_repeating(monkeypatch):
+ id=delivery_task();calls=[];fail=[True]
+ with Session.begin() as db:
+  t=db.get(StaTask,id);t.stage='placement';t.mode='packing_first'
+  t.result={'placementOptions':[{'placementOptionId':pid,'shipmentIds':[sid],'shipments':[{'shipmentId':sid,'destination':{'warehouseId':'HAJ1'}}]} for pid,sid in [('p1','s1'),('p2','s2')]]}
+ def call(store,method,path,body=None):
+  calls.append((method,path,body))
+  return {'operationStatus':'SUCCESS'} if method=='GET' else {'operationId':'op'}
+ def pages(store,path,key,params=None):
+  if params['placementOptionId']=='p2' and fail[0]:fail[0]=False;raise worker.StaError('暂时读取失败')
+  return [partner_option(shipmentId='s2')] if params['placementOptionId']=='p2' else [partner_option(shippingSolution='USE_YOUR_OWN_CARRIER')]
+ monkeypatch.setattr(worker,'call',call);monkeypatch.setattr(worker,'pages',pages)
+ assert action(id,'placement_transport_options',{'readyDate':delivery_payload()['readyDate']}).status_code==200
+ worker.run(id);assert task(id)['status']=='failed'
+ assert task(id)['result']['placementTransport']['options']['p1'][0]['shippingSolution']=='USE_YOUR_OWN_CARRIER'
+ assert action(id,'retry').status_code==200;worker.run(id);t=task(id)
+ assert t['status']=='ready',t['error'];assert t['stage']=='placement';assert not t['result'].get('placementConfirmed')
+ assert t['result']['placementTransport']['options']['p2'][0]['quote']['cost']['amount']==19.09
+ assert [b['placementOptionId'] for m,_,b in calls if m=='POST']==['p1','p2']
+ assert all('confirmation' not in path for _,path,_ in calls)
+ monkeypatch.setattr(worker.Runner,'refresh',lambda self:self.put(shipments=[{'shipmentId':'s2','placementOptionId':'p2'}]))
+ assert action(id,'placement',{'optionId':'p2'}).status_code==200;worker.run(id);t=task(id)
+ assert t['status']=='ready',t['error'];assert t['stage']=='delivery'
+ assert t['result']['transportationOptions'][0]['carrier']['name']=='UPS'
+ assert t['result']['transportRequest']['selections']==[{'shipmentId':'s2','deliveryWindowOptionId':''}]
+ assert not any('deliveryWindowOptions' in path for _,path,_ in calls)
+
+
+def test_preview_unavailable_before_box_information():
+ id=delivery_task()
+ with Session.begin() as db:
+  t=db.get(StaTask,id);t.stage='placement';t.mode='placement_first'
+ assert action(id,'placement_transport_options',{'readyDate':delivery_payload()['readyDate']}).status_code==422

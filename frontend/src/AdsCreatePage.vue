@@ -6,8 +6,10 @@ import {ref,computed,onMounted,onUnmounted} from 'vue'
 import {ElMessage,ElMessageBox} from 'element-plus'
 import {ArrowLeft,Refresh,Search,Plus,Delete} from '@element-plus/icons-vue'
 import {api} from './session'
-const props=defineProps<{mode:string,profileId:string,profiles:any[],campaign?:any}>()
+const props=defineProps<{mode:string,profileId:string,profiles?:any[],campaign?:any,draftKey?:string}>()
 const emit=defineEmits(['close','created'])
+const initialDraft=ref('')
+const profiles=ref<any[]>(props.profiles||[])
 const profile=ref(props.profileId),options=ref<any>({campaigns:[]}),advanced=ref<any>({portfolios:[],audiences:[],warnings:[]}),error=ref(''),busy=ref(false),optionsBusy=ref(false)
 const isCampaign=props.mode==='campaign',title=isCampaign?'创建广告活动':'创建广告组'
 const campaignId=ref(props.campaign?.id||''),name=ref(''),defaultBid=ref<number|undefined>(),state=ref('ENABLED'),targeting=ref('AUTO')
@@ -16,7 +18,7 @@ const auto=ref<any[]>([{type:'QUERY_HIGH_REL_MATCHES',label:'紧密匹配',enabl
 const selected=ref<any[]>([]),rows=ref<any[]>([]),total=ref(0),page=ref(1),pageSize=ref(25),q=ref(''),productsBusy=ref(false),pickTab=ref('search'),paste=ref(''),pasteKind=ref('sku'),unresolved=ref<any[]>([])
 const manualType=ref('keywords'),keywordText=ref(''),keywordMatch=ref('EXACT'),keywords=ref<any[]>([]),targetText=ref(''),targets=ref<any[]>([]),negativeText=ref(''),negativeMatch=ref('NEGATIVE_EXACT'),negativeKeywords=ref<any[]>([]),negativeAsinText=ref(''),negativeAsins=ref<string[]>([])
 const suggestions=ref<any>({}),suggestBusy=ref(false),preview=ref<any>(null),previewOpen=ref(false),result=ref<any>(null)
-const activeProfile=computed(()=>props.profiles.find(p=>p.id===profile.value)),currency=computed(()=>activeProfile.value?.currency||options.value.currency||'EUR')
+const activeProfile=computed(()=>profiles.value.find(p=>p.id===profile.value)),currency=computed(()=>activeProfile.value?.currency||options.value.currency||'EUR')
 const parent=computed(()=>options.value.campaigns.find((c:any)=>c.id===campaignId.value))
 const selectedSkus=computed(()=>new Set(selected.value.map(r=>r.sku)))
 const submitting=computed(()=>result.value?.status==='sending')
@@ -25,7 +27,7 @@ const matchLabels:Record<string,string>={EXACT:'精准匹配',PHRASE:'词组匹�
 const placements=[['placementTop','搜索结果顶部（首页）'],['placementRest','搜索结果的其余位置'],['placementProduct','商品页面'],['placementBusiness','亚马逊企业购']]
 const money=(v:any)=>v==null?'—':new Intl.NumberFormat('zh-CN',{style:'currency',currency:currency.value}).format(v)
 let poll:ReturnType<typeof setInterval>|undefined,request=0,alive=true
-const taskKey=()=>`ads-create:${profile.value}:${props.mode}`
+const taskKey=()=>`ads-create:${profile.value}:${props.mode}${props.draftKey?':'+props.draftKey:''}`
 async function loadProducts(){const id=++request;productsBusy.value=true;try{const r=await api('/advertising/create/products?'+new URLSearchParams({profile_id:profile.value,q:q.value,page:String(page.value),page_size:String(pageSize.value)}));if(id===request){rows.value=r.rows;total.value=r.total}}catch(e){error.value=(e as Error).message}finally{if(id===request)productsBusy.value=false}}
 function searchProducts(){page.value=1;loadProducts()}
 async function loadOptions(){optionsBusy.value=true;try{options.value=await api('/advertising/create/options?profile_id='+profile.value);campaign.value.startDate=options.value.today;selectCampaign();await loadProducts()}catch(e){error.value=(e as Error).message}finally{optionsBusy.value=false}}
@@ -47,8 +49,11 @@ async function showPreview(){error.value='';if(!name.value.trim()||!defaultBid.v
 async function pollResult(){const id=result.value?.id;if(!id)return;try{const r=await api('/advertising/create/status/'+id);if(!alive)return;result.value=r;if(r.status==='preview'){if(poll)clearInterval(poll);localStorage.removeItem(taskKey());result.value=null;error.value='该预览尚未提交或已过期，请重新预览后确认';return}if(r.status!=='sending'){if(poll)clearInterval(poll);localStorage.removeItem(taskKey());if(r.status==='succeeded'){ElMessage.success('创建完成');emit('created')}}}catch(e){error.value='创建结果暂时无法读取，后台仍可能在处理。'+(e as Error).message}}
 function watchResult(){if(poll)clearInterval(poll);poll=setInterval(pollResult,2500);pollResult()}
 async function confirm(){if(!preview.value||busy.value)return;busy.value=true;error.value='';const id=preview.value.id;localStorage.setItem(taskKey(),id);try{result.value=await api('/advertising/create/confirm',{id});previewOpen.value=false;watchResult()}catch(e){previewOpen.value=false;result.value={id,status:'sending'};error.value='正在核对提交结果：'+(e as Error).message;watchResult()}finally{busy.value=false}}
-async function close(){if(!result.value&&(selected.value.length||name.value||campaign.value.name)){try{await ElMessageBox.confirm('离开后，尚未提交的填写内容将丢失。','返回广告列表',{confirmButtonText:'离开',cancelButtonText:'继续填写',type:'warning'})}catch{return}}emit('close')}
-onMounted(async()=>{await loadOptions();const id=localStorage.getItem(taskKey());if(id){result.value={id,status:'sending'};watchResult()}})
+function draftSnapshot(){return JSON.stringify({values:payload(),text:[paste.value,keywordText.value,targetText.value,negativeText.value,negativeAsinText.value]})}
+async function canLeave(){if(busy.value){ElMessage.warning('正在处理，请稍后关闭');return false}if(!result.value&&initialDraft.value&&draftSnapshot()!==initialDraft.value){try{await ElMessageBox.confirm('离开后，尚未提交的填写内容将丢失。','关闭创建页面',{confirmButtonText:'离开',cancelButtonText:'继续填写',type:'warning'})}catch{return false}}return true}
+async function close(){if(await canLeave())emit('close')}
+defineExpose({canLeave})
+onMounted(async()=>{if(!profiles.value.length){try{profiles.value=(await api('/advertising/profiles')).profiles}catch(e){error.value=(e as Error).message;return}}if(!profiles.value.some(p=>p.id===profile.value)){error.value='该广告账户不可用，请关闭后重新选择店铺和国家';return}await loadOptions();initialDraft.value=draftSnapshot();const id=localStorage.getItem(taskKey());if(id){result.value={id,status:'sending'};watchResult()}})
 onUnmounted(()=>{alive=false;request++;if(poll)clearInterval(poll)})
 </script>
 <template>

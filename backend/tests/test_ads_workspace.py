@@ -39,6 +39,8 @@ def test_long_period_coverage_and_atomic_replacement():
 def test_child_search_and_names_across_hierarchy():
  seed();assert query(q='FX-test').json()['total']==1
  assert query(level='adgroup',q='B0TEST0003',search_type='asin').json()['total']==1
+ assert [r['id'] for r in query(level='campaign',q='B0TEST0003',search_type='asin').json()['rows']]==['1']
+ assert query(level='campaign',q='B0MISSING00',search_type='asin').json()['total']==0
  assert query(level='ad',q='橙色广告组',search_type='name').json()['total']==1
  assert query(level='ad',q='FX',search_type='fnsku').json()['total']==0
  assert query(search_type='bad').status_code==422

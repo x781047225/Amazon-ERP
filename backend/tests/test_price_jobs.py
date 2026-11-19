@@ -89,3 +89,33 @@ def test_latest_rejection_does_not_resurface_old_pending(monkeypatch):
     assert restored['pricing']['price']=='12.99'
     assert restored['pricing']['sale_price'] is None
     assert client.get(f'/api/listings/{pk}/price/jobs/{old["id"]}').json()['status']=='superseded'
+
+
+@pytest.mark.parametrize('quote_only',[False,True])
+def test_later_amazon_sync_overrides_old_accepted_price(monkeypatch,quote_only):
+    from copy import deepcopy
+    from app.models import Listing
+    from app.listing_service import save_listing
+    from app.settings import MARKETS
+    from test_listing import client
+    pk=setup(monkeypatch)
+    monkeypatch.setattr(j,'patch_listing',lambda *a,**kw:{'status':'ACCEPTED','issues':[]})
+    submitted=j.enqueue(pk,QueuedPrice(request_id=uuid4(),price='10.99'))
+    j.run(submitted['id'])
+    assert client.get(f'/api/listings/{pk}').json()['pricing']['price']=='10.99'
+    with Session.begin() as db:
+        row=db.get(Listing,pk)
+        data=deepcopy(row.listing_data);data['sku']=row.sku
+        data['attributes']=deepcopy(row.attributes)
+        offer=next(o for o in data['attributes']['purchasable_offer'] if o.get('audience','ALL')=='ALL' and o['marketplace_id']==MARKETS[row.marketplace])
+        offer['our_price']=[{'schedule':[{'value_with_tax':11.99}]}]
+        offer.pop('discounted_price',None)
+        if quote_only:offer.pop('our_price')
+        data['offers']=[{'marketplaceId':MARKETS[row.marketplace],'offerType':'B2C','audience':{'value':'ALL'},'price':{'amount':'11.99','currency':offer['currency']}}]
+        save_listing(db,row.store,row.marketplace,data)
+    response=client.get(f'/api/listings/{pk}').json()['pricing']
+    assert response['price']=='11.99' and response['sale_price'] is None
+    assert response['price_source']==('current_offer' if quote_only else 'attribute')
+    assert client.get(f'/api/listings/{pk}/price/jobs/{submitted["id"]}').json()['pricing']['price']=='11.99'
+    # A differing readback must not falsely confirm the old submitted price.
+    with Session() as db:assert db.get(ListingSubmission,submitted['id']).status=='accepted'

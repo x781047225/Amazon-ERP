@@ -447,7 +447,7 @@ def listing(q:str='',store:str='',country:str='',channel:str='',warehouse_id:int
   elif status=='outbound':cond.append(Task.outbound_at.is_not(None))
   elif status=='packing':cond.append(Task.status==status) # Compatibility with older clients.
   elif status:raise HTTPException(422,'发货计划状态无效')
-  tasks=list(db.scalars(select(Task).where(*cond).order_by(Task.id.desc()).offset((page-1)*page_size).limit(page_size)));totals=plan_stock_totals(db,tasks)
+  tasks=list(db.scalars(select(Task).where(*cond).order_by(Task.created_at.desc(),Task.id.desc()).offset((page-1)*page_size).limit(page_size)));totals=plan_stock_totals(db,tasks)
   return {'total':db.scalar(select(func.count()).select_from(Task).where(*cond)),'counts':counts,'rows':[data(db,t,stock_totals=totals) for t in tasks]}
 @router.get('/{pk}/detail')
 def detail(pk:int):

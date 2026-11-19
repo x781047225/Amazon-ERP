@@ -44,9 +44,14 @@ def state(row, submission):
 
 
 def display_pricing(row, submission):
-    """Show accepted submitted prices without rewriting Amazon's source snapshot."""
+    """Bridge acceptance until the next sync; newer Amazon snapshots take priority."""
     result=pricing(row)
-    if submission and submission.status=='accepted' and state(row,submission)['status']!='verified':
+    submitted_at=(submission.checked_at or submission.created_at) if submission else None
+    # Accepted is not evidence of the current selling price. A later sync may show
+    # a different value (processing delay, rejection, or a subsequent external edit).
+    # Keep the submission history, but never let it mask a newer Amazon snapshot.
+    newer_snapshot=bool(submitted_at and row.synced_at and row.synced_at>submitted_at)
+    if submission and submission.status=='accepted' and not newer_snapshot:
         target=pricing(SimpleNamespace(marketplace=row.marketplace,attributes=submission.proposed,
                                       listing_data={},synced_at=row.synced_at))
         keys=('price','currency') if price_only(submission) else ('price','sale_price','sale_start','sale_end','sale_status','currency','editable')

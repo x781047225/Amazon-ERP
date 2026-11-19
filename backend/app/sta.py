@@ -13,7 +13,7 @@ from .sta_models import StaTask
 from .shipping_models import ShippingTask,ShippingPacking,ShippingAddress
 from .auth import require_admin,require_store,allowed_stores,principal
 from .settings import MARKETS
-from .sta_delivery import validate_transport_request,can_edit_delivery
+from .sta_delivery import validate_transport_request,validate_ready_date,can_edit_delivery
 from .sta_amazon import StaError
 router=APIRouter(prefix='/api/sta')
 class Strict(BaseModel):model_config=ConfigDict(extra='forbid',str_strip_whitespace=True)
@@ -42,7 +42,7 @@ class EditCreation(Create):
  updated_at:datetime
 
 class Action(Strict):
- action:Literal['create','packing','placement_options','placement','delivery_windows','transport_options','transport','tracking','refresh','cancel','retry','prep_none','reconcile','rename']
+ action:Literal['create','packing','placement_options','placement_transport_options','placement','delivery_windows','transport_options','transport','tracking','refresh','cancel','retry','prep_none','reconcile','rename']
  payload:dict=Field(default_factory=dict)
 
 def get(db,id,lock=False):
@@ -61,7 +61,7 @@ def preparation_errors(t):
 
 def progress(t):
  action=t.command.get('action','')
- labels={'rename':'重命名货件','create':'创建入库计划','generate_packing':'获取装箱方案','confirm_packing':'确认装箱方案','packing':'提交装箱内容与箱规','generate_placement':'获取分仓方案','confirm_placement':'确认分仓方案','delivery_windows':'获取可选送达时段','transport_options':'获取承运人','transport':'确认配送服务','tracking':'提交追踪信息','cancel':'删除货件和费用','refresh':'同步亚马逊状态','reconcile':'核对入库计划','prep_none':'提交预处理资料'}
+ labels={'placement_transport_options':'获取各分仓承运人与运费','rename':'重命名货件','create':'创建入库计划','generate_packing':'获取装箱方案','confirm_packing':'确认装箱方案','packing':'提交装箱内容与箱规','generate_placement':'获取分仓方案','confirm_placement':'确认分仓方案','delivery_windows':'获取可选送达时段','transport_options':'获取承运人','transport':'确认配送服务','tracking':'提交追踪信息','cancel':'删除货件和费用','refresh':'同步亚马逊状态','reconcile':'核对入库计划','prep_none':'提交预处理资料'}
  entries=list(t.journal.items())
  active=[e for e in entries if e[1].get('state') in ('sending','polling','failed')]
  current=active[-1] if active else entries[-1] if entries else None
@@ -101,7 +101,7 @@ def public(t,full=True):
 class SavedAddress(Strict):
  id:int|None=None
  store:str
- label:str=Field(min_length=1,max_length=100)
+ label:str=Field(default='',max_length=100)
  country:str=Field(default='',pattern='^([A-Z]{2})?$')
  detail:Address
 
@@ -116,7 +116,7 @@ def save_address(b:SavedAddress):
  with Session.begin() as db:
   a=db.get(ShippingAddress,b.id) if b.id else ShippingAddress(store=b.store)
   if not a or a.store!=b.store:raise HTTPException(404,'地址不存在')
-  a.label=b.label;a.country=b.country;a.detail=b.detail.model_dump();db.add(a);db.flush()
+  a.label=b.label or (b.detail.city+' · '+b.detail.addressLine1)[:100];a.country=b.country;a.detail=b.detail.model_dump();db.add(a);db.flush()
   return address_data(a)
 @router.post('/addresses/{address_id}/delete')
 def delete_address(address_id:int):
@@ -213,7 +213,7 @@ def edit_creation(id:str,b:EditCreation):
   t.command={};t.journal={};t.status='draft';t.error=None;t.updated_at=now()
   db.flush();return public(t)
 
-ALLOWED={'rename':{'delivery','labels','tracking'},'create':{'create'},'packing':{'packing'},'placement_options':{'placement'},'placement':{'placement'},'delivery_windows':{'delivery'},'transport_options':{'delivery'},'transport':{'delivery'},'tracking':{'labels','tracking'},'prep_none':{'create'}}
+ALLOWED={'placement_transport_options':{'placement'},'rename':{'delivery','labels','tracking'},'create':{'create'},'packing':{'packing'},'placement_options':{'placement'},'placement':{'placement'},'delivery_windows':{'delivery'},'transport_options':{'delivery'},'transport':{'delivery'},'tracking':{'labels','tracking'},'prep_none':{'create'}}
 @router.post('/{id}/action')
 def action(id:str,b:Action):
  require_admin()
@@ -229,6 +229,10 @@ def action(id:str,b:Action):
   if proposed.get('action')=='rename':
    from .sta_shipment import rename_values
    try:rename_values(t,proposed.get('payload',{}))
+   except StaError as e:raise HTTPException(422,str(e)) from None
+  if proposed.get('action')=='placement_transport_options':
+   if t.mode!='packing_first':raise HTTPException(422,'请先确认分仓并提交装箱资料，再获取运费')
+   try:validate_ready_date(proposed.get('payload',{}))
    except StaError as e:raise HTTPException(422,str(e)) from None
   if proposed.get('action')=='transport_options':
    try:validate_transport_request(t,proposed.get('payload',{}))
@@ -265,13 +269,16 @@ def confirm_dispatch(id:str,b:ConfirmDispatch):
   shipping=db.get(ShippingTask,t.shipping_id)
   if not shipping or shipping.id!=b.shipping_id or shipping.status=='deleted':raise HTTPException(409,'发货计划已变更，请刷新后确认')
   if t.status=='cancelled':raise HTTPException(409,'STA 任务已取消')
-  if t.result.get('dispatchCompleted'):return public(t)
+  from .sta_projection import publish_completed
+  if t.result.get('dispatchCompleted'):
+   publish_completed(db,t);return public(t)
   if shipping.revision!=b.revision:raise HTTPException(409,'发货计划已变更，请刷新后确认')
   operator=(principal.get() or {})['username']
   moved=finalize_outbound(db,t,confirmed_by=operator)
   if not moved:shipping.revision+=1;shipping.updated_at=now()
   t.completed_at=t.completed_at or now();t.status='completed';t.updated_at=now()
   t.result={**t.result,'dispatchCompleted':{'at':now().isoformat(),'actor':operator,'inventoryOutbound':bool(shipping.outbound_at)}}
+  publish_completed(db,t)
   from .products import audit
   audit(db,'shipping_dispatch_complete',shipping.id,{'sta_id':t.id,'message':'完成发货，按装箱记录出库' if moved else '完成发货，库存未重复扣减' if shipping.outbound_at else '完成发货，未锁定库存不出库'})
   db.flush();return public(t)
