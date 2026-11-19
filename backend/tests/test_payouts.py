@@ -195,3 +195,27 @@ def test_expected_money_invalid_still_stops(amount,monkeypatch):
  r=expected_data();r['amount']=amount
  monkeypatch.setattr(a,'request',lambda *args:{'expectedPayouts':[r]})
  with pytest.raises(a.PayoutError):a.expected('DemoStoreA','TEST-SELLER','DE')
+
+
+def test_payout_times_keep_original_schedule_and_latest_attempt(fake,monkeypatch):
+ setup();j=job()
+ # A later setting change must not rewrite the original task's planned time.
+ with Session.begin() as db:db.get(Config,'DemoStoreA').hour=22
+ def not_yet(*args):raise a.PayoutError('间隔未满','cooldown')
+ monkeypatch.setattr(a,'expected',not_yet);advance(monkeypatch,2);p.run(j)
+ client=TestClient(app)
+ def public_row():return next(r for r in client.get('/api/settings/sync-data/payouts?store=DemoStoreA').json()['rows'] if r['id']==j)
+ r=public_row()
+ assert datetime.fromisoformat(r['scheduled_at'])==T
+ assert datetime.fromisoformat(r['started_at'])==T+timedelta(minutes=2)
+ assert datetime.fromisoformat(r['updated_at'])==T+timedelta(minutes=2)
+ assert datetime.fromisoformat(r['next_attempt_at'])==T+timedelta(minutes=12)
+ monkeypatch.setattr(a,'expected',lambda *args:(Decimal(0),'EUR'));advance(monkeypatch,12);p.run(j)
+ r=public_row()
+ assert datetime.fromisoformat(r['scheduled_at'])==T
+ assert datetime.fromisoformat(r['started_at'])==T+timedelta(minutes=12)
+ assert r['status']=='skipped' and not fake
+ # Legacy rows retain only the known status timestamp, with no invented start.
+ with Session.begin() as db:
+  old=db.get(Run,j);old.scheduled_at=None;old.started_at=None
+ r=public_row();assert r['scheduled_at'] is None and r['started_at'] is None and r['updated_at']

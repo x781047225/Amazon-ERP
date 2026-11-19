@@ -1,6 +1,7 @@
 """Asynchronous seller-level report snapshots. Listing reads never call Amazon."""
 import csv,io,re,copy
 from datetime import timedelta,timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal,InvalidOperation
 from urllib.parse import urlencode
 from sqlalchemy import Column,String,DateTime,Text,select
@@ -72,14 +73,14 @@ def advance(run):
  def save():
   with Session.begin() as db:db.get(Run,run.id).plans=copy.deepcopy(plans)
  for p in plans:
-  if p.get('status')=='succeeded':continue
   kind=p['kind'];at=now();market=kind.split('-')[1] if kind.startswith('planning-') else None
   market_ids=[MARKETS[market]] if market else list(MARKETS.values())
   with Session.begin() as db:
    s=db.get(FeeReport,(run.store,kind))
    if not s:s=FeeReport(store=run.store,kind=kind,rows=[],status='idle');db.add(s);db.flush()
    if s.status=='succeeded' and s.synced_at and at-s.synced_at<timedelta(hours=24) and (kind!='ledger' or s.synced_at.strftime('%Y-%m')==at.strftime('%Y-%m')):p.update(status='succeeded');continue
-   report_id=s.report_id;requested=s.requested_at;state=s.status
+   report_id=s.report_id;requested=s.requested_at;state=s.status;last_error=s.error
+  cooldown=False
   try:
    if state=='requesting':
     params=urlencode({'reportTypes':TYPES[kind],'pageSize':100,**({'marketplaceIds':MARKETS[market]} if market else {})})
@@ -89,7 +90,10 @@ def advance(run):
     if not matches:raise AmazonError('费用报告申请结果待核对，本轮不重复申请；次日可重试')
     report_id=max(matches,key=lambda v:v['createdTime'])['reportId']
     with Session.begin() as db:s=db.get(FeeReport,(run.store,kind));s.report_id=report_id;s.status='waiting'
-   if state=='failed' and requested and at-requested<timedelta(hours=24) and not report_id:raise AmazonError('费用报告申请失败后保留每日申请间隔，请次日再试')
+   if state=='failed' and requested and at-requested<timedelta(hours=24) and not report_id:
+    cooldown=True
+    retry_at=(requested+timedelta(hours=24)).astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')
+    raise AmazonError('本系统每日申请间隔未满，可于 '+retry_at+'（北京时间）重试；上次原因：'+(last_error or '未记录'))
    if not report_id or state=='succeeded':
     # Never reuse the previous successful file after a new lookup fails.
     if state=='succeeded':
@@ -127,7 +131,8 @@ def advance(run):
   except AmazonError as e:
    message=str(e).replace('订单报表','费用报表');p.update(status='failed',error=message);save()
    with Session.begin() as db:
-    s=db.get(FeeReport,(run.store,kind));s.status='failed';s.error=message
+    s=db.get(FeeReport,(run.store,kind));s.status='failed'
+    if not cooldown:s.error=message
     r=db.get(Run,run.id);r.status='failed';r.error=message+'；本轮已停止，旧快照保留';r.finished_at=now()
     c=db.get(Config,(run.store,run.kind))
     if c:c.error=r.error

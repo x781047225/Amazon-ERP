@@ -127,3 +127,33 @@ def test_actual_order_without_matching_listing_has_no_estimate_not_500():
  with Session() as db:
   o=db.get(Order,oid);r=order_estimates.enrich(db,[o],{oid:[{'sku':'missing','asin':'MISSING','quantity':1,'amount':'10','currency':'EUR'}]},queue=False)[oid]
   assert r['gross_profit'] is None and Decimal(r['display_amount'])==Decimal('10') and any('未匹配' in n for n in r['notes'])
+
+
+def test_resuming_old_completed_fee_step_refreshes_expired_snapshot(monkeypatch):
+ monkeypatch.setattr(reports,'now',lambda:AT)
+ with Session.begin() as db:
+  r=DataSyncRun(id='stale-resume',store='DemoStoreA',kind='fees',mode='initialize',days=30,status='running',start_at=AT,end_at=AT,actor='test',plans=[{'kind':'fees','status':'succeeded'},{'kind':'planning-IE','status':'failed'}]);db.add(r)
+  db.add(reports.FeeReport(store='DemoStoreA',kind='fees',status='succeeded',synced_at=AT-timedelta(hours=25),report_id='old',rows=[{'old':True}]))
+ request=Mock(side_effect=[{'reports':[]},{'reportId':'fresh'}]);monkeypatch.setattr(reports.transport,'request',request)
+ reports.advance(r)
+ assert request.call_count==2
+ with Session() as db:
+  result=db.get(reports.FeeReport,('DemoStoreA','fees'))
+  assert result.report_id=='fresh' and result.rows==[{'old':True}]
+  assert db.get(DataSyncRun,r.id).plans[0]['status']=='running'
+
+
+def test_fee_cooldown_preserves_original_failure_and_shows_exact_retry_time(monkeypatch):
+ monkeypatch.setattr(reports,'now',lambda:AT)
+ with Session.begin() as db:
+  r=DataSyncRun(id='cooldown',store='DemoStoreA',kind='fees',mode='initialize',days=30,status='running',start_at=AT,end_at=AT,actor='test',plans=[{'kind':'planning-IE','status':'failed'}]);db.add(r)
+  db.add(reports.FeeReport(store='DemoStoreA',kind='planning-IE',status='failed',requested_at=AT,rows=[],error='费用报告未生成有效文件（FATAL），保留旧快照'))
+ request=Mock();monkeypatch.setattr(reports.transport,'request',request)
+ for _ in range(2):
+  with Session() as db:r=db.get(DataSyncRun,'cooldown')
+  reports.advance(r)
+  with Session() as db:
+   result=db.get(DataSyncRun,r.id)
+   assert '2026-11-19 20:00:00（北京时间）' in result.error and result.error.count('FATAL')==1
+   assert db.get(reports.FeeReport,('DemoStoreA','planning-IE')).error=='费用报告未生成有效文件（FATAL），保留旧快照'
+ request.assert_not_called()

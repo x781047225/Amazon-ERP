@@ -20,6 +20,8 @@ class PayoutRun(Base):
  attempts=Column(Integer,nullable=False,default=0)
  next_attempt_at=Column(DateTime(timezone=True),nullable=False)
  updated_at=Column(DateTime(timezone=True),nullable=False)
+ scheduled_at=Column(DateTime(timezone=True))
+ started_at=Column(DateTime(timezone=True))
  submitted_at=Column(DateTime(timezone=True))
  amount=Column(Numeric(24,6))
  currency=Column(String(3))

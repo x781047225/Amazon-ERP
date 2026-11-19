@@ -34,7 +34,7 @@ def settings(store:str):
   c=db.get(Config,store)
   rows=list(db.scalars(select(Run).where(Run.store==store).order_by(Run.day.desc(),Run.marketplace).limit(80)))
   return {'enabled':c.enabled if c else False,'hour':c.hour if c else 0,'revision':c.revision if c else 0,'next_run_at':c.next_run_at if c else None,
-   'supported':amazon.SUPPORTED,'unsupported':['UK','IE'],'rows':[{k:getattr(r,k) for k in ('id','day','marketplace','status','attempts','next_attempt_at','updated_at','amount','currency','reference','message')} for r in rows]}
+   'supported':amazon.SUPPORTED,'unsupported':['UK','IE'],'rows':[{k:getattr(r,k) for k in ('id','day','marketplace','status','attempts','next_attempt_at','scheduled_at','started_at','updated_at','amount','currency','reference','message')} for r in rows]}
 @router.post('/schedule')
 def schedule(b:Schedule):
  require_store(b.store)
@@ -70,7 +70,7 @@ def tick():
     if c.next_run_at.astimezone(TZ).date()==t.astimezone(TZ).date():
      for market in amazon.SUPPORTED:
       exists=db.scalar(select(Run.id).where(Run.store==store,Run.day==day,Run.marketplace==market))
-      if not exists:db.add(Run(id=str(uuid4()),store=store,day=day,marketplace=market,seller_id=STORES[store]['seller_id'],status='queued',attempts=0,next_attempt_at=t,updated_at=t))
+      if not exists:db.add(Run(id=str(uuid4()),store=store,day=day,marketplace=market,seller_id=STORES[store]['seller_id'],status='queued',attempts=0,next_attempt_at=t,scheduled_at=c.next_run_at,updated_at=t))
     c.next_run_at=next_time(t,c.hour)
    db.flush()
    ids.extend(db.scalars(select(Run.id).where(Run.store==store,Run.status.in_(PENDING),Run.next_attempt_at<=t)))
@@ -93,7 +93,7 @@ def run(jid):
   if c.next_request_at and c.next_request_at>t:return
   # Reserve one attempt each 61s per store, without sleeping in a worker queue.
   c.next_request_at=t+timedelta(seconds=61)
-  r.status='checking';r.attempts+=1;r.updated_at=t
+  r.status='checking';r.attempts+=1;r.started_at=t;r.updated_at=t
   store,seller,market=r.store,r.seller_id,r.marketplace
   prior=db.scalar(select(Run).where(Run.store==store,Run.marketplace==market,Run.id!=jid,Run.status.in_(['submitting','unknown','succeeded'])).order_by(Run.submitted_at.desc()).limit(1))
   if prior and prior.status in ('unknown','submitting'):

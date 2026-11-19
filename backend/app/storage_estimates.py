@@ -89,7 +89,8 @@ def monthly(ledger,rates,today):
 def aged(rows,supported):
  if not supported:return {'amounts':[],'reason':'该站点暂无库存健康报告支持','complete':False}
  latest=max((r.get('snapshot_date','') for r in rows),default='');rows=[r for r in rows if r.get('snapshot_date')==latest]
- if not rows or any(r.get('amount') is None for r in rows):return {'amounts':[],'snapshot_date':latest,'reason':'预计超龄费尚未返回','complete':False}
+ if not rows:return {'amounts':[],'snapshot_date':latest,'reason':'报告中暂无该商品的预计超龄费记录','complete':False}
+ if any(r.get('amount') is None for r in rows):return {'amounts':[],'snapshot_date':latest,'reason':'亚马逊报告中的预计超龄金额为空（'+latest+'）','complete':False}
  totals=defaultdict(Decimal)
  for r in rows:totals[r['currency']]+=Decimal(r['amount'])
  return {'amounts':[{'currency':c,'amount':str(v.quantize(Decimal('.01')))} for c,v in sorted(totals.items())],'snapshot_date':latest,'complete':True}
