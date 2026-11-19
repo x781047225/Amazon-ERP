@@ -233,7 +233,16 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
      for row in rows:
       if row.get('metrics') is not None and shares.get(row['id']) is not None:row['metrics']['top_share']=float(shares[row['id']])*100
      break
-  for row in rows:row.update(profile_id=profile_id,currency=profile.currency,country=profile.country,store=profile.account)
+  recent_changes={}
+  if level in KINDS:
+   # Only acknowledged successful edits count, independently for each field.
+   for change in db.scalars(select(AdsChange).where(AdsChange.profile_id==profile_id,AdsChange.status=='succeeded',AdsChange.updated_at>now()-timedelta(hours=24)).order_by(AdsChange.updated_at.desc(),AdsChange.id.desc())):
+    fields=recent_changes.setdefault((change.kind,change.entity_id),{})
+    for field,value in change.changes.items():
+     if field in change.before and field not in fields and change.before[field]!=value:
+      fields[field]={'before':change.before[field],'after':value,'changed_at':change.updated_at}
+  for row in rows:
+   row.update(profile_id=profile_id,currency=profile.currency,country=profile.country,store=profile.account,recent_changes=recent_changes.get((row.get('kind'),row['id']),{}))
   if level!='logs':
    rows=sort_rows(rows,sort or 'cost',direction if sort else 'desc')
   trend=[]

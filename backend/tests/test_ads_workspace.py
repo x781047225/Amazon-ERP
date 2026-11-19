@@ -175,3 +175,24 @@ def test_workspace_target_categories_keep_metrics_scoped():
  save_entities(PID,'negative_target',[{'targetId':'9','campaignId':'1','adGroupId':'3','state':'ENABLED','expression':[{'type':'ASIN_SAME_AS','value':'B0TEST0003'}]}])
  assert overview(level='negative',entity_filter='negative_keyword').json()['rows'][0]['id']=='8'
  assert overview(level='negative',entity_filter='negative_product').json()['rows'][0]['id']=='9'
+
+
+def test_recent_changes_latest_success_per_field_and_24_hour_expiry(monkeypatch):
+ from datetime import datetime,timezone
+ from app import ads_workspace as w
+ from app.advertising import save_profile
+ seed();other='2222222222222222'
+ save_profile({'profileId':other,'countryCode':'DE','currencyCode':'EUR','timezone':'Europe/Berlin','accountInfo':{'name':'Other'}},'DemoStoreD')
+ clock=datetime(2026,11,20,8,12,34,tzinfo=timezone.utc);monkeypatch.setattr(w,'now',lambda:clock)
+ def change(id,age,field,before,after,status='succeeded',pid=PID,kind='campaign',entity='1'):
+  return AdsChange(id=id,profile_id=pid,kind=kind,entity_id=entity,actor='test-admin',status=status,before={field:before},changes={field:after},created_at=clock-age,updated_at=clock-age)
+ with Session.begin() as db:
+  db.add_all([change('old',timedelta(hours=25),'dailyBudget',3,4),change('budget',timedelta(hours=2),'dailyBudget',4,5),change('state',timedelta(hours=1),'state','ENABLED','PAUSED'),change('failed',timedelta(minutes=1),'dailyBudget',5,6,'failed'),change('unknown',timedelta(seconds=30),'dailyBudget',5,7,'unknown'),change('preview',timedelta(seconds=15),'dailyBudget',5,8,'preview'),change('foreign',timedelta(seconds=10),'dailyBudget',90,99,pid=other),change('boundary',timedelta(hours=24),'bid',1,2),change('noop',timedelta(seconds=5),'name','same','same'),change('group',timedelta(minutes=10),'defaultBid',.1,.2,kind='adgroup',entity='3')])
+ row=next(r for r in query(level='campaign').json()['rows'] if r['id']=='1');changes=row['recent_changes']
+ assert set(changes)=={'dailyBudget','state'}
+ assert changes['dailyBudget']['before']==4 and changes['dailyBudget']['after']==5
+ assert datetime.fromisoformat(changes['dailyBudget']['changed_at'])==clock-timedelta(hours=2)
+ assert query(level='adgroup').json()['rows'][0]['recent_changes']['defaultBid']['after']==.2
+ assert next(r for r in query(level='campaign').json()['rows'] if r['id']=='2')['recent_changes']=={}
+ clock+=timedelta(hours=24)
+ assert all(not r['recent_changes'] for r in query(level='campaign').json()['rows'])
