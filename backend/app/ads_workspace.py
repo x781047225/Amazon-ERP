@@ -9,9 +9,9 @@ from pydantic import BaseModel,Field
 from sqlalchemy import select
 from .advertising import router,IDS,REPORTS,defaults,valid_dates,profile_checked,save_entities,patch_job,num,ratios,empty_metrics
 from .ads_client import Client,AdsError,AdsUnknown
-from .models import AdsDay,AdsChange,AdsEntity,AdsSync,Listing,LocalProduct,ProductLink,now
+from .models import AdsDay,AdsChange,AdsEntity,AdsSync,AdsProfile,Listing,LocalProduct,ProductLink,now
 from .db import Session
-from .auth import require_admin
+from .auth import require_admin,require_store
 from .settings import MARKETS
 from .ads_controls import CAMPAIGN_FIELDS,campaign_values,campaign_payload,validate_campaign,note_value,save_note,sort_rows,flatten
 from .ads_metrics import REPORT_COLUMNS,extended_metrics
@@ -148,8 +148,10 @@ def enrich(db,profile,ads):
  return result
 
 @router.get('/workspace')
-def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:str='',q:str='',search_type:str='all',state:str='',start:date|None=None,end:date|None=None,page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100),sort:str='cost',direction:str='desc'):
+def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:str='',q:str='',search_type:str='all',state:str='',start:date|None=None,end:date|None=None,page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100),sort:str='cost',direction:str='desc',entity_filter:str=''):
  if level not in [*KINDS,'search','logs']:raise HTTPException(422,'无效的广告页面')
+ if entity_filter not in ['', 'auto','keyword','product','negative_keyword','negative_product']:raise HTTPException(422,'无效的投放分类')
+ if entity_filter and level!=('negative' if entity_filter.startswith('negative') else 'target'):raise HTTPException(422,'投放分类与页面不匹配')
  if search_type not in ['all','sku','asin','fnsku','product_name','name']:raise HTTPException(422,'无效的搜索类型')
  start,end=start or defaults()[0],end or defaults()[1];valid_dates(start,end)
  with Session() as db:
@@ -199,6 +201,11 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
      row['country']=profile.country;row['store']=profile.account;row['raw_fields']=flatten(d);raw_catalog.update(row['raw_fields']);row.update(start_date=d.get('startDate'),end_date=d.get('endDate'),bidding_strategy=(d.get('dynamicBidding') or {}).get('strategy'))
      row['target_count']=sum(x.adgroup_id==e.entity_id and x.state!='ARCHIVED' for k in ['keyword','target'] for x in bykind[k].values()) if level=='adgroup' else 0
      row['product_count']=sum(x.adgroup_id==e.entity_id and x.state!='ARCHIVED' for x in bykind['ad'].values()) if level=='adgroup' else 0
+     if entity_filter=='keyword' and kind!='keyword':continue
+     if entity_filter=='auto' and not (kind=='target' and (d.get('expressionType')=='AUTO' or row.get('targeting_type')=='AUTO')):continue
+     if entity_filter=='product' and not (kind=='target' and d.get('expressionType')!='AUTO' and row.get('targeting_type')!='AUTO'):continue
+     if entity_filter=='negative_keyword' and kind!='negative_keyword':continue
+     if entity_filter=='negative_product' and kind!='negative_target':continue
      if not matches(row):continue
      selected.extend(grouped.get(e.entity_id,[]));row['metrics']=add_metrics(grouped.get(e.entity_id,[]),available) if ready else None
      if summary_source and level=='campaign':
@@ -226,12 +233,48 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
      for row in rows:
       if row.get('metrics') is not None and shares.get(row['id']) is not None:row['metrics']['top_share']=float(shares[row['id']])*100
      break
+  for row in rows:row.update(profile_id=profile_id,currency=profile.currency,country=profile.country,store=profile.account)
   if level!='logs':
    rows=sort_rows(rows,sort or 'cost',direction if sort else 'desc')
   trend=[]
   if ready and not summary_source:
    for day in covered:trend.append({'date':day,**add_metrics([r for r in selected if r.get('date')==day])})
   return {'raw_columns':sorted(raw_catalog),'report_columns':REPORT_COLUMNS.get(level,[]),'rows':rows[(page-1)*page_size:page*page_size],'total':len(rows),'summary':add_metrics(selected) if ready else None,'metrics_ready':ready,'coverage':{'days':len(covered),'expected':(end-start).days+1,'start':covered[0] if covered else None,'end':covered[-1] if covered else None,'complete':full},'trend':trend,'report_at':fetched,'currency':profile.currency,'timezone':profile.timezone,'start':start,'end':end,'product_mapping_available':bool(any(x.get('fnsku') or x.get('product_name') for x in extra.values()))}
+
+
+def combine_metrics(items):
+ if not items:return None
+ base={k:float(sum((Decimal(str(v.get(k) or 0)) for v in items),Decimal(0))) for k in ['impressions','clicks','cost','purchases','sales']}
+ return ratios(base)
+
+@router.get('/workspace-overview')
+def workspace_overview(store:str,country:str='',level:str='campaign',q:str='',search_type:str='all',state:str='',start:date|None=None,end:date|None=None,page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100),sort:str='cost',direction:str='desc',entity_filter:str=''):
+ require_store(store)
+ if level not in [*KINDS,'search','logs']:raise HTTPException(422,'无效的广告页面')
+ if entity_filter not in ['', 'auto','keyword','product','negative_keyword','negative_product']:raise HTTPException(422,'无效的投放分类')
+ if entity_filter and level!=('negative' if entity_filter.startswith('negative') else 'target'):raise HTTPException(422,'投放分类与页面不匹配')
+ if search_type not in ['all','sku','asin','fnsku','product_name','name']:raise HTTPException(422,'无效的搜索类型')
+ start,end=start or defaults()[0],end or defaults()[1];valid_dates(start,end)
+ with Session() as db:
+  profiles=list(db.scalars(select(AdsProfile).where(AdsProfile.account==store).order_by(AdsProfile.country,AdsProfile.id)))
+  if country:profiles=[p for p in profiles if ('UK' if p.country=='GB' else p.country)==('UK' if country=='GB' else country)]
+ rows=[];parts=[];summaries=defaultdict(list);trends=defaultdict(lambda:defaultdict(list))
+ for p in profiles:
+  d=workspace(profile_id=p.id,level=level,q=q,search_type=search_type,state=state,start=start,end=end,page=1,page_size=1000000,sort=sort,direction=direction,entity_filter=entity_filter)
+  for row in d['rows']:row['key']=p.id+':'+str(row.get('key',row['id']))
+  rows+=d['rows'];parts.append(d)
+  if d['summary'] is not None:summaries[p.currency].append(d['summary'])
+  for v in d['trend']:trends[p.currency][v['date']].append(v)
+ if level=='logs':rows.sort(key=lambda r:str(r['created_at']),reverse=True)
+ else:rows=sort_rows(rows,sort or 'cost',direction)
+ currencies=sorted({p.currency for p in profiles})
+ return {'rows':rows[(page-1)*page_size:page*page_size],'total':len(rows),'currencies':currencies,
+  'summaries':{c:combine_metrics(v) for c,v in summaries.items()},'trends':{c:[{'date':day,**combine_metrics(v)} for day,v in sorted(days.items())] for c,days in trends.items()},
+  'summary':None,'trend':[],'currency':currencies[0] if len(currencies)==1 else None,'timezone':'各广告账户当地日期',
+  'metrics_ready':any(d['metrics_ready'] for d in parts),'coverage':{'days':sum(d['coverage']['days'] for d in parts),'expected':sum(d['coverage']['expected'] for d in parts),'complete':bool(parts) and all(d['coverage']['complete'] for d in parts),'start':str(start),'end':str(end)},
+  'report_at':max((d['report_at'] for d in parts if d['report_at']),default=None),
+  'raw_columns':sorted({c for d in parts for c in d['raw_columns']}),'report_columns':REPORT_COLUMNS.get(level,[]),
+  'product_mapping_available':any(d['product_mapping_available'] for d in parts)}
 
 class EditBody(BaseModel):
  profile_id:str

@@ -126,3 +126,52 @@ def test_history_plan_includes_live_retention_boundary_and_search():
    assert (date.fromisoformat(p['end'])-date.fromisoformat(p['start'])).days<=30
    if i:assert date.fromisoformat(p['start'])==date.fromisoformat(chunks[i-1]['end'])+timedelta(days=1)
  assert not build_daily_plans(date(2025,11,3),date(2025,11,30),date(2026,11,2))
+
+
+def overview(**kw):
+ return client.get('/api/advertising/workspace-overview',params={'store':'DemoStoreD','start':'2026-10-24','end':'2026-10-30',**kw})
+
+def test_overview_country_currency_pagination_and_identity():
+ from app.advertising import save_profile
+ seed()
+ uk='2234567890123456'
+ save_profile({'profileId':uk,'countryCode':'GB','currencyCode':'GBP','timezone':'Europe/London','accountInfo':{'name':'UK'}},'DemoStoreD')
+ save_entities(uk,'campaign',[{'campaignId':'1','name':'英国同编号活动','state':'ENABLED'}])
+ day=date(2026,10,24)
+ for pid,cost in [(PID,4),(uk,9)]:
+  persist_days(pid,'campaign',day,day,[{'date':str(day),'campaignId':'1','impressions':100,'clicks':2,'cost':cost,'sales7d':20,'purchases7d':1}])
+ response=overview();assert response.status_code==200,response.text
+ result=response.json();assert result['total']==3 and len({r['key'] for r in result['rows']})==3
+ assert result['summary'] is None
+ assert result['summaries']['GBP']['cost']==9 and result['summaries']['EUR']['cost']==4
+ assert result['trends']['GBP'][0]['cpc']==4.5
+ assert result['rows'][0]['profile_id']==uk and result['rows'][0]['currency']=='GBP'
+ assert overview(country='UK').json()['total']==1
+ assert overview(country='GB').json()['total']==1
+ assert overview(country='DE').json()['total']==0
+ assert overview(page=2,page_size=1).json()['rows'][0]['profile_id']==PID
+ assert overview(q='英国').json()['total']==1
+
+def test_overview_permissions_and_no_profile_validation(monkeypatch):
+ seed()
+ assert overview(store='DemoStoreA',level='nonsense').status_code==422
+ assert overview(store='DemoStoreA',entity_filter='auto').status_code==422
+ from app import auth
+ monkeypatch.setattr(auth,'resolve_session',lambda r:{'id':4,'username':'limited','is_admin':False,'stores':['DemoStoreA'],'default_store':'DemoStoreA','permissions':['advertising.view']})
+ assert overview().status_code==403
+ assert overview(store='DemoStoreA').status_code==200
+ assert overview(store='DemoStoreA',level='target').status_code==403
+
+def test_workspace_target_categories_keep_metrics_scoped():
+ seed()
+ save_entities(PID,'target',[{'targetId':'5','campaignId':'1','adGroupId':'3','state':'ENABLED','expressionType':'AUTO','expression':[{'type':'QUERY_HIGH_REL_MATCHES'}]},{'targetId':'6','campaignId':'1','adGroupId':'3','state':'ENABLED','expressionType':'MANUAL','expression':[{'type':'ASIN_SAME_AS','value':'B0TEST0003'}]}])
+ save_entities(PID,'keyword',[{'keywordId':'7','campaignId':'1','adGroupId':'3','state':'ENABLED','keywordText':'paper'}])
+ day=date(2026,10,24)
+ persist_days(PID,'target',day,day,[{'date':str(day),'keywordId':key,'cost':int(key),'clicks':1,'impressions':10} for key in ['5','6','7']])
+ for category,key in [('auto','5'),('product','6'),('keyword','7')]:
+  r=overview(level='target',entity_filter=category).json()
+  assert [x['id'] for x in r['rows']]==[key] and r['summaries']['EUR']['cost']==int(key)
+ save_entities(PID,'negative_keyword',[{'keywordId':'8','campaignId':'1','adGroupId':'3','state':'ENABLED','keywordText':'no'}])
+ save_entities(PID,'negative_target',[{'targetId':'9','campaignId':'1','adGroupId':'3','state':'ENABLED','expression':[{'type':'ASIN_SAME_AS','value':'B0TEST0003'}]}])
+ assert overview(level='negative',entity_filter='negative_keyword').json()['rows'][0]['id']=='8'
+ assert overview(level='negative',entity_filter='negative_product').json()['rows'][0]['id']=='9'
