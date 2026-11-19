@@ -137,7 +137,26 @@ function dirtyInline(row:any,key:string){return inlineValues.value[row.key]?.[ke
 async function quickEdit(row:any,key:string,value:any){startEdit(row);quickField.value=key;if(row.kind==='campaign'){campaignBaseline.value={state:row.state,dailyBudget:row.budget};editForm.value={...campaignBaseline.value}}editForm.value[key]=value;await preview()}
 async function startCampaign(row:any){startEdit(row);editBusy.value=true;try{const d=await api('/advertising/campaign-settings/'+encodeURIComponent(row.id)+'?'+new URLSearchParams({profile_id:row.profile_id||profile.value}));campaignSettings.value=d;campaignBaseline.value=structuredClone(d.values);editForm.value=structuredClone(d.values)}catch(e){editError.value=(e as Error).message}finally{editBusy.value=false}}
 function audienceChange(id:string){editForm.value.audiences=id?[{shopperCohortType:'AUDIENCE_SEGMENT',percentage:0,audienceSegments:[{audienceId:id}]}]:[]}
-function servingStatus(value:any):string{if(Array.isArray(value))return value.map(servingStatus).join('；');if(typeof value==='object')return Object.values(value).map(servingStatus).join('；');const code=String(value).replace(/_DETAIL$/,'');const names:Record<string,string>={AD_STATUS_LIVE:'投放中',TARGETING_CLAUSE_STATUS_LIVE:'投放中',AD_ELIGIBLE:'可投放',ELIGIBLE:'可投放',AD_INELIGIBLE:'不可投放',INELIGIBLE:'不可投放',OTHER:'其他状态',UNKNOWN:'未知状态',AD_CREATION_FAILED:'广告创建失败',AD_CREATION_OFFLINE_FAILED:'广告创建失败',AD_CREATION_OFFLINE_IN_PROGRESS:'广告创建中',AD_CREATION_OFFLINE_PENDING:'等待创建',PIR_RULE_EXCLUDED:'规则已排除',VARIATION_PARENT:'父体不可投放'};if(names[code])return names[code];const suffixes:Record<string,string>={OUT_OF_BUDGET:'预算不足',EXCEED_SPENDS_LIMIT:'超出花费限制',PAYMENT_FAILURE:'付款失败',PENDING_REVIEW:'待审核',PENDING_START_DATE:'未到开始日期',CREATIVE_REJECTED:'素材审核未通过',REJECTED:'审核未通过',POLICING_SUSPENDED:'投放受限',ARCHIVED:'已归档',PAUSED:'已暂停',STATUS_ENABLED:'已启用',INCOMPLETE:'资料不完整',LOW_BID:'竞价过低',ENDED:'已结束',OUT_OF_STOCK:'缺货',NO_INVENTORY:'缺货',NOT_BUYABLE:'商品不可购买',NOT_IN_BUYBOX:'未获得购物车',NO_PURCHASABLE_OFFER:'没有可购买报价',MISSING_IMAGE:'缺少图片',MISSING_DECORATION:'素材不完整',LANDING_PAGE_NOT_AVAILABLE:'落地页不可用',ADS_NOT_DELIVERING:'广告未投放',BLOCKED:'投放被阻止'};for(const [k,v] of Object.entries(suffixes))if(code===k||code.endsWith('_'+k))return v;return '其他投放状态'}
+type ServingTone='success'|'danger'|'warning'|'muted'
+type ServingLabel={label:string,tone:ServingTone}
+const servingNames:Record<string,[string,ServingTone]>={
+ AD_STATUS_LIVE:['投放中','success'],TARGETING_CLAUSE_STATUS_LIVE:['投放中','success'],AD_ELIGIBLE:['可投放','success'],ELIGIBLE:['可投放','success'],AD_INELIGIBLE:['不可投放','danger'],INELIGIBLE:['不可投放','danger'],OTHER:['其他状态','muted'],UNKNOWN:['未知状态','muted'],AD_CREATION_FAILED:['广告创建失败','danger'],AD_CREATION_OFFLINE_FAILED:['广告创建失败','danger'],AD_CREATION_OFFLINE_IN_PROGRESS:['广告创建中','warning'],AD_CREATION_OFFLINE_PENDING:['等待创建','warning'],PIR_RULE_EXCLUDED:['规则已排除','muted'],VARIATION_PARENT:['父体不可投放','danger'],
+ OUT_OF_BUDGET:['预算不足','danger'],EXCEED_SPENDS_LIMIT:['超出花费限制','danger'],PAYMENT_FAILURE:['付款失败','danger'],PENDING_REVIEW:['待审核','warning'],PENDING_START_DATE:['未到开始日期','warning'],CREATIVE_REJECTED:['素材审核未通过','danger'],REJECTED:['审核未通过','danger'],POLICING_SUSPENDED:['投放受限','danger'],ARCHIVED:['已归档','muted'],PAUSED:['已暂停','muted'],STATUS_ENABLED:['已启用','success'],INCOMPLETE:['资料不完整','warning'],LOW_BID:['竞价过低','warning'],ENDED:['已结束','muted'],OUT_OF_STOCK:['缺货','danger'],NO_INVENTORY:['缺货','danger'],NOT_BUYABLE:['商品不可购买','danger'],NOT_IN_BUYBOX:['未获得购物车','warning'],NO_PURCHASABLE_OFFER:['没有可购买报价','danger'],MISSING_IMAGE:['缺少图片','warning'],MISSING_DECORATION:['素材不完整','warning'],LANDING_PAGE_NOT_AVAILABLE:['落地页不可用','danger'],ADS_NOT_DELIVERING:['广告未投放','warning'],BLOCKED:['投放被阻止','danger']
+}
+function servingLabels(value:any):ServingLabel[]{
+ if(value==null||value==='')return []
+ if(Array.isArray(value))return value.flatMap(servingLabels)
+ if(typeof value==='object')return Object.values(value).flatMap(servingLabels)
+ const code=String(value).replace(/_DETAIL$/,'')
+ const key=servingNames[code]?code:Object.keys(servingNames).find(k=>code.endsWith('_'+k))
+ const [label,tone]=key?servingNames[key]:['其他投放状态','muted'] as const
+ return [{label,tone}]
+}
+function servingStatus(value:any){return servingLabels(value).map(s=>s.label).join('；')||'—'}
+function statusItems(row:any,col:any){
+ const labels=servingLabels(col.type==='raw'?row.raw_fields?.[col.key.slice(4)]:row[col.key])
+ return labels.length?labels:[{label:'—',tone:'muted'}]
+}
 function cellText(row:any,col:any){let v=col.type==='raw'?row.raw_fields?.[col.key.slice(4)]:row.metrics&&col.key in row.metrics?row.metrics[col.key]:row[col.key];if(col.key==='product_name'&&!v)return '';if(v==null||v==='')return '—';if(col.key.toLowerCase().includes('servingstatus'))return servingStatus(v);if(col.key.endsWith('DateTime'))return time(v);if(col.type==='type')return v==='AUTO'?'自动投放':'手动投放';if(col.type==='match')return matchNames[v]||v;if(col.key==='bidding_strategy')return strategyNames[v]||v;if(['money','number','percent','ratio'].includes(col.type))return format(v,col.type,row.currency||currency.value);return typeof v==='object'?JSON.stringify(v):String(v)}
 const chartMetric=ref('clicks'),chartRows=computed(()=>data.value.trends?.[currency.value]||data.value.trend||[])
 const chartMax=computed(()=>Math.max(1,...chartRows.value.map((r:any)=>Number(r[chartMetric.value]||0))))
@@ -189,6 +208,7 @@ const placementRows=computed(()=>data.value.rows.flatMap((r:any)=>{const raw=r.r
    <span v-else-if="col.type==='counts'">{{row.target_count}} / {{row.product_count}}</span>
    <template v-else-if="col.type==='identifiers'">{{row.sku||'—'}}<div class="cell-sub">{{row.asin||'—'}}</div><div class="cell-sub">{{row.fnsku||'—'}}</div></template>
    <el-image v-else-if="col.type==='image'&&row.image" :src="row.image" fit="contain" style="width:48px;height:48px"/>
+   <span v-else-if="col.key.toLowerCase().includes('servingstatus')" class="serving-status"><template v-for="(status,i) in statusItems(row,col)" :key="i"><span v-if="i" class="status-separator">；</span><span :class="'serving-status--'+status.tone">{{status.label}}</span></template></span>
    <span v-else :title="cellText(row,col)">{{cellText(row,col)}}</span>
   </template></el-table-column>
   <el-table-column v-if="canEditAds && currentLevel==='search'" column-key="actions" label="操作" :width="width('actions',115)" fixed="right"><template #default="{row}"><el-button link type="primary" @click="startNegative(row)">添加否定</el-button></template></el-table-column>
@@ -230,4 +250,6 @@ const placementRows=computed(()=>data.value.rows.flatMap((r:any)=>{const raw=r.r
 .ads-sections{padding:20px 24px 0;margin-bottom:20px;max-width:100%;overflow-x:auto}.ads-sections :deep(.el-radio-group){flex-wrap:nowrap}.ads-sections :deep(.el-radio-button){flex-shrink:0}.ads-toolbar{margin-bottom:8px;justify-content:flex-end}.ads-breadcrumb{padding:10px 6px 16px}.breadcrumb-campaign{font-weight:700;color:#243b33}.performance,.results{margin:0 0 8px;border-radius:0}.kpis{padding:12px;gap:10px}.ads-filters{padding:12px;gap:8px}.ads-filters>.el-input{min-width:220px}.ads-notes{padding:8px 12px}.ads-footer{margin:8px 12px}.chart-empty{height:80px;padding:0}.selected-columns>div{cursor:grab;border-radius:4px;padding:5px}.selected-columns>div.drag-over{background:#e6f3ed;outline:1px dashed #20765f}.selected-columns .drag-handle{flex:0;color:#9caea5;margin-right:4px}.remove-column{font-size:20px}.selected-columns>div:active{cursor:grabbing}
 
 .ads-filters{flex-wrap:nowrap;overflow-x:auto;align-items:center}.ads-filters>.el-select{width:110px;min-width:110px;flex:0 0 110px}.ads-filters>.el-input{min-width:180px;flex:1 0 180px}.ads-filters :deep(.el-date-editor){width:250px;min-width:250px;flex:0 0 250px}.ads-filters>.el-button{flex-shrink:0;margin-left:0}
+
+.serving-status{font-weight:500}.serving-status--success{color:#20745f}.serving-status--danger{color:#c03639}.serving-status--warning{color:#a86412}.serving-status--muted,.status-separator{color:#727a82}
 </style>
