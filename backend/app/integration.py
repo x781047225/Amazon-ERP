@@ -8,6 +8,7 @@ from .auth import principal
 from .permissions import can
 from .listing_editor import FIELDS
 from .listing_api import EditorPreview,ConfirmSubmission
+from .integration_products import TOOLS as PRODUCT_TOOLS, DESTRUCTIVE
 router=APIRouter()
 
 def obj(properties,required=()):return {'type':'object','properties':properties,'required':list(required),'additionalProperties':False}
@@ -27,14 +28,30 @@ TOOLS=[
  ('order_detail','查询订单详情','orders','view','GET','/api/orders/{id}',obj({'id':ID},['id'])),
  ('inventory_query','查询授权本地仓库可用、锁定和待到货库存','warehouse','view','GET','/api/warehouse/stock',obj({'q':S,'warehouse_id':ID,'page':PAGE,'page_size':{'type':'integer','minimum':1,'maximum':100}})),
  ('fba_inventory_query','查询 Listing 中的 FBA 库存，按授权店铺限制','listing','view','GET','/api/listings',QUERY)]
+TOOLS.extend(PRODUCT_TOOLS)
+def tool_allowed(p,key,action):
+ return any(can(p,k,action) for k in (key if isinstance(key,tuple) else (key,)))
+
 @router.get('/api/integration/capabilities')
 def capabilities():
  p=principal.get()
- return {'token_expires_days':90,'listing_fields':FIELDS,'tools':[{'name':n,'description':d,'method':m,'path':path,'inputSchema':schema} for n,d,key,a,m,path,schema in TOOLS if can(p,key,a)]}
+ return {'token_expires_days':90,'listing_fields':FIELDS,'tools':[{'name':n,'description':d,'method':m,'path':path,'inputSchema':schema} for n,d,key,a,m,path,schema in TOOLS if tool_allowed(p,key,a)]}
 @router.get('/mcp')
 def no_stream():return Response(status_code=405,headers={'Allow':'POST'})
 @router.post('/mcp')
 async def mcp(request:Request):
+ from . import integration_audit
+ try:message=await request.json()
+ except Exception:message={}
+ audit_id=integration_audit.begin(principal.get(),message,TOOLS)
+ result=None
+ try:
+  result=await dispatch(request)
+  return result
+ finally:
+  integration_audit.finish(audit_id,result)
+
+async def dispatch(request:Request):
  # Browser callers must share the host; external MCP clients normally omit Origin.
  origin=request.headers.get('origin')
  if origin:
@@ -51,8 +68,8 @@ async def mcp(request:Request):
  if not isinstance(params,dict):return error(-32602,'Invalid params')
  if method=='initialize':return response({'protocolVersion':params.get('protocolVersion') if params.get('protocolVersion') in ('2025-03-26','2025-06-18','2025-11-25') else '2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'amazon-erp','version':'1.0'}})
  if method=='ping':return response({})
- available=[t for t in TOOLS if can(principal.get(),t[2],t[3])]
- if method=='tools/list':return response({'tools':[{'name':n,'description':d,'inputSchema':schema,'annotations':{'readOnlyHint':a=='view','destructiveHint':n=='listing_submit'}} for n,d,key,a,m,path,schema in available]})
+ available=[t for t in TOOLS if tool_allowed(principal.get(),t[2],t[3])]
+ if method=='tools/list':return response({'tools':[{'name':n,'description':d,'inputSchema':schema,'annotations':{'readOnlyHint':a=='view','destructiveHint':n=='listing_submit' or n in DESTRUCTIVE}} for n,d,key,a,m,path,schema in available]})
  if method!='tools/call':return error(-32601,'Method not found')
  tool=next((t for t in available if t[0]==params.get('name')),None)
  if not tool:return error(-32602,'工具不存在或没有权限')

@@ -74,6 +74,12 @@ def codes(kind:Kind,q:str='',name:str='',hs_code:str='',page:int=Query(1,ge=1),p
   if hs_code.strip():cond.append(CustomsCode.hs_code.ilike(pattern(hs_code),escape='\\'))
   return {'total':db.scalar(select(func.count()).select_from(CustomsCode).where(*cond)),'rows':[code_data(r) for r in db.scalars(select(CustomsCode).where(*cond).order_by(CustomsCode.id.desc()).offset((page-1)*page_size).limit(page_size))]}
 def code_data(r):return {k:getattr(r,k) for k in ('id','kind','name','hs_code','tax_rate','declaration_elements','revision')}
+@router.get('/codes/{kind}/{pk}')
+def code_detail(kind:Kind,pk:int):
+ with Session() as db:
+  row=db.scalar(select(CustomsCode).where(CustomsCode.id==pk,CustomsCode.kind==kind))
+  if not row:raise HTTPException(404,'编码不存在')
+  return code_data(row)
 @router.post('/codes/{kind}')
 @router.post('/codes/{kind}/{pk}')
 def save_code(kind:Kind,b:CodeBody,pk:int|None=None):

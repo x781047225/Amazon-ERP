@@ -105,7 +105,25 @@ Listing 的调价、编辑、关联等操作记录在 Listing 业务日志中；
 
 ERP 已提供 `/mcp` 无状态 JSON 接口（POST），可直接使用个人 Token 连接；不提供 GET SSE 流。也可另行部署 MCP 适配服务，将工具映射到 ERP HTTP 接口，并转发用户的 `Authorization: Bearer <个人Token>`。不要在适配层改用共享管理员身份。
 
-第一批能力：Listing 查询及当前支持字段的修改、货件查询、订单查询、库存查询。具体请求结构以登录后的 `/api/docs` 为准。不要绕过已有的修改预览、确认和权限校验流程。工具端只允许用户已获授权的操作。
+支持 Listing 查询及当前支持字段的修改、货件查询、订单查询、库存查询，以及产品管理五个 Tab 的增删改查。以 `tools/list` 返回的 `inputSchema` 为准，也可通过 `/api/integration/capabilities` 查看当前用户获准使用的工具。Listing 提交继续使用已有的修改预览和确认流程。
+
+| 产品管理内容 | MCP 工具 |
+| --- | --- |
+| 产品信息 | `products_query`、`product_detail`、`product_options`、`product_create`、`product_update`、`product_archive`、`product_restore` |
+| 供应商 | `supplier_query/detail/create/update/delete` |
+| 清关编码 | `clearance_code_query/detail/create/update/delete` |
+| 报关编码 | `declaration_code_query/detail/create/update/delete` |
+| 清关＆报关资料库 | `customs_profile_query/detail/create/update/delete` |
+| 标品上的资料快照 | `product_declaration_update`、`product_clearance_update` |
+| 亚马逊 SKU 与标品关联 | `product_listings_query`、`product_listing_link`、`product_links_apply` |
+
+表中的斜杠表示独立工具名称，例如 `supplier_query`、`supplier_detail`。查询支持分页与搜索；编辑、删除先读取当前 `revision`，编辑必须带上结构中指定的必填字段，未指定的可选字段保留。标品删除进入回收站，仍关联 SKU 时不能删除；删除资料库条目会解除引用，但保留产品中已保存的资料快照。
+
+SKU 关联先按店铺、站点、SKU 查询取得 `listing_id` 和当前 `product_id`。`product_links_apply` 的每一项都需填写 `expected_product_id`（未关联填 `null`），目标 `product_id=null` 表示解绑；最多 100 项，任一关联冲突或越权则整批不保存。产品管理工具仅修改本地 ERP，不更新亚马逊 Listing。
+
+工具权限沿用用户的查看/操作权限及店铺范围；只读用户不会获得写入工具。有效个人 Token 无需重新生成，客户端重新连接或刷新工具列表即可发现新工具。
+
+已认证的 MCP 请求持久记录调用用户、用户/Token 编号、工具、对象编号、字段名、时间及结果，包括查询、写入、参数错误、权限拒绝和执行失败。写入另保留原有业务日志；不记录 Token 原文、完整请求/返回内容或异常中的凭据。日志复用 `AccessAudit`，可通过已有用户管理审计接口 `/api/access/audit` 查看，普通用户仅能查看自己的记录。
 
 客户端连接示例：
 

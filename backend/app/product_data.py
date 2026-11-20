@@ -24,6 +24,12 @@ def suppliers(q:str='',page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100
  with Session() as db:
   cond=[Supplier.name.ilike(pattern(q),escape='\\')] if q else []
   return {'total':db.scalar(select(func.count()).select_from(Supplier).where(*cond)),'rows':[supplier_data(s) for s in db.scalars(select(Supplier).where(*cond).order_by(Supplier.id.desc()).offset((page-1)*page_size).limit(page_size))]}
+@router.get('/suppliers/{pk}')
+def supplier_detail(pk:int):
+ with Session() as db:
+  row=db.get(Supplier,pk)
+  if not row:raise HTTPException(404,'供应商不存在')
+  return supplier_data(row)
 @router.post('/suppliers')
 @router.post('/suppliers/{pk}')
 def save_supplier(b:SupplierBody,pk:int|None=None):
@@ -38,8 +44,8 @@ def save_supplier(b:SupplierBody,pk:int|None=None):
     for p in db.scalars(select(LocalProduct).where(or_(LocalProduct.primary_supplier==old,LocalProduct.suppliers.contains([old]))).with_for_update()):
      if p.primary_supplier==old:p.primary_supplier=b.name
      p.suppliers=list(dict.fromkeys(b.name if n==old else n for n in p.suppliers));p.revision+=1;p.updated_at=now()
-   for k,v in b.model_dump(exclude={'revision'}).items():setattr(s,k,v)
-   s.revision+=1;s.updated_at=now();db.add(s);db.flush();audit(db,'supplier_save',s.id,{'before_name':old,'after':b.model_dump()});return supplier_data(s)
+   for k,v in b.model_dump(exclude={'revision'},exclude_unset=pk is not None).items():setattr(s,k,v)
+   s.revision+=1;s.updated_at=now();db.add(s);db.flush();audit(db,'supplier_save',s.id,{'before_name':old,'after':b.model_dump(exclude_unset=True)});return supplier_data(s)
  except IntegrityError:raise HTTPException(409,'供应商名称已存在') from None
 class Version(BaseModel):revision:int
 @router.post('/suppliers/{pk}/delete')
@@ -63,8 +69,8 @@ def save_customs(pk:int,kind:Literal['declaration','clearance'],b:CustomsUpdate)
   if p.archived:raise HTTPException(409,'请先恢复产品')
   if p.revision!=b.revision:raise HTTPException(409,'产品已被修改，请刷新')
   from .customs_catalog import SHARED
-  old=getattr(p,kind);detail=b.detail.model_dump(mode='json');setattr(p,kind,detail)
+  old=getattr(p,kind);detail={**old,**b.detail.model_dump(mode='json',exclude_unset=True)};setattr(p,kind,detail)
   other='clearance' if kind=='declaration' else 'declaration'
   setattr(p,other,{**getattr(p,other),**{k:detail[k] for k in SHARED if k in b.detail.model_fields_set}})
-  p.revision+=1;p.updated_at=now();audit(db,'product_customs_update',pk,{'kind':kind,'before':old,'after':b.detail.model_dump(mode='json')})
+  p.revision+=1;p.updated_at=now();audit(db,'product_customs_update',pk,{'kind':kind,'before':old,'after':detail})
  return {'ok':True,'revision':p.revision}

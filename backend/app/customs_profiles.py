@@ -39,7 +39,11 @@ def save(b:Body,pk:int|None=None):
   p=db.scalar(select(CustomsProfile).where(CustomsProfile.id==pk).with_for_update()) if pk else CustomsProfile(revision=0)
   if not p:raise HTTPException(404,'资料不存在')
   if pk and b.revision!=p.revision:raise HTTPException(409,'资料已被修改，请刷新')
-  data=shared_values(b.model_dump(mode='json'),{k:getattr(b,k).model_fields_set for k in ('declaration','clearance')})
+  values=b.model_dump(mode='json')
+  if pk:
+   for kind in ('declaration','clearance'):
+    values[kind]={**getattr(p,kind),**getattr(b,kind).model_dump(mode='json',exclude_unset=True)}
+  data=shared_values(values,{k:getattr(b,k).model_fields_set for k in ('declaration','clearance')})
   p.name=b.name;p.declaration=data['declaration'];p.clearance=data['clearance'];p.revision+=1;p.updated_at=now()
   db.add(p);db.flush();audit(db,'customs_profile_save',p.id,{'name':p.name,'revision':p.revision})
   return public(p)

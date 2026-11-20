@@ -58,7 +58,7 @@ def route_keys(path,query,body,method):
   return ['settings.mail'] if path.split('/')[3] in ('messages','message') else ['settings.stores']
  if path.startswith('/api/todos'):return ['todos']
  if path.startswith('/api/users'):return ['users.users']
- if path=='/api/integration/capabilities':return ['listing','orders','fba.list','warehouse']
+ if path=='/api/integration/capabilities':return ['listing','orders','fba.list','warehouse','products.products','products.suppliers','products.declaration','products.clearance','settings.clearance','settings.declaration']
  if path.startswith('/api/customs/profiles'):return ['products.products','products.declaration','products.clearance','fba.invoice'] if read else ['products.declaration','products.clearance']
  if path.startswith('/api/customs/choices'):return ['products.products','products.declaration','products.clearance']
  if path.startswith('/api/customs/'):
@@ -150,5 +150,7 @@ def enforce(request,p,body):
  return True
 
 def token_route(method,path):
+ from .integration_products import TOKEN_ROUTES
+ if any(method==verb and re.fullmatch(pattern,path) for verb,pattern in TOKEN_ROUTES):return True
  if method=='GET':return bool(re.fullmatch(r'/api/(integration/capabilities|listings(?:/\d+)?|fba/shipments(?:/\d+)?|orders(?:/\d+)?|warehouse/stock)',path))
  return method=='POST' and bool(re.fullmatch(r'/api/listings/\d+/(preview|submit|submissions/[0-9a-f-]+/verify)',path))

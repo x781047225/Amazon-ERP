@@ -178,8 +178,12 @@ def update(pk:int,body:ProductBody):
    p=locked(db,pk)
    if p.archived:raise HTTPException(409,'请先恢复标品')
    if p.revision!=body.revision:raise HTTPException(409,'商品已被修改，请刷新后重试')
-   ensure_suppliers(db,body.suppliers)
-   values=body.model_dump(mode='json',exclude={'revision',*(set(PACK_FIELDS+EXTRA_FIELDS)-body.model_fields_set)})
+   values=body.model_dump(mode='json',exclude={'revision'},exclude_unset=True)
+   if {'suppliers','primary_supplier'} & body.model_fields_set:
+    names=list(body.suppliers if 'suppliers' in body.model_fields_set else p.suppliers)
+    primary=body.primary_supplier if 'primary_supplier' in body.model_fields_set else p.primary_supplier
+    if primary and primary not in names:names.insert(0,primary)
+    values['suppliers']=names;ensure_suppliers(db,names)
    from .customs_catalog import shared_values
    for kind in ('declaration','clearance'):
     if kind in values:values[kind]={**getattr(p,kind),**getattr(body,kind).model_dump(mode='json',exclude_unset=True)}
@@ -192,7 +196,7 @@ def update(pk:int,body:ProductBody):
    if p.code!=body.code:
     n=p.source.get('normalization',{});p.source={**p.source,'normalization':{**n,'aliases':list(dict.fromkeys([*n.get('aliases',[]),p.code]))}}
    for k,v in values.items():setattr(p,k,v)
-   p.revision+=1;p.updated_at=now();audit(db,'product_update',pk,{'before':old,'after':body.model_dump(mode='json')})
+   p.revision+=1;p.updated_at=now();audit(db,'product_update',pk,{'before':old,'after':values})
  except IntegrityError:raise HTTPException(409,'标品编码已存在') from None
  return {'ok':True}
 class Version(BaseModel):revision:int=Field(ge=1)
