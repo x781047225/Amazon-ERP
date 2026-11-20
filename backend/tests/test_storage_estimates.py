@@ -23,7 +23,7 @@ def test_planning_returns_estimate_not_charged_or_next_month_and_no_double_bands
  rows=[['ASIN','F1','S1','DE','2026-11-18','EUR','1','2','3','5','999'],['ASIN','F2','S2','DE','2026-11-18','EUR','4','0','0','0','999']]
  parsed=reports.parse(tsv(headers,rows),'planning-DE');r=calc.aged(parsed,True)
  assert r['amounts']==[{'currency':'EUR','amount':'10.00'}]
- missing=reports.parse(tsv(headers,[rows[0][:6]+['','2','3','5','999']]),'planning-DE');assert not calc.aged(missing,True)['complete']
+ missing=reports.parse(tsv(headers,[rows[0][:6]+['','2','3','5','999']]),'planning-DE');assert calc.aged(missing,True)['amounts']==[{'currency':'EUR','amount':'5.00'}]
  assert not calc.aged([],False)['complete']
  raw=tsv(['asin','snapshot-date','currency','estimated-aged-surcharge'],[['ASIN','2026-11-18','GBP','0']]);assert reports.parse(raw,'planning-UK')[0]['amount']=='0'
 

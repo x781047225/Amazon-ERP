@@ -62,3 +62,40 @@ def refresh_bids(body:RefreshBids):
    except AdsError as e:errors.append({'group_id':gid,'message':str(e)})
  finally:client.close()
  return {'updated':updated,'errors':errors}
+
+# Dispatch recommendations independently of page rendering; the old values remain readable.
+def enqueue_groups(profile_id,ids):
+ from .amazon import redis
+ from .db import engine
+ from .tasks import ads_bid_prefetch
+ ids=list(dict.fromkeys(ids))
+ for offset in range(0,len(ids),20):
+  batch=ids[offset:offset+20]
+  if not batch:continue
+  import hashlib
+  key='erp:bid-prefetch:'+engine.url.database+':'+profile_id+':'+hashlib.sha256('|'.join(batch).encode()).hexdigest()
+  if redis.set(key,'1',nx=True,ex=900):ads_bid_prefetch.delay(profile_id,batch)
+
+@router.post('/target-suggestions/ensure')
+def ensure_bids(body:RefreshBids):
+ from datetime import timedelta,datetime
+ with Session() as db:
+  profile_checked(db,body.profile_id);cache=cached_suggestions(db,body.profile_id)
+  ids=[]
+  for gid in list(dict.fromkeys(body.group_ids))[:100]:
+   if not db.get(AdsEntity,(body.profile_id,'adgroup',gid)):continue
+   stamp=cache.get(gid,{}).get('fetched_at')
+   if not stamp or now()-datetime.fromisoformat(stamp)>timedelta(hours=24):ids.append(gid)
+ enqueue_groups(body.profile_id,ids)
+ return {'queued':bool(ids)}
+
+def prefetch_tick():
+ from .models import AdsProfile
+ from datetime import timedelta,datetime
+ with Session() as db:
+  for p in db.scalars(select(AdsProfile)):
+   cache=cached_suggestions(db,p.id);ids=[]
+   for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==p.id,AdsEntity.kind=='adgroup',AdsEntity.state!='ARCHIVED').order_by(AdsEntity.entity_id)):
+    stamp=cache.get(e.entity_id,{}).get('fetched_at')
+    if not stamp or now()-datetime.fromisoformat(stamp)>timedelta(hours=24):ids.append(e.entity_id)
+   enqueue_groups(p.id,ids[:40])

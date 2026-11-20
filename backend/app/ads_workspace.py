@@ -6,7 +6,7 @@ from decimal import Decimal
 from collections import defaultdict
 from fastapi import HTTPException,Query,Depends
 from pydantic import BaseModel,Field
-from sqlalchemy import select
+from sqlalchemy import select,or_,and_,func
 from .advertising import router,IDS,REPORTS,defaults,valid_dates,profile_checked,save_entities,patch_job,num,ratios,empty_metrics
 from .ads_client import Client,AdsError,AdsUnknown
 from .models import AdsDay,AdsChange,AdsEntity,AdsSync,AdsProfile,Listing,LocalProduct,ProductLink,now
@@ -22,6 +22,8 @@ KINDS={'campaign':['campaign'],'adgroup':['adgroup'],'ad':['ad'],'target':['keyw
 def title(d):
  return d.get('keywordText') or ' / '.join(AUTO.get(e.get('type'),e.get('value') or e.get('type','')) for e in d.get('expression',[]))
 def daily_body(level,start,end):
+ if level=='placement':
+  return {'name':'ERP daily placement','startDate':str(start),'endDate':str(end),'configuration':{'adProduct':'SPONSORED_PRODUCTS','reportTypeId':'spCampaigns','groupBy':['campaignPlacement'],'columns':['date','campaignId','placementClassification','impressions','clicks','cost','purchases7d','sales7d'],'timeUnit':'DAILY','format':'GZIP_JSON'}}
  if level.endswith('_share'):
   base=level.removesuffix('_share');typ,group,ids=('spCampaigns','campaign',['campaignId']) if base=='campaign' else ('spTargeting','targeting',['keywordId'])
   return {'name':'ERP period share '+base,'startDate':str(start),'endDate':str(end),'configuration':{'adProduct':'SPONSORED_PRODUCTS','reportTypeId':typ,'groupBy':[group],'columns':ids+['topOfSearchImpressionShare'],'timeUnit':'SUMMARY','format':'GZIP_JSON'}}
@@ -43,7 +45,7 @@ def build_daily_plans(start,end,today):
  # Live SP reporting validation (2026-11-02) returns a 95-day lookback
  # for all five types, including search terms. Preserve older stored rows.
  plans=[]
- for level in ['campaign','adgroup','ad','target','search']:
+ for level in ['campaign','adgroup','ad','target','search','placement']:
   left=max(start,today-timedelta(days=95))
   while left<=end:
    right=min(end,left+timedelta(days=30))
@@ -144,27 +146,49 @@ def enrich(db,profile,ads):
   identities={x[1].get('fnSku') for x in choices}
   chosen=max(choices,key=lambda x:str(x[2] or '')) if choices and len(identities)==1 else None
   l=candidates[0][0] if candidates else None
-  result[a.entity_id]={'fnsku':', '.join(sorted(known_fns)) or (chosen[1].get('fnSku','') if chosen else ''),'product_name':product.name if product else '', 'image':l.image_url if l else None,'available':chosen[1]['inventoryDetails']['fulfillableQuantity'] if chosen else None,'inventory_synced_at':chosen[2] if chosen else None,'inventory_market':chosen[0] if chosen else None,'inventory_region':'英国' if profile.country in ['UK','GB'] else '欧洲共享' if profile.country in europe else profile.country}
+  inv=chosen[1]['inventoryDetails'] if chosen else {}
+  stock_parts=[inv.get(k) for k in ('fulfillableQuantity','inboundReceivingQuantity','inboundShippedQuantity')]
+  stock_total=sum(stock_parts) if all(isinstance(v,int) for v in stock_parts) else None
+  result[a.entity_id]={'fnsku':', '.join(sorted(known_fns)) or (chosen[1].get('fnSku','') if chosen else ''),'product_name':product.name if product else '','stock_total':stock_total,'receiving':inv.get('inboundReceivingQuantity'),'inbound':inv.get('inboundShippedQuantity'), 'image':l.image_url if l else None,'available':chosen[1]['inventoryDetails']['fulfillableQuantity'] if chosen else None,'inventory_synced_at':chosen[2] if chosen else None,'inventory_market':chosen[0] if chosen else None,'inventory_region':'英国' if profile.country in ['UK','GB'] else '欧洲共享' if profile.country in europe else profile.country}
  return result
 
 @router.get('/workspace')
 def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:str='',q:str='',search_type:str='all',state:str='',start:date|None=None,end:date|None=None,page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100),sort:str='cost',direction:str='desc',entity_filter:str=''):
- if level not in [*KINDS,'search','logs']:raise HTTPException(422,'无效的广告页面')
+ if level not in [*KINDS,'search','logs','placement']:raise HTTPException(422,'无效的广告页面')
  if entity_filter not in ['', 'auto','keyword','product','negative_keyword','negative_product']:raise HTTPException(422,'无效的投放分类')
  if entity_filter and level!=('negative' if entity_filter.startswith('negative') else 'target'):raise HTTPException(422,'投放分类与页面不匹配')
  if search_type not in ['all','sku','asin','fnsku','product_name','name']:raise HTTPException(422,'无效的搜索类型')
  start,end=start or defaults()[0],end or defaults()[1];valid_dates(start,end)
  with Session() as db:
   profile=profile_checked(db,profile_id)
-  all_entities=list(db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id)))
+  if level=='placement':
+   from .ads_placements import placement_workspace
+   return placement_workspace(db,profile,start,end,campaign_id,q,state,page,page_size,sort,direction)
+  needle=q.strip().casefold()
+  needed={'campaign','adgroup',*KINDS.get(level,[])}
+  if level=='logs':needed.update(IDS)
+  if needle and search_type!='name':needed.add('ad')
+  scopes=[]
+  for kind in needed:
+   terms=[AdsEntity.kind==kind]
+   if campaign_id:terms.append((AdsEntity.entity_id if kind=='campaign' else AdsEntity.campaign_id)==campaign_id)
+   if adgroup_id and kind!='campaign':terms.append((AdsEntity.entity_id if kind=='adgroup' else AdsEntity.adgroup_id)==adgroup_id)
+   scopes.append(and_(*terms))
+  all_entities=list(db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,or_(*scopes))))
   bykind={k:{} for k in IDS}
   for e in all_entities:bykind.setdefault(e.kind,{})[e.entity_id]=e
-  extra=enrich(db,profile,bykind['ad'].values());needle=q.strip().casefold()
+  extra=enrich(db,profile,bykind['ad'].values()) if level=='ad' or (needle and search_type in ('all','fnsku','product_name')) else {}
   suggestions_cache=cached_suggestions(db,profile_id) if level=='target' else {}
   matching_groups=set();matching_campaigns=set();matching_ads=set()
   for a in bykind['ad'].values():
-   fields={'sku':a.data.get('sku',''),'asin':a.data.get('asin',''),**extra[a.entity_id]}
+   fields={'sku':a.data.get('sku',''),'asin':a.data.get('asin',''),**extra.get(a.entity_id,{})}
    if needle and any(needle in str(v or '').casefold() for k,v in fields.items() if k!='image' and search_type in ['all',k]):matching_ads.add(a.entity_id);matching_groups.add(a.adgroup_id);matching_campaigns.add(a.campaign_id)
+  group_counts=defaultdict(lambda:defaultdict(int))
+  if level=='adgroup':
+   count_query=select(AdsEntity.adgroup_id,AdsEntity.kind,func.count()).where(AdsEntity.profile_id==profile_id,AdsEntity.kind.in_(['ad','keyword','target']),AdsEntity.state!='ARCHIVED')
+   if campaign_id:count_query=count_query.where(AdsEntity.campaign_id==campaign_id)
+   if adgroup_id:count_query=count_query.where(AdsEntity.adgroup_id==adgroup_id)
+   for gid,kind,count in db.execute(count_query.group_by(AdsEntity.adgroup_id,AdsEntity.kind)):group_counts[gid][kind]=count
   raw_catalog=set();selected=[];rows=[];raw=[];covered=[];fetched=None;summary_source=False
   if level not in ['negative','logs']:
    days=list(db.scalars(select(AdsDay).where(AdsDay.profile_id==profile_id,AdsDay.level==level,AdsDay.day>=start,AdsDay.day<=end).order_by(AdsDay.day)))
@@ -199,8 +223,8 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
      if level=='target':row['suggestion']=for_entity(suggestions_cache,e)
      # Counts describe current metadata, not the selected performance period.
      row['country']=profile.country;row['store']=profile.account;row['raw_fields']=flatten(d);raw_catalog.update(row['raw_fields']);row.update(start_date=d.get('startDate'),end_date=d.get('endDate'),bidding_strategy=(d.get('dynamicBidding') or {}).get('strategy'))
-     row['target_count']=sum(x.adgroup_id==e.entity_id and x.state!='ARCHIVED' for k in ['keyword','target'] for x in bykind[k].values()) if level=='adgroup' else 0
-     row['product_count']=sum(x.adgroup_id==e.entity_id and x.state!='ARCHIVED' for x in bykind['ad'].values()) if level=='adgroup' else 0
+     row['target_count']=sum(group_counts[e.entity_id][k] for k in ['keyword','target']) if level=='adgroup' else 0
+     row['product_count']=group_counts[e.entity_id]['ad'] if level=='adgroup' else 0
      if entity_filter=='keyword' and kind!='keyword':continue
      if entity_filter=='auto' and not (kind=='target' and (d.get('expressionType')=='AUTO' or row.get('targeting_type')=='AUTO')):continue
      if entity_filter=='product' and not (kind=='target' and d.get('expressionType')!='AUTO' and row.get('targeting_type')!='AUTO'):continue
@@ -259,7 +283,7 @@ def combine_metrics(items):
 @router.get('/workspace-overview')
 def workspace_overview(store:str,country:str='',level:str='campaign',q:str='',search_type:str='all',state:str='',start:date|None=None,end:date|None=None,page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100),sort:str='cost',direction:str='desc',entity_filter:str=''):
  require_store(store)
- if level not in [*KINDS,'search','logs']:raise HTTPException(422,'无效的广告页面')
+ if level not in [*KINDS,'search','logs','placement']:raise HTTPException(422,'无效的广告页面')
  if entity_filter not in ['', 'auto','keyword','product','negative_keyword','negative_product']:raise HTTPException(422,'无效的投放分类')
  if entity_filter and level!=('negative' if entity_filter.startswith('negative') else 'target'):raise HTTPException(422,'投放分类与页面不匹配')
  if search_type not in ['all','sku','asin','fnsku','product_name','name']:raise HTTPException(422,'无效的搜索类型')

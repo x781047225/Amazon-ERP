@@ -471,3 +471,7 @@ from .todo_models import Todo,TodoEvent,TodoImage,TodoCc
 from .payout_models import PayoutConfig,PayoutRun
 
 from .fee_reports import FeeReport
+
+from .ads_queue_models import AdsMessageQueue,AdsMessageInbox
+
+from .ads_strategy_models import AdsStrategy,AdsStrategyBinding

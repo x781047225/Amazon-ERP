@@ -58,3 +58,9 @@ def test_queue_migration_keeps_each_distinct_read_and_all_writes(broker):
  assert {json.loads(r)['headers']['id'] for r in broker.queues['celery']}=={'write1','write2'}
  assert len(broker.queues['control'])==1 and len(broker.keys)==4
  again=td.normalize_queues();assert again=={'moved':0,'duplicates_removed':0}
+
+
+def test_current_ads_reads_have_dedicated_queue():
+ assert td.managed('erp.ads_current')
+ assert td.queue_for('erp.ads_current')=='ads-current'
+ assert td.queue_for('erp.ads')=='celery'

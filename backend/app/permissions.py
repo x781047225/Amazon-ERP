@@ -15,7 +15,7 @@ MENU={
  'advertising':('广告活动',{'ad':'广告','target':'投放','negative':'否定投放','search':'搜索词','logs':'操作记录'}),
  'users':('用户管理',{'users':'用户管理','roles':'角色管理','mcp':'MCP'}),
  'logistics':('物流中心',{'channels':'物流渠道','settlements':'结算中心','invoice':'发票中心','declaration':'报关单'}),
- 'settings':('设置',{'warehouses':'仓库管理','stores':'店铺授权管理','addresses':'FBA发货地址','profiles':'合规信息','clearance':'清关编码','declaration':'报关编码','sync-data':'同步数据','mail':'绩效邮件'})}
+ 'settings':('设置',{'warehouses':'仓库管理','stores':'店铺授权管理','addresses':'FBA发货地址','profiles':'合规信息','clearance':'清关编码','declaration':'报关编码','sync-data':'同步数据','ads-queue':'广告消息队列','mail':'绩效邮件'})}
 CATALOG=[{'key':key,'menu':label,'tab':'菜单','parent':None} for key,(label,tabs) in MENU.items()]
 for key,(label,tabs) in MENU.items():CATALOG.extend({'key':key+'.'+t,'menu':label,'tab':name,'parent':key} for t,name in tabs.items())
 # Keep persisted grants/API guards stable while moving code catalogues in the UI.
@@ -140,7 +140,7 @@ def enforce(request,p,body):
  keys=route_keys(path,request.query_params,body,request.method)
  action='view' if request.method in ('GET','HEAD','OPTIONS') else 'operate'
  # Read-only calculations still use POST, but do not modify business records.
- if path.endswith('/income-estimate') or path.endswith('/estimate') or path in ('/api/advertising/column-widths','/api/advertising/column-preferences'):action='view'
+ if path.endswith('/income-estimate') or path.endswith('/estimate') or path in ('/api/advertising/column-widths','/api/advertising/column-preferences','/api/advertising/campaign-refresh','/api/advertising/target-suggestions/ensure'):action='view'
  if path.startswith('/api/todos/') and path.endswith('/seen'):action='view'
  if keys==[]:return False
  if keys is None:

@@ -18,6 +18,7 @@ dependencies = [
     "reportlab>=4,<5",
     "pypdf>=5,<7",
     "cryptography>=44,<47",
+    "boto3>=1.40,<2",
 ]
 [dependency-groups]
 dev = ["pytest>=8,<10", "httpx>=0.28,<1"]

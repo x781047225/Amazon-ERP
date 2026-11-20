@@ -197,13 +197,14 @@ app.include_router(finance_router)
 from .finance_summary import router as finance_summary_router
 app.include_router(finance_summary_router)
 from .dashboard import router as dashboard_router
+from . import dashboard_ads
 app.include_router(dashboard_router)
 from .store_inventory import router as store_inventory_router
 app.include_router(store_inventory_router)
 from .products import router as products_router
 app.include_router(products_router)
 from .advertising import router as advertising_router
-from . import ads_workspace, ads_creation
+from . import ads_workspace, ads_creation, ads_live, ads_strategies
 app.include_router(advertising_router)
 from .warehouse import router as warehouse_router
 app.include_router(warehouse_router)
@@ -266,3 +267,6 @@ app.include_router(payouts_router)
 
 from .customs_profiles import router as customs_profiles_router
 app.include_router(customs_profiles_router)
+
+from .ads_queue import router as ads_queue_router
+app.include_router(ads_queue_router)

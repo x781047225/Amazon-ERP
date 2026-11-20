@@ -66,7 +66,7 @@ def calculate_dashboard(store:str,marketplace:str='',trend:str='7',currency:str=
     with Session() as db:
         fx=exchange_rates.snapshot(db,currency)
         jobs=list(db.scalars(select(SyncJob).where(SyncJob.store==store,SyncJob.status=='succeeded')))
-        for key in ['today','yesterday','7','30']:
+        for key in ['today','yesterday','7','14','30']:
             starts,ends=period_bounds(at,key)
             card=period_sales(db,base,at,key,fx)
             card['complete']=all(history_coverage(jobs,store,m,starts[m],ends[m]) for m in markets)

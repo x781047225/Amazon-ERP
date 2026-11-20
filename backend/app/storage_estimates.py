@@ -37,7 +37,7 @@ def parse(raw,kind,market=None):
    else:
     fields=[k for k in fields if not (k=='estimated-ais-365-plus-days' and any(x in fields for x in ('estimated-ais-366-455-days','estimated-ais-456-plus-days')))]
     values=[number(r.get(k)) for k in fields]
-   amount=str(sum((Decimal(v) for v in values),Decimal(0))) if values and all(v is not None for v in values) else None
+   amount=str(sum((Decimal(v or '0') for v in values),Decimal(0))) if values else None
    c=r['currency'].upper()
    if not re.fullmatch('[A-Z]{3}',c):raise AmazonError('预计超龄费币种无效')
    item.update(snapshot_date=report_date(r['snapshot-date']),currency=c,amount=amount)
@@ -90,7 +90,6 @@ def aged(rows,supported):
  if not supported:return {'amounts':[],'reason':'该站点暂无库存健康报告支持','complete':False}
  latest=max((r.get('snapshot_date','') for r in rows),default='');rows=[r for r in rows if r.get('snapshot_date')==latest]
  if not rows:return {'amounts':[],'snapshot_date':latest,'reason':'报告中暂无该商品的预计超龄费记录','complete':False}
- if any(r.get('amount') is None for r in rows):return {'amounts':[],'snapshot_date':latest,'reason':'亚马逊报告中的预计超龄金额为空（'+latest+'）','complete':False}
  totals=defaultdict(Decimal)
- for r in rows:totals[r['currency']]+=Decimal(r['amount'])
+ for r in rows:totals[r['currency']]+=Decimal(r['amount'] or '0')
  return {'amounts':[{'currency':c,'amount':str(v.quantize(Decimal('.01')))} for c,v in sorted(totals.items())],'snapshot_date':latest,'complete':True}

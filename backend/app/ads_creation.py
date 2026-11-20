@@ -33,11 +33,12 @@ class ProductTarget(Strict):
     bid: float | None = Field(default=None, gt=0, le=10000)
 class Creation(Strict):
     profile_id: str
-    mode: Literal['campaign','adgroup']
+    mode: Literal['campaign','adgroup','ad']
+    adgroup_id: str = ''
     campaign_id: str = ''
     campaign: dict = Field(default_factory=dict)
-    name: str = Field(min_length=1, max_length=255)
-    default_bid: float = Field(gt=0, le=10000)
+    name: str = Field(default='广告商品',min_length=1, max_length=255)
+    default_bid: float = Field(default=1,gt=0, le=10000)
     state: Literal['ENABLED','PAUSED'] = 'ENABLED'
     targeting: Literal['AUTO','MANUAL'] = 'AUTO'
     products: list[Product] = Field(min_length=1, max_length=100)
@@ -52,7 +53,8 @@ def options(profile_id: str):
     with Session() as db:
         p=profile_checked(db,profile_id)
         campaigns=[{'id':e.entity_id,'name':e.name,'targeting':e.data.get('targetingType'),'strategy':e.data.get('dynamicBidding',{}).get('strategy','LEGACY_FOR_SALES'),'state':e.state} for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,AdsEntity.kind=='campaign',AdsEntity.state!='ARCHIVED').order_by(AdsEntity.name))]
-        return {'campaigns':campaigns,'today':datetime.now(ZoneInfo(p.timezone)).date().isoformat(),'currency':p.currency,'timezone':p.timezone}
+        groups=[{'id':e.entity_id,'campaign_id':e.campaign_id,'name':e.name} for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,AdsEntity.kind=='adgroup',AdsEntity.state!='ARCHIVED').order_by(AdsEntity.name))]
+        return {'groups':groups,'campaigns':campaigns,'today':datetime.now(ZoneInfo(p.timezone)).date().isoformat(),'currency':p.currency,'timezone':p.timezone}
 
 @router.get('/create/advanced-options')
 def advanced_options(profile_id: str):
@@ -107,6 +109,17 @@ def normalized(body,p,c):
         row['sku']=row['sku'].strip();row['asin']=row['asin'].strip().upper()
         if not row['sku'] or (row['asin'] and not re.fullmatch('[A-Z0-9]{10}',row['asin'])):raise HTTPException(422,'商品SKU或ASIN无效')
     if len({r['sku'] for r in plan['products']})!=len(plan['products']):raise HTTPException(422,'不能重复添加同一个SKU')
+    if body.mode=='ad':
+        parent=remote_one(c,'adgroup',body.adgroup_id)
+        campaign=remote_one(c,'campaign',body.campaign_id)
+        if not parent or parent.get('state')=='ARCHIVED' or str(parent.get('campaignId'))!=body.campaign_id or not campaign or campaign.get('state')=='ARCHIVED':raise HTTPException(409,'请选择此账户下有效的广告活动和广告组')
+        with Session() as db:
+            valid={r['sku']:r for r in product_rows(db,p)}
+            existing={e.data.get('sku') for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==p.id,AdsEntity.kind=='ad',AdsEntity.adgroup_id==body.adgroup_id,AdsEntity.state!='ARCHIVED'))}
+        for r in plan['products']:
+            if r['sku'] not in valid or (r['asin'] and r['asin']!=valid[r['sku']].get('asin')):raise HTTPException(422,'请选择当前店铺站点的商品')
+            if r['sku'] in existing:raise HTTPException(409,'该广告组已包含商品 '+r['sku'])
+        return plan,parent
     today=datetime.now(ZoneInfo(p.timezone)).date().isoformat();parent=None
     if body.mode=='campaign':
         data=copy.deepcopy(body.campaign)
@@ -162,12 +175,12 @@ def preview_creation(body:Creation,actor=Depends(require_admin)):
     digest=hashlib.sha256(json.dumps(plan,sort_keys=True).encode()).hexdigest()
     with Session.begin() as db:
         db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:k))'),{'k':'ads-create:'+body.profile_id+actor['username']})
-        recent=db.scalars(select(AdsChange).where(AdsChange.profile_id==body.profile_id,AdsChange.actor==actor['username'],AdsChange.kind.in_(['create_campaign','create_adgroup']),AdsChange.created_at>now()-timedelta(minutes=15)))
+        recent=db.scalars(select(AdsChange).where(AdsChange.profile_id==body.profile_id,AdsChange.actor==actor['username'],AdsChange.kind.in_(['create_campaign','create_adgroup','create_ad']),AdsChange.created_at>now()-timedelta(minutes=15)))
         for old in recent:
             if old.before.get('digest')==digest:
                 if old.status=='preview':return {'id':old.id,'plan':plan,'parent':parent,'currency':p.currency}
                 raise HTTPException(409,'相同创建请求已提交，请先查看创建结果或同步核对')
-        a=AdsChange(id=str(uuid.uuid4()),profile_id=p.id,kind='create_'+body.mode,entity_id='',campaign_id=body.campaign_id or None,actor=actor['username'],status='preview',before={'_name':body.campaign.get('name') or body.name,'plan':plan,'parent':parent,'digest':digest,'steps':[]},changes={'创建类型':'广告活动及首个广告组' if body.mode=='campaign' else '广告组','广告组':body.name,'商品数量':len(body.products),'投放类型':body.targeting,'完成后状态':body.state});db.add(a)
+        a=AdsChange(id=str(uuid.uuid4()),profile_id=p.id,kind='create_'+body.mode,entity_id='',campaign_id=body.campaign_id or None,actor=actor['username'],status='preview',before={'_name':body.campaign.get('name') or body.name,'plan':plan,'parent':parent,'digest':digest,'steps':[]},changes={'创建类型':{'campaign':'广告活动及首个广告组','adgroup':'广告组','ad':'广告商品'}[body.mode],'广告组':body.name,'商品数量':len(body.products),'投放类型':body.targeting,'完成后状态':body.state});db.add(a)
     return {'id':a.id,'plan':plan,'parent':parent,'currency':p.currency}
 
 class Confirm(Strict):
@@ -187,7 +200,7 @@ def creation_status(identifier:str,actor=Depends(require_admin)):
 def confirm_creation(body:Confirm,tasks:BackgroundTasks,actor=Depends(require_admin)):
     with Session.begin() as db:
         a=db.scalar(select(AdsChange).where(AdsChange.id==body.id).with_for_update())
-        if not a or a.actor!=actor['username'] or a.kind not in ['create_campaign','create_adgroup']:raise HTTPException(404,'创建预览不存在')
+        if not a or a.actor!=actor['username'] or a.kind not in ['create_campaign','create_adgroup','create_ad']:raise HTTPException(404,'创建预览不存在')
         profile_checked(db,a.profile_id)
         if a.status!='preview' or now()-a.created_at>timedelta(minutes=15):raise HTTPException(409,'预览已处理或过期，请查看操作日志')
         a.status='sending';a.updated_at=now()
@@ -220,6 +233,14 @@ def run_creation(identifier):
         return eid
     try:
         c=Client(pid)
+        if plan['mode']=='ad':
+            gid=plan['adgroup_id'];parent=remote_one(c,'adgroup',gid)
+            if not parent or parent.get('state')=='ARCHIVED' or str(parent.get('campaignId'))!=cid:raise AdsError('广告组已变化，请重新预览')
+            existing=c.list('ad',{'adGroupIdFilter':{'include':[gid]}})
+            if any(e.get('sku') in {r['sku'] for r in plan['products']} and e.get('state')!='ARCHIVED' for e in existing):raise AdsError('广告组中已存在所选商品，请同步后核对')
+            for product in plan['products']:checkpoint('添加商品 '+product['sku'],'ad',{'campaignId':cid,'adGroupId':gid,'sku':product['sku'],'state':plan['state']})
+            status='succeeded'
+            return
         if plan['mode']=='adgroup':
             parent=remote_one(c,'campaign',cid)
             old=a.before['parent']
@@ -260,18 +281,32 @@ def run_creation(identifier):
         with Session.begin() as db:
             log=db.get(AdsChange,identifier);log.status=status;log.error=error;log.updated_at=now()
 
+class SuggestedKeyword(Strict):
+    text:str=Field(min_length=1,max_length=250)
+    match:Literal['EXACT','PHRASE','BROAD']
+
 class Suggested(Strict):
     profile_id:str
     asins:list[str]=Field(min_length=1,max_length=50)
     strategy:Literal['LEGACY_FOR_SALES','AUTO_FOR_SALES','MANUAL']='LEGACY_FOR_SALES'
+    keywords:list[SuggestedKeyword]=Field(default_factory=list,max_length=100)
 @router.post('/create/suggestions')
 def suggestions(body:Suggested):
     with Session() as db:profile_checked(db,body.profile_id)
     if any(not re.fullmatch('[A-Z0-9]{10}',x) for x in body.asins):raise HTTPException(422,'ASIN无效')
     c=Client(body.profile_id)
     try:
-        raw=c.request('POST','/sp/targets/bid/recommendations',{'recommendationType':'BIDS_FOR_NEW_AD_GROUP','asins':list(dict.fromkeys(body.asins)),'bidding':{'strategy':body.strategy},'targetingExpressions':[{'type':x} for x in AUTO.values()]},'application/vnd.spthemebasedbidrecommendation.v3+json')
+        keywords={}
+        for k in body.keywords:
+            value=' '.join(k.text.split())
+            if not value:raise HTTPException(422,'关键词不能为空')
+            keywords.setdefault((value.casefold(),k.match),{'text':value,'match':k.match})
+        expressions=[{'type':'KEYWORD_'+k['match']+'_MATCH','value':k['text']} for k in keywords.values()] if keywords else [{'type':x} for x in AUTO.values()]
+        raw=c.request('POST','/sp/targets/bid/recommendations',{'recommendationType':'BIDS_FOR_NEW_AD_GROUP','asins':list(dict.fromkeys(body.asins)),'bidding':{'strategy':body.strategy},'targetingExpressions':expressions},'application/vnd.spthemebasedbidrecommendation.v3+json')
         parsed=parse_recommendations(raw)
+        if keywords:
+            normalized={expression_key({**json.loads(key),'value':' '.join(json.loads(key).get('value','').split()).casefold()}):v for key,v in parsed.items()}
+            return {'keywords':[{**k,'suggestion':normalized.get(expression_key({'type':'KEYWORD_'+k['match']+'_MATCH','value':k['text'].casefold()}))} for k in keywords.values()]}
         return {k:parsed.get(expression_key({'type':v})) for k,v in AUTO.items()}
     except AdsError as e:raise HTTPException(502,str(e)) from None
     finally:c.close()

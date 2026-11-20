@@ -93,7 +93,7 @@ def get_preferences(profile_id:str,actor=Depends(require_advertising_access)):
   return {p.scope[8:]:p.data['columns'] for p in db.scalars(select(AdsPreference).where(AdsPreference.owner==actor['username'],AdsPreference.profile_id==profile_id,AdsPreference.scope.like('columns:%')))}
 @router.post('/column-preferences')
 def set_preferences(body:ColumnPrefs,actor=Depends(require_advertising_access)):
- if body.level not in ['campaign','adgroup','ad','target','negative','search'] or len(body.columns)>250 or len(set(body.columns))!=len(body.columns) or any(len(c)>160 for c in body.columns):raise HTTPException(422,'列设置无效')
+ if body.level not in ['campaign','adgroup','ad','target','negative','search','placement'] or len(body.columns)>250 or len(set(body.columns))!=len(body.columns) or any(len(c)>160 for c in body.columns):raise HTTPException(422,'列设置无效')
  with Session.begin() as db:
   profile_checked(db,body.profile_id);db.merge(AdsPreference(owner=actor['username'],profile_id=body.profile_id,scope='columns:'+body.level,data={'columns':body.columns},updated_at=now()))
  return {'saved':True}
@@ -129,7 +129,7 @@ def get_widths(profile_id:str,actor=Depends(require_advertising_access)):
   return {p.scope[7:]:p.data for p in db.scalars(select(AdsPreference).where(AdsPreference.owner==actor['username'],AdsPreference.profile_id==profile_id,AdsPreference.scope.like('widths:%')))}
 @router.post('/column-widths')
 def set_widths(body:WidthPrefs,actor=Depends(require_advertising_access)):
- if body.level not in ['campaign','adgroup','ad','target','negative','search','logs'] or len(body.widths)>260 or any(len(k)>180 or not 60<=v<=1600 for k,v in body.widths.items()):raise HTTPException(422,'列宽设置无效')
+ if body.level not in ['campaign','adgroup','ad','target','negative','search','logs','placement'] or len(body.widths)>260 or any(len(k)>180 or not 60<=v<=1600 for k,v in body.widths.items()):raise HTTPException(422,'列宽设置无效')
  with Session.begin() as db:
   profile_checked(db,body.profile_id);db.merge(AdsPreference(owner=actor['username'],profile_id=body.profile_id,scope='widths:'+body.level,data=body.widths,updated_at=now()))
  return {'saved':True}

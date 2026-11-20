@@ -5,11 +5,12 @@ from celery import Task
 from .amazon import redis
 from .db import engine
 
-READ_TASKS={'erp.sync','erp.finance','erp.store_inventory','erp.fee_quote','erp.ads','erp.finance_summary','erp.listing_sync','erp.dashboard_cache','erp.data_sync_run','erp.fba.sync','erp.fba.arrivals'}
+READ_TASKS={'erp.sync','erp.finance','erp.store_inventory','erp.fee_quote','erp.ads','erp.ads_current','erp.finance_summary','erp.listing_sync','erp.dashboard_cache','erp.data_sync_run','erp.fba.sync','erp.fba.arrivals'}
 def managed(name):return name in READ_TASKS or name.endswith('_dispatch') or name in ('erp.dispatch','erp.fba.dispatch')
 def queue_for(name):
  if name.startswith('erp.fba.'):return 'fba'
  if name.endswith('_dispatch') or name=='erp.dispatch':return 'control'
+ if name=='erp.ads_current':return 'ads-current'
  if name=='erp.sync':return 'orders'
  if name=='erp.store_inventory':return 'inventory'
  if name=='erp.data_sync_run':return 'coordinator'
@@ -39,7 +40,7 @@ def normalize_queues():
  Only deduplicate idempotent read deliveries / dispatcher checks; writes stay intact.
  """
  import base64
- queues=['celery','control','coordinator','orders','inventory','fba']
+ queues=['celery','control','coordinator','orders','inventory','fba','ads-current']
  # No workers are alive at this point. Rebuild leases from actual broker messages.
  keys=list(redis.scan_iter('erp:delivery:'+engine.url.database+':*'))
  if keys:redis.delete(*keys)

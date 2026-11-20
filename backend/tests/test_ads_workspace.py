@@ -198,3 +198,23 @@ def test_recent_changes_latest_success_per_field_and_24_hour_expiry(monkeypatch)
  assert next(r for r in query(level='campaign').json()['rows'] if r['id']=='2')['recent_changes']=={}
  clock+=timedelta(hours=24)
  assert all(not r['recent_changes'] for r in query(level='campaign').json()['rows'])
+
+
+def test_scoped_group_enrichment_and_target_counts(monkeypatch):
+ from app import ads_workspace as w
+ seed()
+ with Session.begin() as db:
+  db.add(AdsEntity(profile_id=PID,kind='adgroup',entity_id='other',campaign_id='1',adgroup_id='other',name='Other',state='ENABLED',data={}))
+  db.add(AdsEntity(profile_id=PID,kind='ad',entity_id='other-ad',campaign_id='1',adgroup_id='other',name='Other',state='ENABLED',data={'sku':'OTHER','asin':'OTHER'}))
+ save_entities(PID,'keyword',[{'keywordId':'k','campaignId':'1','adGroupId':'3','keywordText':'K','state':'ENABLED'},{'keywordId':'archived','campaignId':'1','adGroupId':'3','state':'ARCHIVED'}])
+ captured=[];original=w.enrich
+ def scoped(db,p,ads):
+  ads=list(ads);captured.append([a.entity_id for a in ads]);return original(db,p,ads)
+ monkeypatch.setattr(w,'enrich',scoped)
+ assert query(level='ad',adgroup_id='3').status_code==200
+ assert captured==[['4']]
+ captured.clear()
+ assert query(level='target',adgroup_id='3').status_code==200
+ assert not captured
+ groups=query(level='adgroup',adgroup_id='3').json()['rows']
+ assert len(groups)==1 and groups[0]['product_count']==1 and groups[0]['target_count']==1

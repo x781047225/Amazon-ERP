@@ -185,3 +185,29 @@ def payout_task(jid):
     from .payouts import run
     run(jid)
 celery.conf.beat_schedule['payout_dispatch']={'task':'erp.payout_dispatch','schedule':30.0}
+
+
+@celery.task(name='erp.ads_current')
+def ads_current_task(profile_id,token):
+    from .ads_live import run
+    run(profile_id,token)
+
+@celery.task(name='erp.ads_bid_prefetch')
+def ads_bid_prefetch(profile_id,group_ids):
+    from .ads_suggestions import refresh_bids,RefreshBids
+    return refresh_bids(RefreshBids(profile_id=profile_id,group_ids=group_ids))
+
+@celery.task(name='erp.ads_bid_prefetch_dispatch')
+def ads_bid_prefetch_dispatch():
+    from .ads_suggestions import prefetch_tick
+    prefetch_tick()
+celery.conf.beat_schedule['ads_bid_prefetch_dispatch']={'task':'erp.ads_bid_prefetch_dispatch','schedule':900.0}
+
+@celery.task(name='erp.ads_strategies')
+def ads_strategies_tick():
+    from .ads_strategy_worker import tick
+    tick()
+# Real strategy execution remains disabled until separately enabled.
+from .settings import LOCAL as _strategy_local
+if _strategy_local.get('ads_strategy_execution_enabled') is True:
+    celery.conf.beat_schedule['ads_strategies']={'task':'erp.ads_strategies','schedule':60.0}

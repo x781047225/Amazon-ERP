@@ -99,3 +99,40 @@ def test_business_payload_and_products(monkeypatch):
  r=client.post('/api/advertising/create/products/resolve',headers=HEAD,json={'profile_id':PID,'kind':'sku','values':['FX-Test','UNKNOWN']}).json();assert len(r['rows'])==2 and r['rows'][1]['unverified']
  r=client.post('/api/advertising/create/products/resolve',headers=HEAD,json={'profile_id':PID,'kind':'asin','values':['B0TEST0001']}).json();assert not r['rows'] and len(r['unresolved'])==1
  assert client.get('/api/advertising/create/products?profile_id=other').status_code==404
+
+
+def test_new_keyword_suggestions_are_matched_and_read_only(monkeypatch):
+ seed();calls=[]
+ class Recommendations:
+  def __init__(self,*a):pass
+  def close(self):pass
+  def request(self,method,path,payload,media):
+   calls.append(payload)
+   assert method=='POST' and path=='/sp/targets/bid/recommendations'
+   assert payload['recommendationType']=='BIDS_FOR_NEW_AD_GROUP'
+   rows=[]
+   for i,x in enumerate(payload['targetingExpressions']):
+    if i==2:continue
+    rows.append({'targetingExpression':{**x,'value':x.get('value','').lower()},'bidValues':[{'suggestedBid':v} for v in [.1+i,.2+i,.3+i]]})
+   return {'bidRecommendations':[{'theme':'CONVERSION_OPPORTUNITIES','bidRecommendationsForTargetingExpressions':rows}]}
+ monkeypatch.setattr(creation,'Client',Recommendations)
+ data={'profile_id':PID,'asins':['B0TEST0003'],'strategy':'MANUAL','keywords':[{'text':' Gift  Box ','match':m} for m in ['EXACT','PHRASE','BROAD']]+[{'text':'gift box','match':'EXACT'}]}
+ r=client.post('/api/advertising/create/suggestions',json=data,headers=HEAD)
+ assert r.status_code==200,r.text
+ assert len(calls)==1 and len(calls[0]['targetingExpressions'])==3
+ assert [x['type'] for x in calls[0]['targetingExpressions']]==['KEYWORD_EXACT_MATCH','KEYWORD_PHRASE_MATCH','KEYWORD_BROAD_MATCH']
+ assert r.json()['keywords'][0]['suggestion']=={'low':.1,'mid':.2,'high':.3}
+ assert r.json()['keywords'][1]['suggestion']['mid']==1.2
+ assert r.json()['keywords'][2]['suggestion'] is None
+ with Session() as db:assert not list(db.query(AdsChange))
+ for keywords in [[{'text':' ','match':'EXACT'}],[{'text':'gift','match':'NEGATIVE_EXACT'}],[{'text':'gift','match':'EXACT'}]*101]:
+  r=client.post('/api/advertising/create/suggestions',json={**data,'keywords':keywords},headers=HEAD);assert r.status_code==422
+ assert len(calls)==1
+
+def test_same_keyword_different_matches_allowed_duplicate_rejected(monkeypatch):
+ seed();calls=fake(monkeypatch)
+ b=body(targeting='MANUAL',auto_targets=[],keywords=[{'text':'gift box','match':m,'bid':.25} for m in ['EXACT','PHRASE','BROAD']])
+ r=preview(b);assert r.status_code==200,r.text
+ b['keywords'].append({'text':'GIFT BOX','match':'EXACT','bid':.3})
+ assert preview(b).status_code==422
+ assert not calls

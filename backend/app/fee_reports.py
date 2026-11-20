@@ -55,6 +55,7 @@ def parse(raw,kind):
   item={'asin':r['asin'],'market':market,'currency':r['currency'],'sku':r.get('sku',''),'fnsku':r.get('fnsku','')}
   if kind=='fees':
    fee=r.get('expected-domestic-fulfilment-fee-per-unit') or r.get('expected-fulfillment-fee-per-unit')
+   item['measurements']={k:r.get(k,'') for k in ('longest-side','median-side','shortest-side','unit-of-dimension','item-package-weight','unit-of-weight','item-volume','volume-units')}
    item.update(fba_fee=number(fee),size_tier=r.get('product-size-weight-band') or r.get('product-size-tier',''),basis='本地配送预估' if r.get('expected-domestic-fulfilment-fee-per-unit') else '配送预估')
   else:
    month=(r.get('month-of-charge') if kind=='storage' else r.get('snapshot-date','')[:7])

@@ -44,7 +44,7 @@ def source_signature(db,store):
  return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
 def outdated(payload,store,market,at,db):
- return not payload or payload.get('_window')!=window_key(at,market) or payload.get('_source')!=source_signature(db,store) or bool(payload.get('_fees_pending') and not fees_pending(db,store))
+ return not payload or '14' not in payload.get('cards',{}) or payload.get('_window')!=window_key(at,market) or payload.get('_source')!=source_signature(db,store) or bool(payload.get('_fees_pending') and not fees_pending(db,store))
 
 def register(store,market,currency,trend):
  key=key_for(store,market,currency,trend)

@@ -42,7 +42,7 @@ def enrich(db,rows,results):
     for v in values:groups[(v['currency'],v.get('basis','配送预估'))].append(v)
     for (currency,basis),vs in groups.items():
      fees=[Decimal(v['fba_fee']) for v in vs if v.get('fba_fee') is not None]
-     metric['fba'].append({'currency':currency,'min':str(min(fees)) if fees else None,'max':str(max(fees)) if fees else None,'size_tiers':sorted({v['size_tier'] for v in vs if v.get('size_tier')}),'basis':basis})
+     metric['fba'].append({'currency':currency,'min':str(min(fees)) if fees else None,'max':str(max(fees)) if fees else None,'measurements':list({str(v.get('measurements')):v['measurements'] for v in vs if v.get('measurements')}.values()),'size_tiers':sorted({v['size_tier'] for v in vs if v.get('size_tier')}),'basis':basis})
    else:
     groups=defaultdict(Decimal)
     for v in values:groups[(v['month'],v['currency'])]+=Decimal(v['amount'])

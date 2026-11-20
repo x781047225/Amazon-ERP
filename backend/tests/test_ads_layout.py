@@ -57,3 +57,14 @@ def test_explicit_product_link_precedes_alias_and_wrong_asin_stock(monkeypatch):
   db.add(StoreInventory(store='DemoStoreD',data={'DE':{'rows':[{'sellerSku':'FX-Test','asin':'DIFFERENT','fnSku':'x','inventoryDetails':{'fulfillableQuantity':999}}]}}))
  row=query(level='ad').json()['rows'][0]
  assert row['product_name']=='关联品名' and row['available'] is None
+
+
+def test_ad_product_name_never_falls_back_to_amazon_title():
+ seed()
+ with Session.begin() as db:
+  listing=Listing(store='DemoStoreD',marketplace='FR',sku='FX-Test',asin='B0TEST0003',title='Amazon title must not appear as 品名',product_type='TEST',attributes={},fingerprint='x',listing_data={})
+  db.add(listing);db.flush();listing_id=listing.id
+ assert query(level='ad').json()['rows'][0]['product_name']==''
+ with Session.begin() as db:
+  product=LocalProduct(code='GM-LINK',name='标品名称');db.add(product);db.flush();db.add(ProductLink(listing_pk=listing_id,product_id=product.id,actor='test'))
+ assert query(level='ad').json()['rows'][0]['product_name']=='标品名称'
