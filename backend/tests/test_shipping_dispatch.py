@@ -170,3 +170,36 @@ def test_completed_sta_preserves_synced_receipts_and_local_logistics():
   assert (row.name,row.status,row.destination,row.received)==('Newer remote name','RECEIVING','HAJ2',7)
   assert row.dispatched_on==date(2026,11,20) and row.logistics_flags=={'tracking_review':'complete'}
   assert db.scalar(select(ShipmentItem)).received==7
+
+
+def test_sta_reference_and_confirmed_window_visible_without_arrival_sync():
+ from app.models import ArrivalCache
+ from app.sta_projection import publish_completed
+ pk,id=prepared()
+ start,end='2026-11-22T00:00:00Z','2026-11-28T23:59:00Z'
+ with Session.begin() as db:
+  t=db.get(StaTask,id);r=deepcopy(t.result)
+  r['shipments'][0]['amazonReferenceId']='REF-LOCAL'
+  r['deliveryWindows']={'s':[{'deliveryWindowOptionId':'w','startDate':start,'endDate':end}]}
+  r['selectedDeliveryWindows']={'s':'w'};t.result=r
+ assert dispatch(pk,id).status_code==200
+ row=client.get('/api/fba/shipments?q=FBA123').json()['shipments'][0]
+ assert row['amazon_reference_id']=='REF-LOCAL'
+ assert (row['arrival_start'],row['arrival_end'],row['arrival_source'])==(start,end,'sta')
+ with Session.begin() as db:
+  db.add(ArrivalCache(store='DemoStoreA',data={'FBA123':{'start':None,'end':None}}))
+ assert client.get('/api/fba/shipments?q=FBA123').json()['shipments'][0]['arrival_end']==end
+ with Session.begin() as db:
+  db.get(ArrivalCache,'DemoStoreA').data={'FBA123':{'start':'2026-12-01T00:00:00Z','end':'2026-12-03T00:00:00Z'}}
+ row=client.get('/api/fba/shipments?q=FBA123').json()['shipments'][0]
+ assert row['arrival_source']=='amazon' and row['arrival_end']=='2026-12-03T00:00:00Z'
+
+
+def test_unconfirmed_or_pickup_window_is_not_an_arrival():
+ from types import SimpleNamespace
+ from app.sta_projection import confirmed_window
+ t=SimpleNamespace(result={'transportConfirmed':True,'deliveryWindows':{'s':[{'deliveryWindowOptionId':'w','startDate':'2026-11-22T00:00:00Z','endDate':'2026-11-28T00:00:00Z'}]}})
+ assert confirmed_window(t,{'shipmentId':'s','dates':{'readyToShipWindow':{'start':'2026-11-20T00:00:00Z'}}})=={}
+ t.result['selectedDeliveryWindows']={'s':'w'}
+ assert confirmed_window(t,{'shipmentId':'s'})['end']=='2026-11-28T00:00:00Z'
+ assert confirmed_window(t,{'shipmentId':'s','selectedDeliveryWindow':{'startDate':'bad','endDate':'bad'}})=={}

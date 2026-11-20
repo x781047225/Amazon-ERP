@@ -50,3 +50,14 @@ def test_conflicting_warehouse_country_not_inferred():
   apply(db,'DemoStoreA','FBA_SECOND',{'destination_country':'DE','warehouse_id':'BHX4'})
   assert fill_warehouse_countries(db)==0
  with Session() as db:assert db.get(Shipment,other).destination_country is None
+
+
+def test_reference_id_updates_on_sync_and_survives_missing_responses():
+ pk=seed()
+ with Session.begin() as db:
+  apply(db,'DemoStoreA','FBA_META',facts({'amazonReferenceId':'REF-FIRST'},{}))
+  apply(db,'DemoStoreA','FBA_META',facts({'amazonReferenceId':'REF-LATEST'},{}))
+  apply(db,'DemoStoreA','FBA_META',facts({},{}))
+ result=shipments(store='DemoStoreA',page=1,page_size=25)['shipments'][0]
+ assert result['amazon_reference_id']=='REF-LATEST'
+ with Session() as db:assert db.get(Shipment,pk).logistics_flags['amazon_reference_id']=='REF-LATEST'

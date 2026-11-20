@@ -12,12 +12,14 @@ def facts(shipment,plan):
     if country=='UK':country='GB'
     if not isinstance(country,str) or len(country)!=2 or not country.isalpha():country=None
     return {'destination_country':country.upper() if country else None,'warehouse_id':destination.get('warehouseId'),
-        'amazon_created_at':plan.get('createdAt'),'plan_id':plan.get('inboundPlanId'),'shipment_id':shipment.get('shipmentId')}
+        'amazon_reference_id':shipment.get('amazonReferenceId'),'amazon_created_at':plan.get('createdAt'),'plan_id':plan.get('inboundPlanId'),'shipment_id':shipment.get('shipmentId')}
 
 def apply(db,store,fid,metadata):
     row=db.scalar(select(Shipment).where(Shipment.store==store,Shipment.shipment_id==fid).with_for_update())
     if not row:return False
     flags=dict(row.logistics_flags or {})
+    reference=metadata.get('amazon_reference_id')
+    if isinstance(reference,str) and reference.strip():flags['amazon_reference_id']=reference.strip()
     country=metadata.get('destination_country')
     warehouse=metadata.get('warehouse_id')
     # A different FC can be a reassignment: the current detail is authoritative.

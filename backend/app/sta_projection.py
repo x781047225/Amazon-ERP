@@ -3,6 +3,22 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from .models import Shipment,ShipmentMarket,ShipmentItem
 from .sta_shipment import confirmed_shipments
+from datetime import datetime
+
+def confirmed_window(task,ship):
+    """Only confirmed delivery windows; ready-to-ship and pickup dates are not arrivals."""
+    sid=ship.get('shipmentId')
+    window=ship.get('selectedDeliveryWindow') or {}
+    if not window and task.result.get('transportConfirmed'):
+        wid=task.result.get('selectedDeliveryWindows',{}).get(sid)
+        window=next((w for w in task.result.get('deliveryWindows',{}).get(sid,[]) if wid and w.get('deliveryWindowOptionId')==wid),{})
+    start,end=window.get('startDate'),window.get('endDate')
+    try:
+        a,b=(datetime.fromisoformat(x.replace('Z','+00:00')) for x in (start,end))
+        if a.tzinfo and b.tzinfo and a<=b:return {'start':start,'end':end}
+    except (ValueError,TypeError,AttributeError):pass
+    return {}
+
 
 
 def publish_completed(db,task):
@@ -21,6 +37,14 @@ def publish_completed(db,task):
         ).on_conflict_do_nothing(index_elements=['store','shipment_id']).returning(Shipment.id))
         row=db.scalar(select(Shipment).where(Shipment.store==task.store,Shipment.shipment_id==ship['shipmentConfirmationId']).with_for_update())
         db.execute(insert(ShipmentMarket).values(shipment_pk=row.id,marketplace=task.country).on_conflict_do_nothing())
+        flags=dict(row.logistics_flags or {})
+        reference=ship.get('amazonReferenceId')
+        if isinstance(reference,str) and reference.strip() and not flags.get('amazon_reference_id'):
+            flags['amazon_reference_id']=reference.strip()
+        window=confirmed_window(task,ship)
+        if window and not flags.get('sta_delivery_window'):
+            flags['sta_delivery_window']={**window,'task_id':task.id}
+        row.logistics_flags=flags
         # Never replace newer Amazon receipt data or manually maintained logistics.
         # A locally published item has no receipt observation yet (details_synced_at stays null).
         if pk is not None:

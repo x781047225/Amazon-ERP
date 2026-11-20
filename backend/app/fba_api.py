@@ -9,7 +9,10 @@ from .settings import STORES,MARKETS
 from .fba_sync import create_fba_job
 router=APIRouter(prefix='/api/fba')
 FIELDS=['id','store','shipment_id','name','status','destination','destination_country','dispatched_on','expected_on','logistics_flags','shipped','received','remaining','over_received','item_count','decreased','first_seen_at','synced_at','details_synced_at','sync_error']
-def serialize(row,fields):return {k:getattr(row,k) for k in fields}
+def serialize(row,fields):
+    data={k:getattr(row,k) for k in fields}
+    if isinstance(row,Shipment):data['amazon_reference_id']=(row.logistics_flags or {}).get('amazon_reference_id')
+    return data
 ITEM_FIELDS=['sku','fnsku','shipped','received','remaining','over_received','received_change','case_quantity']
 def item_match(q,exact=False):
     if exact:return or_(ShipmentItem.sku==q,ShipmentItem.fnsku==q)
@@ -71,7 +74,9 @@ def shipments(store:str='',marketplace:str='',status:str='',q:str='',dispatch_st
         data=[]
         for r in rows:
             arrival=caches.get(r.store,{}).get(r.shipment_id,{})
-            d=dict(serialize(r,FIELDS),markets=markets.get(r.id,[]),preview_items=previews.get(r.id,[]),item_query=q if item_search else '',item_exact=exact,arrival_start=arrival.get('start'),arrival_end=arrival.get('end'),arrival_error=arrival.get('error'),arrival_synced_at=arrival.get('synced_at'),**logistics_view(r,arrival))
+            local_window=(r.logistics_flags or {}).get('sta_delivery_window') or {}
+            window=arrival if arrival.get('start') and arrival.get('end') else local_window
+            d=dict(serialize(r,FIELDS),markets=markets.get(r.id,[]),preview_items=previews.get(r.id,[]),item_query=q if item_search else '',item_exact=exact,arrival_start=window.get('start'),arrival_end=window.get('end'),arrival_source='amazon' if window is arrival else 'sta' if window else None,arrival_error=arrival.get('error'),arrival_synced_at=arrival.get('synced_at'),**logistics_view(r,arrival))
             if item_search:d.update(subtotals.get(r.id,{}))
             data.append(d)
         return {'total':total,'shipments':data,'summary':dict(zip(keys,totals),difference=totals[0]-totals[1],unknown=unknown),'item_search':item_search}

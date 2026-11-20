@@ -58,7 +58,7 @@ def test_timezone_end_of_window_and_newer_quantity_snapshot():
 
 def test_discovery_pagination_status_and_private_data_not_cached():
     pk=seed(priced());ship()
-    responses=[{'inboundPlans':[],'pagination':{'nextToken':'next'}},{'inboundPlans':[{'inboundPlanId':'p'}]}, {'inboundPlanId':'p','createdAt':'2026-10-01T10:00:00Z','marketplaceIds':[MARKETS['DE']],'shipments':[{'shipmentId':'s'}]}, {'shipmentConfirmationId':'FBA_TEST','shipmentId':'s','status':'IN_TRANSIT','selectedDeliveryWindow':{'startDate':record()['start'],'endDate':record()['end']},'destination':{'warehouseId':'WRO5','address':{'name':'PRIVATE','countryCode':'PL'}},'dates':{'readyToShipWindow':{'start':'wrong'}}}]
+    responses=[{'inboundPlans':[],'pagination':{'nextToken':'next'}},{'inboundPlans':[{'inboundPlanId':'p'}]}, {'inboundPlanId':'p','createdAt':'2026-10-01T10:00:00Z','marketplaceIds':[MARKETS['DE']],'shipments':[{'shipmentId':'s'}]}, {'shipmentConfirmationId':'FBA_TEST','amazonReferenceId':'REF-SYNC','shipmentId':'s','status':'IN_TRANSIT','selectedDeliveryWindow':{'startDate':record()['start'],'endDate':record()['end']},'destination':{'warehouseId':'WRO5','address':{'name':'PRIVATE','countryCode':'PL'}},'dates':{'readyToShipWindow':{'start':'wrong'}}}]
     raw=[{'SellerSKU':'TEST-SKU','FulfillmentNetworkSKU':'X-TEST','QuantityShipped':100,'QuantityReceived':75}]
     with patch('app.listing_arrivals.redis.lock',return_value=Lock()),patch('app.listing_arrivals.now',return_value=AT),patch('app.listing_arrivals.get_json',side_effect=responses) as get,patch('app.listing_arrivals.all_items',return_value=raw):
         assert a.sync_store('DemoStoreA',refresh_source_data=False)['updated']==1
@@ -71,6 +71,7 @@ def test_discovery_pagination_status_and_private_data_not_cached():
     with Session() as db:
         row=db.scalar(select(Shipment).where(Shipment.shipment_id=='FBA_TEST'))
         assert row.destination_country=='PL' and str(row.dispatched_on)=='2026-10-01'
+        assert row.logistics_flags['amazon_reference_id']=='REF-SYNC'
     assert info(pk)['values']['15']==25
 
 def test_failed_refresh_preserves_cache_and_excludes_failed_window():
