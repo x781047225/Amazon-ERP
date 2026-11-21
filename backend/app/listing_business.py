@@ -128,17 +128,18 @@ def sales(db,row,jobs,at,totals=None):
 
 def inventory_info(db,row):
     inv=db.get(ListingInventory,row.id)
-    if not inv:return {'available':None,'inbound':None,'working':None,'receiving':None,'processing':None,'shipped':None,'synced_at':None,'error':None,'stale':True}
+    if not inv:return {'available':None,'inbound':None,'working':None,'receiving':None,'transfer':None,'processing':None,'shipped':None,'synced_at':None,'error':None,'stale':True}
     data=inv.data or {};d=data.get('inventoryDetails',{})
     # A refreshed listing with another ASIN/FNSKU must not display old stock.
     fnsku=next((s.get('fnSku') for s in row.listing_data.get('summaries',[]) if s.get('marketplaceId')==MARKETS[row.marketplace]),None)
     mismatch=data and (data.get('asin')!=row.asin or (fnsku and data.get('fnSku')!=fnsku))
     if mismatch:d={}
     shipped,receiving=d.get('inboundShippedQuantity'),d.get('inboundReceivingQuantity')
-    return {'available':d.get('fulfillableQuantity'),'inbound':shipped+receiving if shipped is not None and receiving is not None else None,'working':d.get('inboundWorkingQuantity'),'shipped':shipped,'receiving':receiving,'processing':(d.get('reservedQuantity') or {}).get('fcProcessingQuantity'),'synced_at':inv.synced_at,'error':'商品身份已变化，请重新同步库存。' if mismatch else inv.error,'stale':not inv.synced_at or now()-inv.synced_at>timedelta(minutes=30)}
+    return {'available':d.get('fulfillableQuantity'),'inbound':shipped+receiving if shipped is not None and receiving is not None else None,'working':d.get('inboundWorkingQuantity'),'shipped':shipped,'receiving':receiving,'transfer':(d.get('reservedQuantity') or {}).get('pendingTransshipmentQuantity'),'processing':(d.get('reservedQuantity') or {}).get('fcProcessingQuantity'),'synced_at':inv.synced_at,'error':'商品身份已变化，请重新同步库存。' if mismatch else inv.error,'stale':not inv.synced_at or now()-inv.synced_at>timedelta(minutes=30)}
 
 def enrich(db,rows,results):
     from .listing_arrivals import arrival_info
+    from .listing_status import mapped_status
     from .listing_query import sales_totals
     jobs=list(db.scalars(select(SyncJob).where(SyncJob.status=='succeeded',SyncJob.store.in_({r.store for r in rows}))));at=now();totals=sales_totals(db,rows,at);sales_meta={}
     from .listing_price_state import latest_submissions,state
@@ -148,6 +149,7 @@ def enrich(db,rows,results):
         update=state(row,pending.get(row.id))
         result['pending_price']=update if update and update['status'] in ('queued','submitting') else None
         result['pricing']=price_info(db,row,successful.get(row.id),loaded=True);result['inventory']=inventory_info(db,row);key=(row.store,row.marketplace)
+        result.update(mapped_status(row,result['inventory'],at))
         if key not in sales_meta:sales_meta[key]=sales(db,row,jobs,at,[0]*5)
         result['sales']=copy.deepcopy(sales_meta[key])
         for i,value in enumerate(result['sales']['values'].values()):value['units']=int(totals.get((row.store,row.marketplace,row.sku,row.asin),[0]*5)[i])

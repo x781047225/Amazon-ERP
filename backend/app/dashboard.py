@@ -40,17 +40,17 @@ def inventory_snapshot(db,store,market=''):
         # Mainland marketplace views may share inventory; prefer DE, then freshest snapshot.
         rank=(r['marketplace']=='DE',r['synced_at'])
         if key not in chosen or rank>(chosen[key]['marketplace']=='DE',chosen[key]['synced_at']):chosen[key]=dict(r,region=region)
-    groups={r:{'available':0,'in_stock':0,'shipped':0,'receiving':0,'processing':0,'records':0,'unknown_fields':0} for r in ['UK','EU']}
+    groups={r:{'available':0,'in_stock':0,'shipped':0,'receiving':0,'transfer':0,'processing':0,'records':0,'unknown_fields':0} for r in ['UK','EU']}
     for r in chosen.values():
         d=r['data'].get('inventoryDetails') or {};g=groups[r['region']];g['records']+=1
-        vals={'available':d.get('fulfillableQuantity'),'shipped':d.get('inboundShippedQuantity'),'receiving':d.get('inboundReceivingQuantity'),'processing':(d.get('reservedQuantity') or {}).get('fcProcessingQuantity')}
-        onhand=[vals[k] for k in ['available','receiving','processing']]
+        vals={'available':d.get('fulfillableQuantity'),'shipped':d.get('inboundShippedQuantity'),'receiving':d.get('inboundReceivingQuantity'),'transfer':(d.get('reservedQuantity') or {}).get('pendingTransshipmentQuantity'),'processing':(d.get('reservedQuantity') or {}).get('fcProcessingQuantity')}
+        onhand=[vals[k] for k in ['available','receiving','transfer','processing']]
         vals['in_stock']=sum(onhand) if all(isinstance(v,int) for v in onhand) else None
         for key,value in vals.items():
             if value is None:g['unknown_fields']+=1;g[key]=None
             elif g[key] is not None:g[key]+=value
-        r['available']=vals['available'];r['pipeline']=sum(vals[k] for k in ['shipped','receiving','processing']) if all(vals[k] is not None for k in ['shipped','receiving','processing']) else None
-    totals={k:sum(g[k] for g in groups.values()) if (chosen or covered) and all(g[k] is not None for g in groups.values()) else None for k in ['available','in_stock','shipped','receiving','processing']}
+        r['available']=vals['available'];r['pipeline']=sum(vals[k] for k in ['shipped','receiving','transfer','processing']) if all(vals[k] is not None for k in ['shipped','receiving','transfer','processing']) else None
+    totals={k:sum(g[k] for g in groups.values()) if (chosen or covered) and all(g[k] is not None for g in groups.values()) else None for k in ['available','in_stock','shipped','receiving','transfer','processing']}
     totals['total']=totals['in_stock']+totals['shipped'] if totals['in_stock'] is not None and totals['shipped'] is not None else None
     for g in groups.values():g['total']=g['in_stock']+g['shipped'] if g['in_stock'] is not None and g['shipped'] is not None else None
     return {'sync_status':full.status if full else 'idle','sync_error':full.error if full else None,'covered_markets':sorted(covered),'totals':totals,'groups':[dict(region=k,**v) for k,v in groups.items() if v['records']],'records':len(chosen),'unavailable_listing_rows':missing,'as_of':min((r['synced_at'] for r in chosen.values()),default=None),'stale':any(now()-r['synced_at']>timedelta(minutes=30) for r in chosen.values()),'approximate':not bool(market),'note':'英国与欧洲大陆分开；大陆相同SKU/FNSKU只取一份库存（德国优先）。这是现有缓存去重参考，站点可售限制可能不同，不作为精确跨仓盘点。'},list(chosen.values())

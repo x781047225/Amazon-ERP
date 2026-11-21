@@ -162,3 +162,26 @@ def test_mcp_exception_is_logged_without_exception_payload(monkeypatch):
   assert log.actor=='member' and log.detail['user_id']==uid and log.detail['token_id']==tid
   assert log.detail['status']=='failed' and log.detail['finished_at']
   assert 'private-transport-value' not in str(log.detail)
+
+
+@pytest.mark.parametrize('transfer',[0,9,None])
+def test_fba_inventory_transfer_via_mcp(transfer):
+ from app.models import ListingInventory
+ c,_,_=setup(['listing.view','users.mcp.operate'])
+ pk=seed(payload(sku='transfer-demo'));seed(payload(sku='hidden'),store='DemoStoreB')
+ reserved={'fcProcessingQuantity':3}
+ if transfer is not None:reserved['pendingTransshipmentQuantity']=transfer
+ with Session.begin() as db:
+  from app.models import Listing
+  row=db.get(Listing,pk)
+  db.add(ListingInventory(listing_pk=pk,data={'asin':row.asin,'inventoryDetails':{'reservedQuantity':reserved}},synced_at=now()))
+ for name in ['fba_inventory_query','listings_query']:
+  result=call(c,name,{'store':'DemoStoreA'})
+  assert result['total']==1
+  assert result['listings'][0]['listing_status']=='在售'
+  assert result['listings'][0]['listing_status_detail']['can_update'] is True
+  inv=result['listings'][0]['inventory']
+  assert inv['transfer']==transfer and inv['processing']==3
+ detail=call(c,'listing_detail',{'id':pk})
+ assert detail['inventory']['transfer']==transfer and detail['listing_status']=='在售'
+ call(c,'fba_inventory_query',{'store':'DemoStoreB'},ok=False)

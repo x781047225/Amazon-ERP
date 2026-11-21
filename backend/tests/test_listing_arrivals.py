@@ -44,12 +44,13 @@ def test_unknown_overdue_and_no_cache_are_not_zero():
     d=info(pk);assert d['partial'] and d['unknown']==40 and d['overdue']==40 and d['unverified']==40 and d['values']['60']==0
 
 def test_processing_separate_from_shipped_and_missing_processing_unknown():
-    pk=seed(priced());s=stock();s['inventoryDetails']['reservedQuantity']={'totalReservedQuantity':90,'fcProcessingQuantity':6}
+    pk=seed(priced());s=stock();s['inventoryDetails']['reservedQuantity']={'totalReservedQuantity':90,'fcProcessingQuantity':6,'pendingTransshipmentQuantity':11}
     with Session.begin() as db:db.add(ListingInventory(listing_pk=pk,data=s,synced_at=AT))
-    d=read(pk)['inventory'];assert (d['available'],d['receiving'],d['processing'],d['shipped'])==(0,3,6,7)
+    d=read(pk)['inventory'];assert (d['available'],d['receiving'],d['transfer'],d['processing'],d['shipped'])==(0,3,11,6,7)
     s['inventoryDetails']['reservedQuantity']={}
     with Session.begin() as db:db.get(ListingInventory,pk).data=s
     assert read(pk)['inventory']['processing'] is None
+    assert read(pk)['inventory']['transfer'] is None
 
 def test_timezone_end_of_window_and_newer_quantity_snapshot():
     pk=seed(priced());ship();r=record();r['start']='2026-11-11T23:00:00Z';r['end']='2026-11-12T23:30:00Z'

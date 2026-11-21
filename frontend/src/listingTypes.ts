@@ -7,7 +7,7 @@ export type ListingDetail=Listing&{edit_fields:EditField[],submissions:Submissio
 
 export type PriceChanges={price:string,currency:string,sale_price:string|null,sale_start:string|null,sale_end:string|null}
 export type Pricing={price:string|null,price_source?:'attribute'|'current_offer'|null,sale_price:string|null,sale_start:string|null,sale_end:string|null,sale_status:'none'|'active'|'scheduled'|'expired'|'unknown',currency:string|null,editable:boolean,fingerprint:string,synced_at:string,draft:{revision:number,changes:Partial<PriceChanges>,saved_at:string,conflict:boolean}|null}
-export type Inventory={available:number|null,inbound:number|null,working:number|null,shipped:number|null,receiving:number|null,processing:number|null,synced_at:string|null,error:string|null,stale:boolean}
+export type Inventory={available:number|null,inbound:number|null,working:number|null,shipped:number|null,receiving:number|null,transfer:number|null,processing:number|null,synced_at:string|null,error:string|null,stale:boolean}
 export type Sales={values:Record<string,{units:number,complete:boolean}>,timezone:string,as_of:string|null,stale:boolean,note:string}
 
 export type ArrivalDetail={shipment_id:string,units:number,status:string,warehouse:string|null,start:string|null,end:string|null,bucket:'scheduled'|'later'|'unknown'|'overdue'|'unverified',synced_at:string|null,quantity_at:string|null,error:string|null}

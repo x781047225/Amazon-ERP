@@ -103,6 +103,10 @@ Listing 的调价、编辑、关联等操作记录在 Listing 业务日志中；
 
 ## MCP 接入
 
+Listing 查询工具 `listings_query`、`listing_detail`、`fba_inventory_query` 返回独立的 `inventory.transfer`（待调仓）；库存字段 `null` 表示尚未获取，`0` 表示已确认零库存。首页在库包含待调仓，不再次与在库相加。
+
+以上工具还返回 `listing_status`（在售／停售／已删除／缺货／未知）、`listing_status_code` 和 `listing_status_detail`。后者包含 `can_update`、判断原因、数据来源、Listing/库存读取时间与相关问题。更新外部表格前检查读取时间，仅在 `can_update=true` 时采用该状态；未知时保留原值。BUYABLE 优先于零库存，父体和读取异常不误判缺货；缺货须确认所有配送渠道可售为零且没有未解决的 ERROR；停售限制或目录移除不等于删除。当前未接入删除通知，无明确 DELETED 证据不会返回已删除。
+
 ERP 已提供 `/mcp` 无状态 JSON 接口（POST），可直接使用个人 Token 连接；不提供 GET SSE 流。也可另行部署 MCP 适配服务，将工具映射到 ERP HTTP 接口，并转发用户的 `Authorization: Bearer <个人Token>`。不要在适配层改用共享管理员身份。
 
 支持 Listing 查询及当前支持字段的修改、货件查询、订单查询、库存查询，以及产品管理五个 Tab 的增删改查。以 `tools/list` 返回的 `inputSchema` 为准，也可通过 `/api/integration/capabilities` 查看当前用户获准使用的工具。Listing 提交继续使用已有的修改预览和确认流程。

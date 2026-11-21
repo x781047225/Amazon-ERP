@@ -95,12 +95,15 @@ def test_finance_resume_and_atomicity(monkeypatch):
 def test_dashboard_currency_and_inventory_deduplication():
  a=client();_,c=member(a);order('DemoStoreA','one','10','EUR');order('DemoStoreA','two','12','GBP');order('DemoStoreB','secret','1000','EUR')
  data=payload();pk=seed(data);data['summaries'][0]['marketplaceId']=MARKETS['FR'];pk2=seed(data,market='FR')
- inv={'fnSku':'same','inventoryDetails':{'fulfillableQuantity':10,'inboundShippedQuantity':3,'inboundReceivingQuantity':1,'reservedQuantity':{'fcProcessingQuantity':2,'totalReservedQuantity':2},'unfulfillableQuantity':{'totalUnfulfillableQuantity':0},'researchingQuantity':{'totalResearchingQuantity':0}}}
+ inv={'fnSku':'same','inventoryDetails':{'fulfillableQuantity':10,'inboundShippedQuantity':3,'inboundReceivingQuantity':1,'reservedQuantity':{'fcProcessingQuantity':2,'pendingTransshipmentQuantity':4,'totalReservedQuantity':6},'unfulfillableQuantity':{'totalUnfulfillableQuantity':0},'researchingQuantity':{'totalResearchingQuantity':0}}}
  with Session.begin() as db:
   for pk in [pk,pk2]:db.add(ListingInventory(listing_pk=pk,data=inv,synced_at=now()))
  r=c.get('/api/dashboard?store=DemoStoreA');assert r.status_code==200,r.text;d=r.json()
  assert d['cards']['30']['units']==4 and len(d['cards']['30']['amounts'])==2
  assert d['inventory']['totals']['available']==10 and d['inventory']['totals']['shipped']==3
+ assert d['inventory']['totals']['transfer']==4
+ assert d['inventory']['totals']['in_stock']==17 and d['inventory']['totals']['total']==20
+ assert d['inventory']['groups'][0]['transfer']==4
  assert d['ads'] is None and not d['todos']['account_health_connected']
  assert c.get('/api/dashboard?store=DemoStoreB').status_code==403
  assert c.get('/api/dashboard?store=DemoStoreA&trend=custom&start=2020-01-01&end=2026-01-01').status_code==422
