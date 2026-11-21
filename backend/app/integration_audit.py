@@ -1,5 +1,5 @@
 """User-attributed MCP audit trail; never store credentials or raw payloads."""
-import json
+import json,re
 from .db import Session
 from .models import AccessAudit,now
 
@@ -15,6 +15,7 @@ def begin(actor,message,tools):
   detail.update(tool=name,operation=action,http_method=verb,path=path)
   args=params.get('arguments');args=args if isinstance(args,dict) else {}
   if type(args.get('id')) is int and args['id']>0:detail['object_id']=args['id']
+  if isinstance(args.get('code'),str) and re.fullmatch(r'[A-Za-z0-9_-]{1,40}',args['code']):detail['object_code']=args['code']
   body=args.get('body');body=body if isinstance(body,dict) else {}
   allowed=schema.get('properties',{}).get('body',{}).get('properties',{})
   detail['fields']=sorted(set(body)&set(allowed))

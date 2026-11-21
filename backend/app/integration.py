@@ -9,6 +9,8 @@ from .permissions import can
 from .listing_editor import FIELDS
 from .listing_api import EditorPreview,ConfirmSubmission
 from .integration_products import TOOLS as PRODUCT_TOOLS, DESTRUCTIVE
+from .integration_planning import TOOLS as PLANNING_TOOLS, DESTRUCTIVE as PLANNING_DESTRUCTIVE
+DESTRUCTIVE=DESTRUCTIVE|PLANNING_DESTRUCTIVE
 router=APIRouter()
 
 def obj(properties,required=()):return {'type':'object','properties':properties,'required':list(required),'additionalProperties':False}
@@ -29,6 +31,7 @@ TOOLS=[
  ('inventory_query','查询授权本地仓库可用、锁定和待到货库存','warehouse','view','GET','/api/warehouse/stock',obj({'q':S,'warehouse_id':ID,'page':PAGE,'page_size':{'type':'integer','minimum':1,'maximum':100}})),
  ('fba_inventory_query','查询 Listing 中的 FBA 库存，按授权店铺限制','listing','view','GET','/api/listings',QUERY)]
 TOOLS.extend(PRODUCT_TOOLS)
+TOOLS.extend(PLANNING_TOOLS)
 def tool_allowed(p,key,action):
  return any(can(p,k,action) for k in (key if isinstance(key,tuple) else (key,)))
 
@@ -80,6 +83,9 @@ async def dispatch(request:Request):
  except Exception:return error(-32602,'工具参数格式错误，请按 inputSchema 填写')
  args=dict(args)
  if '{id}' in path:path=path.replace('{id}',str(args.pop('id')))
+ if '{code}' in path:
+  from urllib.parse import quote
+  path=path.replace('{code}',quote(args.pop('code'),safe=''))
  if '{submission_id}' in path:path=path.replace('{submission_id}',args.pop('submission_id'))
  # Re-enter the normal API guard: expiry, revocation, grants, store isolation and
  # persistent mutation audits are identical for REST and MCP requests.

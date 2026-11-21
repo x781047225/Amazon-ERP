@@ -53,7 +53,7 @@ def options(profile_id: str):
     with Session() as db:
         p=profile_checked(db,profile_id)
         campaigns=[{'id':e.entity_id,'name':e.name,'targeting':e.data.get('targetingType'),'strategy':e.data.get('dynamicBidding',{}).get('strategy','LEGACY_FOR_SALES'),'state':e.state} for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,AdsEntity.kind=='campaign',AdsEntity.state!='ARCHIVED').order_by(AdsEntity.name))]
-        groups=[{'id':e.entity_id,'campaign_id':e.campaign_id,'name':e.name} for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,AdsEntity.kind=='adgroup',AdsEntity.state!='ARCHIVED').order_by(AdsEntity.name))]
+        groups=[{'id':e.entity_id,'campaign_id':e.campaign_id,'name':e.name,'default_bid':e.data.get('defaultBid')} for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,AdsEntity.kind=='adgroup',AdsEntity.state!='ARCHIVED').order_by(AdsEntity.name))]
         return {'groups':groups,'campaigns':campaigns,'today':datetime.now(ZoneInfo(p.timezone)).date().isoformat(),'currency':p.currency,'timezone':p.timezone}
 
 @router.get('/create/advanced-options')
@@ -79,9 +79,13 @@ def product_rows(db,p):
     return list(rows.values())
 
 @router.get('/create/products')
-def products(profile_id:str,q:str='',page:int=Query(1,ge=1),page_size:int=Query(10,ge=1,le=100)):
+def products(profile_id:str,q:str='',page:int=Query(1,ge=1),page_size:int=Query(10,ge=1,le=100),compact:bool=False):
     with Session() as db:
-        rows=product_rows(db,profile_checked(db,profile_id))
+        profile=profile_checked(db,profile_id)
+        if compact:
+            from .ads_product_picker import products_page
+            return products_page(db,profile,q,page,page_size)
+        rows=product_rows(db,profile)
     needle=q.strip().casefold()
     rows=[r for r in rows if not needle or any(needle in str(r.get(k) or '').casefold() for k in ['sku','asin','fnsku','title','product_name'])]
     rows.sort(key=lambda r:r['sku'])

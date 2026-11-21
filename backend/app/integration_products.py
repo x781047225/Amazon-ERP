@@ -46,7 +46,7 @@ def tool(name,description,key,action,method,path,schema):
 
 P='products.products'
 LOCAL='仅修改 ERP 本地资料，不提交亚马逊。'
-tool('products_query','查询标品：GM 编码、品名、供应商、未关联、待核对、回收站筛选。',P,'view','GET','/api/products',obj({'q':S,'supplier':S,'archived':{'type':'boolean'},'unlinked':{'type':'boolean'},'review':{'type':'boolean'},**PAGE}))
+tool('products_query','查询标品：GM 编码、品名、供应商、未关联、无成本、无头程、无供应商、回收站筛选。',P,'view','GET','/api/products',obj({'q':S,'supplier':S,'archived':{'type':'boolean'},'unlinked':{'type':'boolean'},'review':{'type':'boolean'},'no_cost':{'type':'boolean'},'no_freight':{'type':'boolean'},'no_supplier':{'type':'boolean'},**PAGE}))
 tool('product_detail','查看标品详情、GM 编码、资料和 revision；编辑前读取。',P,'view','GET','/api/products/{id}',args(identified=True))
 tool('product_options','查询标品供应商和分类选项。',P,'view','GET','/api/products/options',obj({}))
 tool('product_create','新增标品，GM 编码唯一。'+LOCAL,P,'operate','POST','/api/products',args(body_schema(ProductBody)))
@@ -73,7 +73,7 @@ crud('customs_profile','清关＆报关资料',CUSTOMS,'/api/customs/profiles',P
 for kind,label in [('declaration','报关'),('clearance','清关')]:
  tool('product_'+kind+'_update','修改指定标品的'+label+'资料快照，需当前 revision；未指定字段保留，共享资料字段按网页规则同步。'+LOCAL,'products.'+kind,'operate','POST','/api/product-data/{id}/'+kind,args(body_schema(CustomsUpdate,True),True))
 LINKS=('products.products','listing')
-tool('product_listings_query','查询授权店铺内的亚马逊 SKU 与标品关联；按店铺、站点、SKU/ASIN 及 product_id 筛选，返回 listing id、当前 product_id。',LINKS,'view','GET','/api/products/listings',obj({'q':S,'store':S,'marketplace':S,'state':{'type':'string','enum':['all','unlinked','linked']},'product_id':ID,**PAGE}))
+tool('product_listings_query','查询授权店铺内的亚马逊 SKU 与标品关联；按店铺、站点、SKU/ASIN 及 product_id 筛选，返回 listing id、当前 product_id、GM编码和品名。查询是否关联时请传 state=all，省略时默认只查未关联项。',LINKS,'view','GET','/api/products/listings',obj({'q':S,'store':S,'marketplace':S,'state':{'type':'string','enum':['all','unlinked','linked']},'product_id':ID,**PAGE}))
 tool('product_listing_link','查看单个授权 Listing 的 SKU 和当前标品关联。',LINKS,'view','GET','/api/products/listing-link/{id}',args(identified=True))
 tool('product_links_apply','批量绑定、换绑或解绑亚马逊 SKU 与标品。先查询关联；每项使用 listing_id 和当前 expected_product_id（未绑定为 null）；product_id=null 表示解绑。最多100项，任一越权或关联冲突则全部不保存。'+LOCAL,LINKS,'operate','POST','/api/products/links/apply',args(body_schema(Bind)))
 

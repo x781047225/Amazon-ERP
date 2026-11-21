@@ -209,18 +209,7 @@ class ManualOutbound(BaseModel):
 
 @router.post('/{pk}/manual-outbound')
 def manual_outbound(pk:int,b:ManualOutbound):
- require_admin()
- from .sta_models import StaTask
- with Session.begin() as db:
-  shipping_lock(db)
-  sta=db.scalar(select(StaTask).where(StaTask.shipping_id==pk,StaTask.status!='cancelled').with_for_update())
-  t=get_task(db,pk,True,allow_sta=True,allow_outbound=True)
-  if t.outbound_at:return {'ok':True,'replayed':True}
-  if t.revision!=b.revision:raise HTTPException(409,'发货计划已变更，请刷新后重试')
-  if sta and (sta.status in ('running','queued','uncertain') or sta.command.get('action')=='cancel'):raise HTTPException(409,'货件操作尚未结束，请处理完成后再出库')
-  if not sta or not sta.completed_at:raise HTTPException(409,'只有已完成的发货计划可以出库')
-  debit_reserved(db,t,confirmed_by=actor(),sta=sta,manual=True)
-  return {'ok':True,'replayed':False}
+ return inventory_one(pk,b,'manual-outbound')
 
 def release_task(db,t):
  for r in t.reservations or []:
@@ -611,31 +600,74 @@ def repack(pk:int,b:Version):
   audit(db,'shipping_repack',pk,{'removed_packing_id':old})
  return {'ok':True}
 
-@router.post('/{pk}/release-stock')
-def release_stock(pk:int,b:Version):
+def inventory_sta(db,pk):
+ from .sta_models import StaTask
+ return db.scalar(select(StaTask).where(StaTask.shipping_id==pk,StaTask.status!='cancelled').with_for_update())
+
+def apply_inventory_action(db,t,sta,action):
+ # All callers hold shipping_lock; a batch shares one transaction and rolls back in full.
+ if sta and (sta.status in ('running','queued','uncertain') or sta.command.get('action')=='cancel'):
+  raise HTTPException(409,'货件操作尚未结束，请处理完成后再操作库存')
+ if action=='manual-outbound':
+  if t.outbound_at:return {'ok':True,'replayed':True}
+  if not sta or not sta.completed_at:raise HTTPException(409,'只有已完成的发货计划可以出库')
+  debit_reserved(db,t,confirmed_by=actor(),sta=sta,manual=True)
+ elif action=='undo-outbound':
+  if not t.outbound_at:raise HTTPException(409,'只有已出库的发货计划可以撤销出库')
+  return_outbound(db,t,confirmed_by=actor())
+ else:
+  if t.outbound_at:raise HTTPException(409,'计划已出库，请先撤销出库')
+  if action=='lock-stock':
+   if stock_state(t)=='locked':raise HTTPException(409,'当前计划已锁定足额库存')
+   t.lock_inventory=True;reserve_task(db,t)
+   if stock_state(t)!='locked':raise HTTPException(409,'库存锁定记录不一致，请核对仓库日志')
+  elif action=='release-stock':
+   if not t.lock_inventory and not t.reservations:raise HTTPException(409,'当前计划没有锁定库存')
+   qty=sum(r['quantity'] for r in t.reservations)
+   release_task(db,t);t.lock_inventory=False
+   audit(db,'shipping_release_stock',t.id,{'quantity':qty,'message':'锁定库存已释放为可用库存'})
+  else:raise HTTPException(422,'库存操作无效')
+  t.revision+=1;t.updated_at=now()
+ return {'ok':True,'replayed':False}
+
+def inventory_one(pk,b,action):
  require_admin()
  with Session.begin() as db:
-  shipping_lock(db);t=get_task(db,pk,True,allow_sta=True)
+  shipping_lock(db);sta=inventory_sta(db,pk)
+  t=get_task(db,pk,True,allow_sta=True,allow_outbound=True)
+  # Retain the existing single-outbound replay contract; all other operations check revisions.
+  if action=='manual-outbound' and t.outbound_at:return {'ok':True,'replayed':True}
   if t.revision!=b.revision:raise HTTPException(409,'计划已变更，请刷新')
-  if not t.lock_inventory and not t.reservations:raise HTTPException(409,'当前计划没有锁定库存')
-  qty=sum(r['quantity'] for r in t.reservations)
-  release_task(db,t);t.lock_inventory=False;t.revision+=1;t.updated_at=now()
-  audit(db,'shipping_release_stock',pk,{'quantity':qty,'message':'锁定库存已释放为可用库存'})
- return {'ok':True}
+  return apply_inventory_action(db,t,sta,action)
+
+@router.post('/{pk}/lock-stock')
+def lock_stock(pk:int,b:Version):return inventory_one(pk,b,'lock-stock')
+
+@router.post('/{pk}/release-stock')
+def release_stock(pk:int,b:Version):return inventory_one(pk,b,'release-stock')
 
 @router.post('/{pk}/undo-outbound')
-def undo_outbound(pk:int,b:Version):
+def undo_outbound(pk:int,b:Version):return inventory_one(pk,b,'undo-outbound')
+
+class InventoryBatch(BatchTasks):pass
+
+@router.post('/inventory-batch')
+def inventory_batch(b:InventoryBatch):
  require_admin()
- from .sta_models import StaTask
+ if b.action not in ('lock-stock','release-stock','manual-outbound','undo-outbound'):raise HTTPException(422,'库存操作无效')
+ if len({v.id for v in b.tasks})!=len(b.tasks):raise HTTPException(422,'批次重复')
  with Session.begin() as db:
-  shipping_lock(db)
-  sta=db.scalar(select(StaTask).where(StaTask.shipping_id==pk,StaTask.status!='cancelled').with_for_update())
-  t=get_task(db,pk,True,allow_sta=True,allow_outbound=True)
-  if t.revision!=b.revision:raise HTTPException(409,'计划已变更，请刷新')
-  if not t.outbound_at:raise HTTPException(409,'只有已出库的发货计划可以撤销出库')
-  if sta and (sta.status in ('running','queued','uncertain') or sta.command.get('action')=='cancel'):raise HTTPException(409,'货件操作尚未结束，请处理完成后重试')
-  return_outbound(db,t,confirmed_by=actor())
- return {'ok':True}
+  shipping_lock(db);tasks=[]
+  for v in sorted(b.tasks,key=lambda v:v.id):
+   sta=inventory_sta(db,v.id);t=get_task(db,v.id,True,allow_sta=True,allow_outbound=True)
+   if t.revision!=v.revision:raise HTTPException(409,f'{number(t)} 已变更，请刷新后重新选择；本批次未执行')
+   tasks.append((t,sta))
+  for t,sta in tasks:
+   try:
+    if b.action=='manual-outbound' and t.outbound_at:raise HTTPException(409,'当前计划已出库')
+    apply_inventory_action(db,t,sta,b.action)
+   except HTTPException as e:raise HTTPException(e.status_code,f'{number(t)}：{e.detail}；本批次未执行') from e
+  return {'ok':True,'count':len(tasks),'action':b.action,'ids':[t.id for t,_ in tasks]}
 
 class RemainderBody(Version):request_id:UUID
 @router.post('/{pk}/remainder')

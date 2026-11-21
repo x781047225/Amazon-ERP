@@ -1,5 +1,5 @@
 """Local purchasing. Receiving and its stock journal commit atomically."""
-from datetime import date
+from datetime import date,timedelta
 from zoneinfo import ZoneInfo
 from decimal import Decimal
 from uuid import UUID,uuid4,uuid5
@@ -42,6 +42,7 @@ def validate_buyer(db,buyer,stores):
  user=db.scalar(select(User).where(User.username==buyer,User.active==1))
  if not user or (not user.is_admin and not set(stores).issubset(set(user.stores or []))):raise HTTPException(422,'请选择有权访问计划店铺的有效采购员')
 class PlanBody(Body):
+ note:str=Field(default='',max_length=1000)
  buyer:str|None=Field(default=None,max_length=64)
  product_id:int=Field(gt=0)
  store:str=Field(min_length=1,max_length=40)
@@ -79,8 +80,9 @@ def update_plan(pk:int,b:PlanBody):
   from .procurement_flow import ensure_plans_unshipped
   ensure_plans_unshipped(db,[p.id])
   validate_plan(db,b)
-  before={k:getattr(p,k) for k in b.model_dump(exclude={'revision','buyer'})}
-  for k,v in b.model_dump(exclude={'revision','buyer'}).items():setattr(p,k,v)
+  fields=b.model_dump(exclude={'revision','buyer'}|({'note'} if 'note' not in b.model_fields_set else set()))
+  before={k:getattr(p,k) for k in fields}
+  for k,v in fields.items():setattr(p,k,v)
   if b.buyer is not None:
    batch_rows=list(db.scalars(select(Plan).where(Plan.batch_code==p.batch_code)))
    validate_buyer(db,b.buyer,[r.store for r in batch_rows])
@@ -111,7 +113,7 @@ def list_plans(grouped:bool=False,q:str='',store:str='',country:str='',channel:s
   images=product_images(db,[p for _,p,_,_ in records])
   from .procurement_flow import plan_usage
   usage=plan_usage(db)
-  result={'total':count,'rows':[{k:getattr(plan,k) for k in ['id','batch_code','product_id','store','country','channel','warehouse_id','quantity','revision','order_id','source','created_at','created_by','buyer']}|{'code':p.code,'name':p.name,'image_url':images.get(p.id),'warehouse_name':w,'shipping_quantity':usage.get(plan.id,0),'status':'processed' if plan.order_id else 'pending','order_number':order_number(o) if o else None} for plan,p,w,o in records]}
+  result={'total':count,'rows':[{k:getattr(plan,k) for k in ['id','batch_code','product_id','store','country','channel','warehouse_id','quantity','revision','order_id','source','created_at','created_by','buyer','note']}|{'code':p.code,'name':p.name,'image_url':images.get(p.id),'warehouse_name':w,'shipping_quantity':usage.get(plan.id,0),'status':'processed' if plan.order_id else 'pending','order_number':order_number(o) if o else None} for plan,p,w,o in records]}
   if grouped:
    groups={}
    for row in result['rows']:
@@ -126,6 +128,7 @@ def list_plans(grouped:bool=False,q:str='',store:str='',country:str='',channel:s
    for batch in groups.values():
     batch['products']=list(batch['products'].values());batch['product_count']=len(batch['products'])
     batch['created_by']=' / '.join(dict.fromkeys(r['created_by'] for r in batch['children'] if r['created_by']))
+    batch['note']=' / '.join(dict.fromkeys(r['note'] for r in batch['children'] if r['note']))
     batch['buyer']=' / '.join(dict.fromkeys(r['buyer'] for r in batch['children'] if r['buyer']))
     batch['editable']=all(not r['order_id'] and not r['shipping_quantity'] for r in batch['children'])
    result['rows']=[groups[key] for key in ids]
@@ -144,6 +147,9 @@ def selected_plans(db,b,lock=False):
  if any(p.order_id or p.revision!=versions[p.id] for p in rows):raise HTTPException(409,'计划已变更或已生成采购单，请刷新后重新选择')
  return rows
 def group_plans(db,plans):
+ from .product_data_models import Supplier
+ today=now().astimezone(ZoneInfo('Asia/Shanghai')).date()
+ supplier_dates={s.name:(today+timedelta(days=s.shipping_days)).isoformat() if s.shipping_days else '' for s in db.scalars(select(Supplier))}
  groups={};ids={p.product_id for p in plans};products={p.id:p for p in db.scalars(select(Product).where(Product.id.in_(ids)))}
  warehouses={w.id:w.name for w in db.scalars(select(Warehouse).where(Warehouse.id.in_({p.warehouse_id for p in plans})))}
  images=product_images(db,list(products.values()))
@@ -151,14 +157,17 @@ def group_plans(db,plans):
   p=products[plan.product_id]
   if p.archived:raise HTTPException(409,f'标品 {p.code} 已归档，请先恢复')
   key=f'{p.id}:{plan.warehouse_id}'
-  if key not in groups:groups[key]={'key':key,'product_id':p.id,'warehouse_id':plan.warehouse_id,'code':p.code,'name':p.name,'image_url':images.get(p.id),'warehouse_name':warehouses[plan.warehouse_id],'unit_cost':p.cost_cny,'supplier':p.primary_supplier,'quantity':0,'allocations':[]}
+  if key not in groups:groups[key]={'key':key,'product_id':p.id,'warehouse_id':plan.warehouse_id,'code':p.code,'name':p.name,'image_url':images.get(p.id),'warehouse_name':warehouses[plan.warehouse_id],'unit_cost':p.cost_cny,'supplier':p.primary_supplier,'expected_date':supplier_dates.get(p.primary_supplier,''),'quantity':0,'allocations':[]}
   groups[key]['quantity']+=plan.quantity;groups[key]['allocations']+=allocations([plan])
  if any(g['quantity']>100000000 for g in groups.values()):raise HTTPException(422,'单个标品采购量过大，请分批生成')
  return list(groups.values())
 @router.post('/preview')
 def preview(b:Selection):
  require_admin()
- with Session() as db:return {'groups':group_plans(db,selected_plans(db,b))}
+ with Session() as db:
+  from .product_data_models import Supplier
+  today=now().astimezone(ZoneInfo('Asia/Shanghai')).date()
+  return {'groups':group_plans(db,selected_plans(db,b)),'supplier_dates':{s.name:(today+timedelta(days=s.shipping_days)).isoformat() if s.shipping_days else '' for s in db.scalars(select(Supplier))}}
 class OrderGroup(Body):
  product_id:int=Field(gt=0)
  warehouse_id:int=Field(gt=0)
@@ -355,9 +364,16 @@ def document_lines(db,pk,lock=False):
  if not original.document_number:return [original]
  q=select(Order).where(Order.document_number==original.document_number).order_by(Order.id)
  lines=list(db.scalars(q.with_for_update() if lock else q))
+ if not admin() and len(lines)!=db.scalar(select(func.count()).select_from(Order.__table__).where(Order.__table__.c.document_number==original.document_number)):raise HTTPException(404,'采购单不存在或无权限')
  allowed=set(db.scalars(select(Order.id).where(Order.id.in_([o.id for o in lines]),*order_scope())))
  if len(allowed)!=len(lines):raise HTTPException(404,'采购单不存在或无权限')
  return lines
+
+@router.get('/orders/{pk}/detail')
+def order_detail(pk:int):
+ with Session() as db:
+  lines=document_lines(db,pk)
+  return {'number':order_number(lines[0]),'items':[order_data(o) for o in lines]}
 
 class DocumentLine(Body):
  id:int=Field(gt=0)

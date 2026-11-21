@@ -46,8 +46,9 @@ def page(db,pk,number,size):
   d=v['detail'];s=submissions.get(d.get('submission_id'));action=v['action'];before=d.get('before',{});after=d.get('after',{});changes=[]
   if action=='amazon_submit':
    action_label='调价' if s and s.kind.startswith('price') else '编辑 Listing'
-   if s and not d.get('price_only'):before=s.before;after=s.proposed
+   if s and not (d.get('price_only') or d.get('bulk_promotion')):before=s.before;after=s.proposed
    if d.get('price_only'):action_label='批量调价（仅售价）'
+   if d.get('bulk_promotion'):action_label='批量调价（仅促销）' if d.get('promotion_only') else '批量调价（售价及促销）'
   elif action=='product_link':
    action_label='解除关联' if after is None else '关联产品' if before is None else '更换关联产品'
    changes=[{'field':'关联标品','before':readable({'id':before} if isinstance(before,int) else before),'after':readable({'id':after} if isinstance(after,int) else after)}]

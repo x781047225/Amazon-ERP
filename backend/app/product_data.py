@@ -16,9 +16,10 @@ class SupplierBody(BaseModel):
  shop_url:str=Field(default='',max_length=2000)
  purchase_method:Literal['','online','offline']=''
  settlement_method:Literal['','1688','credit']=''
+ shipping_days:Literal[1,3,5,7,14,30]|None=None
  revision:int|None=None
  _url=field_validator('shop_url')(web_link)
-def supplier_data(s):return {k:getattr(s,k) for k in ['id','name','shop_url','purchase_method','settlement_method','revision','updated_at']}
+def supplier_data(s):return {k:getattr(s,k) for k in ['id','name','shop_url','purchase_method','settlement_method','shipping_days','revision','updated_at']}
 @router.get('/suppliers')
 def suppliers(q:str='',page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):
  with Session() as db:

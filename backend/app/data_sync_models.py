@@ -16,6 +16,7 @@ class DataSyncConfig(Base):
  error=Column(Text)
  revision=Column(Integer,nullable=False,default=0)
  updated_by=Column(String(64),nullable=False,default='system')
+ ads_policy=Column(JSONB)
 class DataSyncRun(Base):
  __tablename__='data_sync_runs'
  id=Column(String(36),primary_key=True)

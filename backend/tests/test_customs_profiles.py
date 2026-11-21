@@ -75,7 +75,7 @@ def test_box_missing_or_mismatched_stops():
  with pytest.raises(HTTPException):logistics.expand_box_items(ctx['items'],ctx)
 def test_preview_basic_fields_and_dynamic_details():
  pk=template();d=client.get('/api/logistics/templates/'+str(pk)+'/preview').json()
- assert list(d['scalars'])==['shipment_id','country','warehouse_code','boxes','vat','eori','consignee','address','province','city','postal_code','declaration_mode','tax_mode','currency','total_quantity','estimated_tax','dispatched_on']
+ assert list(d['scalars'])==['shipment_id','country','warehouse_code','boxes','vat','eori','consignee','address','province','city','postal_code','declaration_mode','tax_mode','currency','tracking_code','total_quantity','estimated_tax','dispatched_on']
  assert 'box_label' in d['columns'] and 'clearance_url' in d['columns']
  assert mapping(pk,fields={'invoice_number':'B3'}).status_code==200
  assert 'invoice_number' in client.get('/api/logistics/templates/'+str(pk)+'/preview').json()['scalars']

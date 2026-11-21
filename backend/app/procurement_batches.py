@@ -21,12 +21,13 @@ TITLES={'purchase_plan_batch_create':'创建采购计划','purchase_plan_batch_e
 def batch_rows(db,code,lock=False,allow_deleted=False):
  q=select(Plan).where(Plan.batch_code==code).order_by(Plan.id)
  rows=list(db.scalars(q.with_for_update() if lock else q))
+ if not admin() and len(rows)!=db.scalar(select(func.count()).select_from(Plan.__table__).where(Plan.__table__.c.batch_code==code)):raise HTTPException(404,'采购计划不存在或无权限')
  if not rows and not (allow_deleted and admin()):raise HTTPException(404,'采购计划不存在或已删除')
  if not admin() and any(r.store not in allowed_stores() for r in rows):raise HTTPException(404,'采购计划不存在或无权限')
  return rows
 
 def snapshot(rows):
- return [{k:getattr(p,k) for k in ['id','product_id','store','warehouse_id','country','channel','quantity','revision','buyer','created_by']} for p in rows]
+ return [{k:getattr(p,k) for k in ['id','product_id','store','warehouse_id','country','channel','quantity','revision','buyer','created_by','note']} for p in rows]
 
 def unchanged(rows,versions):
  expected={v.id:v.revision for v in versions}
@@ -54,7 +55,7 @@ def update_batch(code:str,b:BatchEdit):
   for item in b.items:validate_plan(db,item)
   before=snapshot(rows)
   for item in b.items:
-   fields=item.model_dump(exclude={'id','revision','buyer'})
+   fields=item.model_dump(exclude={'id','revision','buyer'}|({'note'} if item.id is not None and 'note' not in item.model_fields_set else set()))
    if item.id is None:
     db.add(Plan(batch_code=code,**fields,buyer=b.buyer,created_by=rows[0].created_by,source='manual'))
    else:
@@ -77,6 +78,12 @@ def delete_batch(code:str,b:Selection):
   audit(db,'purchase_plan_batch_delete',code,{'before':snapshot(rows),'quantity':sum(p.quantity for p in rows)})
   for p in rows:db.delete(p)
  return {'ok':True}
+
+@router.get('/plan-batches/{code}')
+def batch_detail(code:str):
+ with Session() as db:
+  rows=batch_rows(db,code)
+  return {'batch_code':code,'items':[s|{'order_id':p.order_id,'created_at':p.created_at,'code':db.get(Product,p.product_id).code,'name':db.get(Product,p.product_id).name} for p,s in zip(rows,snapshot(rows))]}
 
 @router.get('/plan-batches/{code}/logs')
 def logs(code:str,page:int=Query(1,ge=1),page_size:int=Query(100,ge=1,le=100)):
@@ -101,9 +108,9 @@ def export(view:str='plans',q:str='',store:str='',country:str='',channel:str='',
  if data['total']>10000:raise HTTPException(422,'导出超过10000张单据，请缩小筛选范围')
  wb=Workbook();ws=wb.active;ws.title='采购计划' if view=='plans' else '采购单'
  if view=='plans':
-  ws.append(['计划批次','创建人','采购员','标品编码','品名','店铺','收货仓库','国家','渠道','计划采购量','状态','采购单号','创建时间'])
+  ws.append(['计划批次','创建人','采购员','标品编码','品名','店铺','收货仓库','国家','渠道','计划采购量','状态','采购单号','创建时间','备注'])
   for batch in data['rows']:
-   for r in batch['children']:ws.append([r['batch_code'],r['created_by'],r['buyer'],r['code'],r['name'],r['store'],r['warehouse_name'],COUNTRIES[r['country']],CHANNELS[r['channel']],r['quantity'],'已处理' if r['order_id'] else '未处理',r['order_number'] or '',str(r['created_at'])])
+   for r in batch['children']:ws.append([r['batch_code'],r['created_by'],r['buyer'],r['code'],r['name'],r['store'],r['warehouse_name'],COUNTRIES[r['country']],CHANNELS[r['channel']],r['quantity'],'已处理' if r['order_id'] else '未处理',r['order_number'] or '',str(r['created_at']),r['note']])
  else:
   ws.append(['采购单号','计划批次','标品编码','品名','供应商','收货仓库','预计到货','计划采购量','单价','到货量','货值','其他费用','已计划数量','未计划数量','状态'])
   for r in data['rows']:ws.append([r['number'],' / '.join(r['plan_batch_codes']),r['code'],r['name'],r['supplier'],r['warehouse_name'],str(r['expected_date']),r['quantity'],r['unit_cost'],r['received'],r['goods_value'],r['extra_cost'],r['planned_quantity'],r['unplanned_quantity'],r['status']])
@@ -125,6 +132,7 @@ class NewPlanRoute(Body):
  channel:Literal['air','truck','sea']
  quantity:int=Field(gt=0,le=10000000,strict=True)
 class NewPlanBatch(Body):
+ note:str=Field(default='',max_length=1000)
  request_id:UUID
  product_id:int=Field(gt=0)
  store:str=Field(min_length=1,max_length=40)

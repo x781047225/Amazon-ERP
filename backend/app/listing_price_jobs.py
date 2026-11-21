@@ -11,7 +11,7 @@ from .amazon import redis
 from .settings import MARKETS
 from .listing_audit import record
 
-def enqueue(pk, body, price_only=False):
+def enqueue(pk, body, price_only=False, promotion_only=False, bulk_promotion=False):
     row,_=context(pk)
     sid=str(body.request_id)
     def replay(existing):
@@ -21,6 +21,18 @@ def enqueue(pk, body, price_only=False):
             target=existing.proposed.get('purchasable_offer',[{}])[0]
             amount=target.get('our_price',[{}])[0].get('schedule',[{}])[0].get('value_with_tax')
             if not only(existing) or target.get('currency')!=body.expected_currency or money(amount,'售价')!=money(body.price,'售价'):raise EditConflict('该请求编号已用于不同调价，请核对原提交记录。')
+        if bulk_promotion:
+            from .listing_price_state import promotion_only as only
+            from .listing_business import parse_dt
+            target=existing.proposed.get('purchasable_offer',[{}])[0]
+            promo=(target.get('discounted_price') or [{}])[0].get('schedule',[{}])[0]
+            base=target.get('our_price',[{}])[0].get('schedule',[{}])[0].get('value_with_tax')
+            if (only(existing)!=promotion_only or target.get('currency')!=body.expected_currency
+                or promo.get('value_with_tax') is None
+                or money(promo.get('value_with_tax'),'促销价')!=money(body.sale_price,'促销价')
+                or parse_dt(promo.get('start_at'))!=body.sale_start or parse_dt(promo.get('end_at'))!=body.sale_end
+                or (not promotion_only and money(base,'售价')!=money(body.price,'售价'))):
+                raise EditConflict('该请求编号已用于不同调价，请核对原提交记录。')
         return result(existing)
     with Session() as db:
         existing=db.get(ListingSubmission,sid)
@@ -28,7 +40,7 @@ def enqueue(pk, body, price_only=False):
             return replay(existing)
     p=pricing(row)
     if not p['currency']:raise EditError('缺少本地币种，请先同步商品。')
-    price=money(body.price,'售价');sale=money(body.sale_price,'促销价') if not price_only and body.sale_price is not None else None
+    price=money(p['price'] if promotion_only else body.price,'售价');sale=money(body.sale_price,'促销价') if not price_only and body.sale_price is not None else None
     start,end=(None,None) if price_only else (body.sale_start,body.sale_end)
     if sale:
         if not start or not end or not start.tzinfo or not end.tzinfo:raise EditError('促销价必须填写含时区的开始和结束时间。')
@@ -37,21 +49,27 @@ def enqueue(pk, body, price_only=False):
     elif start or end:raise EditError('未填写促销价时请清空促销时间。')
     entry={'marketplace_id':MARKETS[row.marketplace],'currency':p['currency'],'audience':'ALL','our_price':[{'schedule':[{'value_with_tax':float(price)}]}],'discounted_price':[{'schedule':[{'value_with_tax':float(sale),'start_at':start.astimezone(timezone.utc).isoformat(),'end_at':end.astimezone(timezone.utc).isoformat()}]}] if sale else None}
     if price_only:entry.pop('discounted_price')
+    if promotion_only:entry.pop('our_price')
     with Session.begin() as db:
         # Row lock serializes submissions for the same Listing, including repeated clicks.
         from .models import Listing
         current=db.scalar(select(Listing).where(Listing.id==pk).with_for_update())
         existing=db.get(ListingSubmission,sid)
         if existing:return replay(existing)
-        if price_only:
+        if price_only or bulk_promotion:
             latest=pricing(current)
-            if latest['currency']!=body.expected_currency or latest['fingerprint']!=body.expected_fingerprint:raise EditConflict('价格资料已变化，请刷新列表后重新勾选。')
+            if latest['currency']!=body.expected_currency or latest['fingerprint']!=body.expected_fingerprint or (bulk_promotion and latest['fingerprint']!=p['fingerprint']):raise EditConflict('价格资料已变化，请刷新列表后重新勾选。')
             if not latest['editable']:raise EditError('价格结构不完整或包含多个计划，请先同步并核对。')
-            if latest['sale_status'] in ('active','scheduled') and latest['sale_price'] and float(latest['sale_price'])>=float(price):raise EditError('新售价必须高于现有促销价；本次不会修改促销。')
+            if promotion_only and latest['price_source']!='attribute':raise EditError('缺少常规售价，请同步后再设置促销。')
+            if price_only and latest['sale_status'] in ('active','scheduled') and latest['sale_price'] and float(latest['sale_price'])>=float(price):raise EditError('新售价必须高于现有促销价；本次不会修改促销。')
         if db.scalar(select(ListingSubmission.id).where(ListingSubmission.listing_pk==pk,ListingSubmission.status.in_(['queued','submitting']))):raise EditConflict('此商品已有调价正在后台处理。')
         s=ListingSubmission(id=sid,listing_pk=pk,kind='price_async',status='queued',product_type=row.product_type,before={'purchasable_offer':row.attributes.get('purchasable_offer')},proposed={'purchasable_offer':[entry]},patches=[{'op':'merge','path':'/attributes/purchasable_offer','value':[entry]}],message='调价已排队。')
         detail={'submission_id':sid,'status':'queued'}
         if price_only:detail.update(price_only=True,before={'price':latest['price']},after={'price':price})
+        if bulk_promotion:
+            fields=('sale_price','sale_start','sale_end') if promotion_only else ('price','sale_price','sale_start','sale_end')
+            values={'price':price,'sale_price':sale,'sale_start':start.astimezone(timezone.utc).isoformat(),'sale_end':end.astimezone(timezone.utc).isoformat()}
+            detail.update(bulk_promotion=True,promotion_only=promotion_only,before={k:latest[k] for k in fields},after={k:values[k] for k in fields})
         db.add(s);record(db,pk,'amazon_submit',detail);db.flush();return result(s)
 
 def run(sid):

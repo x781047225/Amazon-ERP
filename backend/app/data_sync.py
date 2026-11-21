@@ -9,7 +9,7 @@ from pydantic import BaseModel,ConfigDict
 from typing import Literal
 from sqlalchemy import select,text,func,update
 from .db import Session
-from .models import now,SyncJob,FinanceJob,FbaJob,FbaWork,StoreInventory,AdsProfile,AdsSync
+from .models import now,SyncJob,FinanceJob,FbaJob,FbaWork,StoreInventory,AdsProfile,AdsSync,AdsEntity
 from .operations_models import ListingSyncJob
 from .data_sync_models import DataSyncConfig as Config,DataSyncRun as Run
 from .auth import require_store,allowed_stores,principal
@@ -17,12 +17,13 @@ from .settings import MARKETS,ORDER_MARKETS
 from .store_credentials import get
 from .products import audit
 from .amazon import redis
+from . import ads_report_schedule as ads_schedule
 router=APIRouter(prefix='/api/settings/sync-data')
 KINDS={'listing':'Listing','orders':'订单','inventory':'库存','shipments':'货件','finance':'利润结算','advertising':'广告活动','sta':'STA任务','mail':'绩效邮件','fees':'商品费用报告'}
 DAYS=[1,7,14,30,90,180,365]
 INTERVALS=[1440,720,360,240,60,30,10,5,1]
 ACTIVE=['queued','running']
-NOTES={'listing': '同步当前全部 Listing：SKU、ASIN、FNSKU、标题、品牌、主图、商品类型、属性（含亮点和关键词）、售价/促销报价、销售状态、问题提示、变体关系及配送可用量。初始化和定时任务均重新扫描当前全量，不按创建日期排除旧商品；库存详细数量由库存任务更新。API 未返回的商品保留本地旧记录，不据此删除。', 'orders': '同步订单号、下单/更新时间、状态、配送方式、金额/币种，以及商品 SKU、ASIN、名称、数量和金额。初始化按下单时间分段回溯，优先同步最近日期，再补齐历史；全部分段完成前显示整体进度，已入库订单可按日期范围查看。定时按最后更新时间同步，并重读前 10 分钟；每日凌晨另复核最近 48 小时，更新已有订单。下午下单、晚上取消也会更新，取消订单不计销量。全部分页成功后才推进同步位置，重复订单按编号更新。', 'inventory': '初始化读取各站点完整 FBA 库存，定时读取变化数据：SKU、ASIN、FNSKU、品相、可售、预留/处理中、不可售、在途、待发及接收中数量和总量。每 4 小时全量校准入库在途等不触发增量通知的数量，不生成历史库存，也不改动本地仓库出入库。返回不完整或失败时保留旧值并提示。', 'shipments': '同步 FBA 货件编号、名称、状态、收货仓/国家，以及商品 SKU、FNSKU、申报和已接收数量、箱内数量，并计算未接收/超收。初始化按所选范围的最近更新时间发现货件；定时按最近更新时间续读并重叠 1 天；已关闭、取消或删除的货件仅更新状态，跳过明细；本地维护的物流信息保留。', 'finance': '同步亚马逊入账交易：交易编号、订单关联、入账时间、状态、币种、销售回款、退款及各项费用明细；据此更新利润结算。初始化按时间范围分段读取，定时从成功位置往前重读 1 天，按交易编号更新去重。到账金额不等于利润，利润还需本地采购/头程成本和广告费用。', 'advertising': '此任务用于历史日报及完整资料同步；广告页另行每5分钟检查当前预算和投放状态，花费仍受报表延迟影响。每次发现广告账户并刷新当前 SP 广告活动、广告组、广告商品、关键词、投放和否定规则等资料（含状态、预算及竞价）；另同步按天的展示、点击、花费、归因订单和销售额。定时重读至少最近 14 天日报，以更新延迟归因。历史报表受接口回溯期限限制；SB/SD 仅展示支持的概览数据，不等同于完整同步。'}
+NOTES={'listing': '同步当前全部 Listing：SKU、ASIN、FNSKU、标题、品牌、主图、商品类型、属性（含亮点和关键词）、售价/促销报价、销售状态、问题提示、变体关系及配送可用量。初始化和定时任务均重新扫描当前全量，不按创建日期排除旧商品；库存详细数量由库存任务更新。API 未返回的商品保留本地旧记录，不据此删除。', 'orders': '同步订单号、下单/更新时间、状态、配送方式、金额/币种，以及商品 SKU、ASIN、名称、数量和金额。初始化按下单时间分段回溯，优先同步最近日期，再补齐历史；全部分段完成前显示整体进度，已入库订单可按日期范围查看。定时按最后更新时间同步，并重读前 10 分钟；每日凌晨另复核最近 48 小时，更新已有订单。下午下单、晚上取消也会更新，取消订单不计销量。全部分页成功后才推进同步位置，重复订单按编号更新。', 'inventory': '初始化读取各站点完整 FBA 库存，定时读取变化数据：SKU、ASIN、FNSKU、品相、可售、预留/处理中、不可售、在途、待发及接收中数量和总量。每 4 小时全量校准入库在途等不触发增量通知的数量，不生成历史库存，也不改动本地仓库出入库。返回不完整或失败时保留旧值并提示。', 'shipments': '同步 FBA 货件编号、名称、状态、收货仓/国家，以及商品 SKU、FNSKU、申报和已接收数量、箱内数量，并计算未接收/超收。初始化按所选范围的最近更新时间发现货件；定时按最近更新时间续读并重叠 1 天；已关闭、取消或删除的货件仅更新状态，跳过明细；本地维护的物流信息保留。', 'finance': '同步亚马逊入账交易：交易编号、订单关联、入账时间、状态、币种、销售回款、退款及各项费用明细；据此更新利润结算。初始化按时间范围分段读取，定时从成功位置往前重读 1 天，按交易编号更新去重。到账金额不等于利润，利润还需本地采购/头程成本和广告费用。', 'advertising': '此任务用于历史日报及完整资料同步；广告页另行每5分钟检查当前预算和投放状态，花费仍受报表延迟影响。每次发现广告账户并刷新当前 SP 广告活动、广告组、广告商品、关键词、投放和否定规则等资料（含状态、预算及竞价）；另同步按天的展示、点击、花费、归因订单和销售额。初始化后自动按站点时间分层复核日报：每6小时最近7个完整日＋当天、每天14天、每周60天；近期数据仍可能延迟或修正。历史报表受接口回溯期限限制；SB/SD 仅展示支持的概览数据，不等同于完整同步。'}
 NOTES['sta']='同步亚马逊可返回的历史 STA 入库计划：计划编号、名称、状态、创建/更新时间、关联货件号、收货仓和商品 SKU/ASIN/FNSKU/数量。初始化按最近更新时间筛选所选天数；定时按最近更新时间增量读取并重叠 1 天，未变化的计划跳过明细。已关闭/作废计划保留。历史记录只供查看，不创建本地发货单或重复提交亚马逊；旧版或接口不提供的计划无法补造。'
 Kind=Literal['listing','orders','inventory','shipments','finance','advertising','sta','mail','fees']
 NOTES['fees']='每天同步 FBA 费用预览、每日库存台账、仓储体积及费率、库存健康报告。基础仓储费按整月预估：截至昨日逐日累计＋最新完整日库存推算剩余天数（含今天）；预计超龄费取亚马逊返回值。历史已扣费用不作当月费用。NL/PL/SE/BE 暂无库存健康报告。广告复用历史日报，推荐每天同步。'
@@ -54,6 +55,7 @@ def error_info(message):
  return {'summary':summary,'items':items}
 
 def schedule_note(kind,config):
+ if kind=='advertising':return ads_schedule.NOTE
  if kind=='fees':return '每天一次费用及库存快照；月度报告提供体积、参考费率，每日台账计算本月累计仓储费，库存健康报告提供预计超龄费。'
  if kind=='listing':return '每次扫描当前全部 Listing，不受初始化天数影响。'
  if kind=='inventory':return '从各站点成功位置读取库存变化；每 4 小时全量校准在途等数量。不受初始化天数影响。'
@@ -82,6 +84,7 @@ def settings(store:str):
   for kind,label in KINDS.items():
    c=configs.get(kind);latest=latest_runs.get(kind);ready,message=readiness(store,kind,credentials)
    rows.append({'kind':kind,'label':label,'note':NOTES[kind],'ready':ready,'message':message,'days':c.days if c else 30,'interval_minutes':c.interval_minutes if c else 1440,'enabled':c.enabled if c else False,'revision':c.revision if c else 0,'next_run_at':c.next_run_at if c else None,'last_success_at':c.last_success_at if c else None,'error':c.error if c and not (latest and latest.status in ACTIVE) else None,'schedule_note':schedule_note(kind,c),'latest':public(latest) if latest else None,'active':kind in active_kinds or legacy_active(db,store,kind)})
+  next(row for row in rows if row['kind']=='advertising')['automatic_policy']=ads_schedule.describe(db,configs.get('advertising'),store,now())
   from .order_sync_progress import progress
   next(row for row in rows if row['kind']=='orders')['progress']=progress(db,store)
   return {'rows':rows,'days':DAYS,'intervals':INTERVALS}
@@ -96,6 +99,10 @@ def schedule(store:str,kind:Kind,b:Schedule):
   if (c.revision if c else 0)!=b.revision:raise HTTPException(409,'设置已被修改，请刷新后重试')
   if not c:c=Config(store=store,kind=kind);db.add(c)
   c.days=b.days;c.interval_minutes=b.interval_minutes;c.enabled=b.enabled;c.next_run_at=now()+timedelta(minutes=b.interval_minutes) if b.enabled else None;c.error=None;c.revision=b.revision+1;c.updated_by=principal.get()['username']
+  if kind=='advertising':
+   c.ads_policy={**(c.ads_policy or {'version':1}),'paused_by_user':not b.enabled}
+   c.interval_minutes=360
+   c.next_run_at=ads_schedule.next_due(db,c,now())
   audit(db,'data_sync_schedule',store,{'kind':kind,**b.model_dump()})
  return {'ok':True,'revision':b.revision+1}
 def create(db,store,kind,days,mode,actor):
@@ -105,7 +112,7 @@ def create(db,store,kind,days,mode,actor):
  if legacy_active(db,store,kind):raise HTTPException(409,'原同步任务仍在运行，完成后再操作')
  c=db.get(Config,(store,kind))
  if c:c.error=None
- end=now()-timedelta(minutes=3);start=end-timedelta(days=days)
+ end=now() if kind=='advertising' and mode=='adaptive' else now()-timedelta(minutes=3);start=end-timedelta(days=days)
  if mode=='incremental' and c and c.watermark:
   overlap=timedelta(days=14 if kind=='advertising' else 2 if kind=='mail' else 1 if kind in ('shipments','finance','sta') else 0,minutes=10)
   start=min(c.watermark-overlap,end)
@@ -223,6 +230,14 @@ def tick():
    if db.scalar(select(Run.id).where(Run.store==store,Run.kind==kind,Run.status.in_(ACTIVE))) or legacy_active(db,store,kind):continue
    ready,message=readiness(store,kind)
    if ready:
+    if kind=='advertising' and (c.ads_policy or {}).get('initialized'):
+     db.execute(text("SELECT pg_advisory_xact_lock(hashtext('ads-report-dispatch'))"))
+     if db.scalar(select(func.count()).select_from(Run).where(Run.kind=='advertising',Run.status.in_(ACTIVE)))>=2:continue
+     due=ads_schedule.next_due(db,c,now())
+     if due and due<=now():create(db,store,kind,60,'adaptive','自动日报')
+     c.next_run_at=now()+timedelta(hours=1) if due and due<=now() else due
+     c.error=None
+     continue
     mode='incremental'
     # One wider review during the low-traffic window; ordinary ticks stay small.
     local=now().astimezone(ZoneInfo('Asia/Shanghai'))
@@ -243,6 +258,10 @@ def make_plans(r):
    if not isinstance(items,list):raise AdsError('广告账户列表格式无效')
    for item in items:save_profile(item,r.store)
    if not items:raise AdsError('授权下没有可访问的广告账户')
+   if r.mode=='adaptive':
+    with Session() as db:
+     config=db.get(Config,(r.store,r.kind))
+     return [p for profile in db.scalars(select(AdsProfile).where(AdsProfile.account==r.store,AdsProfile.id.in_([str(i['profileId']) for i in items]))) if (p:=ads_schedule.plan(config.ads_policy,profile,r.end_at))]
    return [{'profile_id':str(p['profileId']),'country':p['countryCode'],'timezone':p['timezone'],'start':r.start_at.isoformat(),'end':r.end_at.isoformat()} for p in items]
   finally:c.close()
  left=r.start_at;out=[]
@@ -279,7 +298,7 @@ def launch(r,p):
  tz=ZoneInfo(p['timezone']);last=end.astimezone(tz).date();first=start.astimezone(tz).date()
  # Selected N days includes today for advertising daily reports.
  if r.mode=='initialize':first=last-timedelta(days=r.days-1)
- try:return create_job(p['profile_id'],first,last,daily=True,job_id=job_id)[0]
+ try:return create_job(p['profile_id'],first,last,daily=True,job_id=job_id,reports_only=p.get('reports_only',False),automatic=r.mode=='adaptive')[0]
  except HTTPException as e:
   if e.status_code==409:return None
   raise
@@ -336,6 +355,10 @@ def advance(rid):
    r.plans=plans
   plans=copy.deepcopy(r.plans)
   execution=sorted(plans,key=lambda p:(bool(p.get('id')),p['end']),reverse=True) if r.kind=='orders' and r.mode=='initialize' else plans
+  if r.kind=='advertising':
+   with Session() as db:
+    counts=dict(db.execute(select(AdsEntity.profile_id,func.count()).where(AdsEntity.kind=='campaign',AdsEntity.state!='ARCHIVED',AdsEntity.profile_id.in_([p['profile_id'] for p in plans])).group_by(AdsEntity.profile_id)).all())
+   execution=sorted(plans,key=lambda p:(bool(p.get('id')),counts.get(p['profile_id'],0)),reverse=True)
   for p in execution:
    if stop_forbidden(r,p):return
    if p.get('status') in ('succeeded','failed','partial'):continue
@@ -347,16 +370,21 @@ def advance(rid):
     p['id']=launch(r,p)
     if not p['id']:return
    state,error=child_state(r,p);p.update(status=state,error=error)
-   with Session.begin() as db:db.get(Run,rid).plans=plans
+   with Session.begin() as db:
+    db.get(Run,rid).plans=plans
+    if r.kind=='advertising' and r.mode=='adaptive' and state=='succeeded':
+     config=db.get(Config,(r.store,r.kind),with_for_update=True)
+     ads_schedule.checkpoint(config,p)
    if stop_forbidden(r,p):return
    if state not in ('succeeded','failed','partial'):return
   errors=[p.get('error') or '部分数据未完成' for p in plans if p.get('status')!='succeeded']
   with Session.begin() as db:
    j=db.get(Run,rid);j.status='failed' if errors else 'partial' if r.warning and r.kind=='advertising' else 'succeeded';j.error='；'.join(dict.fromkeys(errors))[:2000] or None;j.finished_at=now()
-   c=db.get(Config,(r.store,r.kind))
-   if not c:c=Config(store=r.store,kind=r.kind,days=r.days,interval_minutes=1440,enabled=False,revision=0,updated_by=r.actor);db.add(c)
+   c=db.get(Config,(r.store,r.kind),with_for_update=True)
+   if not c:c=Config(store=r.store,kind=r.kind,days=r.days,interval_minutes=1440,enabled=False,revision=0,updated_by=r.actor);db.add(c);db.flush()
    c.error=j.error
    if not errors:c.watermark=max(c.watermark or r.end_at,r.end_at);c.last_success_at=j.finished_at
+   if r.kind=='advertising':ads_schedule.finish(db,c,r,plans,j.finished_at,not errors)
  except Exception as e:
   from .ads_client import AdsError
   from .sta_amazon import StaError

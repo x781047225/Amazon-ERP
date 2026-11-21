@@ -20,14 +20,19 @@ def price_only(submission):
     patches=submission.patches or []
     return bool(patches) and all(p.get('op')=='merge' and p.get('path')=='/attributes/purchasable_offer' and p.get('value') and all('our_price' in v and 'discounted_price' not in v for v in p['value']) for p in patches)
 
+def promotion_only(submission):
+    patches=submission.patches or []
+    return bool(patches) and all(p.get('op')=='merge' and p.get('path')=='/attributes/purchasable_offer' and p.get('value') and all('discounted_price' in v and 'our_price' not in v for v in p['value']) for p in patches)
+
 def state(row, submission):
     if not submission:return None
     target=pricing(SimpleNamespace(marketplace=row.marketplace, attributes=submission.proposed,
                                   listing_data={}, synced_at=row.synced_at))
-    only=price_only(submission)
+    only=price_only(submission);promo_only=promotion_only(submission)
     if only:
         current=pricing(row)
         for key in ('sale_price','sale_start','sale_end','sale_status'):target[key]=current[key]
+    if promo_only:target['price']=pricing(row)['price']
     status=submission.status
     # Acceptance alone is not confirmation. Only a later Amazon snapshot with matching
     # B2C fields sent by this submission clears the pending mark. Price-only writes
@@ -36,10 +41,10 @@ def state(row, submission):
         current=pricing(row)
         def amount(v):return Decimal(v) if v is not None else None
         if (current['price_source']=='attribute' and current['currency']==target['currency']
-            and amount(current['price'])==amount(target['price'])
+            and (promo_only or amount(current['price'])==amount(target['price']))
             and (only or (amount(current['sale_price'])==amount(target['sale_price']) and all(parse_dt(current[k])==parse_dt(target[k]) for k in ('sale_start','sale_end'))))):
             status='verified'
-    return {'id':submission.id, 'status':status, 'price_only':only, **{k:target[k] for k in
+    return {'id':submission.id, 'status':status, 'price_only':only, 'promotion_only':promo_only, **{k:target[k] for k in
             ('price','sale_price','sale_start','sale_end','currency')}}
 
 
@@ -55,6 +60,7 @@ def display_pricing(row, submission):
         target=pricing(SimpleNamespace(marketplace=row.marketplace,attributes=submission.proposed,
                                       listing_data={},synced_at=row.synced_at))
         keys=('price','currency') if price_only(submission) else ('price','sale_price','sale_start','sale_end','sale_status','currency','editable')
+        if promotion_only(submission):keys=('sale_price','sale_start','sale_end','sale_status','currency')
         for key in keys:
             result[key]=target[key]
         result['price_source']='accepted_submission'

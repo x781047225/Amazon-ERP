@@ -44,6 +44,7 @@ def plan_creator():
  return (principal.get() or {}).get('username','')
 class PurchasePlan(Base):
  __tablename__='purchase_plans'
+ note=Column(Text,nullable=False,default='',server_default='')
  created_by=Column(String(64),nullable=False,default=plan_creator,server_default='')
  buyer=Column(String(64),nullable=False,default='',server_default='')
  batch_code=Column(String(40),nullable=False,index=True,default=default_plan_batch_code)

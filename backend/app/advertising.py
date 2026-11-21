@@ -44,7 +44,7 @@ def save_entities(profile,kind,rows):
   if values:db.execute(AdsEntity.__table__.insert(),values)
  return len(values)
 
-def create_job(profile,start,end,daily=False,job_id=None):
+def create_job(profile,start,end,daily=False,job_id=None,reports_only=False,automatic=False):
  valid_dates(start,end)
  with Session.begin() as db:
   if not db.get(AdsProfile,profile):raise HTTPException(404,'广告账户尚未配置')
@@ -54,7 +54,7 @@ def create_job(profile,start,end,daily=False,job_id=None):
   if active:
    if job_id:raise HTTPException(409,'已有其他广告同步任务，等待完成')
    return active.id,False
-  j=AdsSync(id=job_id or str(uuid.uuid4()),profile_id=profile,start_date=start,end_date=end,status='queued',phase='metadata',data={'daily':True} if daily else {});db.add(j);return j.id,True
+  j=AdsSync(id=job_id or str(uuid.uuid4()),profile_id=profile,start_date=start,end_date=end,status='queued',phase='reports' if reports_only else 'metadata',data=({'daily':True,'recent_first':True} if automatic else {'daily':True}) if daily else {});db.add(j);return j.id,True
 
 def report_body(level,start,end):
  typ,group,cols=REPORTS[level]

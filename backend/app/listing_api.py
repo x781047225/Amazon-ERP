@@ -259,6 +259,21 @@ def queue_price_only(pk:int,body:QueuedPriceOnly):
     from .listing_price_jobs import enqueue
     return submit_errors(lambda:enqueue(pk,body,price_only=True))
 
+class QueuedPromotion(BaseModel):
+    model_config={'extra':'forbid'}
+    request_id:UUID
+    price:StrictStr|None=None
+    sale_price:StrictStr
+    sale_start:datetime
+    sale_end:datetime
+    expected_currency:StrictStr
+    expected_fingerprint:StrictStr=Field(min_length=64,max_length=64)
+
+@router.post('/{pk}/promotion/queue',status_code=202)
+def queue_promotion(pk:int,body:QueuedPromotion):
+    from .listing_price_jobs import enqueue
+    return submit_errors(lambda:enqueue(pk,body,promotion_only=body.price is None,bulk_promotion=True))
+
 @router.get('/{pk}/price/jobs/{sid}')
 def price_job(pk:int,sid:UUID):
     from .listing_submit import context,result

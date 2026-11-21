@@ -19,7 +19,7 @@ const date=(s:string|null,zone:string)=>s?new Date(s).toLocaleString('zh-CN',{ti
 <el-table-column :column-key="'shipment_id'" :width="tableWidths.width('table-1', 'shipment_id', undefined)" prop="shipment_id" label="FBA 货件" min-width="150"/>
 <el-table-column column-key="dispatched_on" label="发货日期" width="120"><template #default="{row:item}">{{item.dispatched_on||'—'}}</template></el-table-column>
 <el-table-column column-key="logistics_channel" label="物流渠道" min-width="160"><template #default="{row:item}">{{item.logistics_channel||'—'}}</template></el-table-column>
-<el-table-column :column-key="'units'" prop="units" label="剩余件数" :width="tableWidths.width('table-1', 'units', '90')"/>
+<el-table-column :column-key="'units'" prop="units" label="剩余件数" :width="tableWidths.width('table-1', 'units', '90')" align="center"/>
 <el-table-column :column-key="'column-3'" :width="tableWidths.width('table-1', 'column-3', undefined)" label="状态 / 仓库" min-width="110"><template #default="{row:item}">{{statusNames[item.status]||item.status}}<div>{{item.warehouse||'—'}}</div></template></el-table-column>
 <el-table-column :column-key="'column-4'" :width="tableWidths.width('table-1', 'column-4', undefined)" label="预计送达窗口" min-width="205"><template #default="{row:item}">{{date(item.start,row.arrivals.timezone)}}<div>至 {{date(item.end,row.arrivals.timezone)}}</div></template></el-table-column>
 <el-table-column :column-key="'column-5'" :width="tableWidths.width('table-1', 'column-5', undefined)" label="统计说明" min-width="180"><template #default="{row:item}">{{states[item.bucket]}}<div class="muted" v-if="item.error">{{item.error}}</div></template></el-table-column>

@@ -1,0 +1,15 @@
+<script setup lang="ts">
+import {ref,onMounted} from 'vue'
+import {api} from './session'
+const props=defineProps<{row:any}>(),emit=defineEmits(['close'])
+const rows=ref<any[]>([]),total=ref(0),page=ref(1),size=ref(20),busy=ref(false),error=ref('')
+const actions:Record<string,string>={product_create:'新增产品',product_update:'修改产品',product_bulk_update:'批量修改',product_archive:'移入回收站',product_restore:'恢复',product_import:'导入产品',product_normalize:'整理编码',product_merge:'合并产品',product_packaging_import:'导入包装和重量',product_customs_update:'修改清关报关资料'}
+const fields:Record<string,string>={code:'标品编码',name:'品名',cost_cny:'成本价',primary_supplier:'主供应商',suppliers:'供应商',package_length_cm:'包装长（cm）',package_width_cm:'包装宽（cm）',package_height_cm:'包装高（cm）',gross_weight_g:'产品重量（g）',freight_uk_cny:'英国手动头程',freight_eu_cny:'欧洲手动头程',freight_uk_effective:'英国头程',freight_eu_effective:'欧洲头程',purchase_url:'采购链接',declaration:'报关资料',clearance:'清关资料',customs_profile_id:'资料编号',notes:'备注',specification:'规格',category:'分类',unit:'单位',image_path:'图片'}
+const time=(v:string)=>new Date(v).toLocaleString('zh-CN',{hour12:false})
+function display(v:any){return v===null||v===undefined||v===''?'未设置':typeof v==='object'?JSON.stringify(v):String(v)}
+function changes(row:any){const d=row.detail||{};const after=d.after||(row.action==='product_create'?d:{}),before=d.before||{};return [...new Set([...Object.keys(before),...Object.keys(after)])].filter(k=>k!=='revision'&&JSON.stringify(before[k])!==JSON.stringify(after[k])).map(k=>({label:fields[k]||k,before:display(before[k]),after:display(after[k])}))}
+async function load(){busy.value=true;error.value='';try{const d=await api(`/products/${props.row.id}/logs?page=${page.value}&page_size=${size.value}`);rows.value=d.rows;total.value=d.total}catch(e){error.value=(e as Error).message}finally{busy.value=false}}
+onMounted(load)
+</script>
+<template><el-dialog :model-value="true" :title="row.code+' · 操作日志'" width="900px" @close="emit('close')"><el-alert v-if="error" :title="error" type="error" :closable="false"/><el-table :data="rows" v-loading="busy" border max-height="500"><el-table-column label="时间" width="180"><template #default="{row:r}">{{time(r.at)}}</template></el-table-column><el-table-column prop="actor" label="操作人" width="120"/><el-table-column label="操作" width="130"><template #default="{row:r}">{{actions[r.action]||r.action}}</template></el-table-column><el-table-column label="修改内容"><template #default="{row:r}"><details v-if="changes(r).length"><summary>查看修改前后内容</summary><div v-for="c in changes(r)" :key="c.label" class="change"><b>{{c.label}}</b><div>修改前：{{c.before}}</div><div>修改后：{{c.after}}</div></div></details><span v-else>{{actions[r.action]||'操作记录'}}</span></template></el-table-column></el-table><AppPagination v-model:current-page="page" v-model:page-size="size" :total="total" @change="load"/></el-dialog></template>
+<style scoped>.change{font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;padding:8px 0;border-bottom:1px solid #edf0ee}summary{cursor:pointer;color:#287860}</style>

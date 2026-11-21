@@ -1,10 +1,11 @@
 <script setup lang="ts">
+import {adDisplayData,internalAdId} from './adDisplay'
 import {adsPeriodDates as periodDates} from './adsDates'
 import {useTableWidths} from './tableWidths'
 const tableWidths=useTableWidths('AdvertisingPanel')
 
 import {ref,computed,onMounted,onUnmounted,watch,h} from 'vue'
-import {ElMessage,ElNotification} from 'element-plus'
+import {ElMessage,ElNotification,ElMessageBox} from 'element-plus'
 import {Search,Refresh,ArrowRight,EditPen,Check} from '@element-plus/icons-vue'
 import {api,session,can} from './session'
 import AdsColumnHelp from './AdsColumnHelp.vue'
@@ -12,16 +13,22 @@ import {columnDescription} from './adsColumnDescriptions'
 import AdsRecentChange from './AdsRecentChange.vue'
 import AdsStrategyPanel from './AdsStrategyPanel.vue'
 import AdsAddProducts from './AdsAddProducts.vue'
+import AdsSearchActions from './AdsSearchActions.vue'
+import AdsProductImage from './AdsProductImage.vue'
+import AdsEntityLog from './AdsEntityLog.vue'
+const logRow=ref<any>(null)
 import {useAdsSticky} from './useAdsSticky'
 const panelRoot=ref<HTMLElement|null>(null)
 useAdsSticky(panelRoot)
 const addAdsOpen=ref(false)
+const searchAction=ref<'keyword'|'negative'|null>(null),searchActionRows=ref<any[]>([]),matchTypes=ref<string[]>([])
+function openSearchAction(mode:'keyword'|'negative',row?:any){searchActionRows.value=(row?[row]:selectedCampaigns.value).map(r=>({...r}));if(searchActionRows.value.length)searchAction.value=mode}
 const props=defineProps<{focus?:{store:string,marketplace:string,asin:string,request:number}|null,context?:any,active?:boolean}>()
 const emit=defineEmits(['open-entity','open-create','home'])
 const section=ref(props.context?.group?'ad':props.context?'adgroup':'campaign')
 const levelFor=(key:string)=>['auto','keyword','product'].includes(key)?'target':['negative_keyword','negative_product'].includes(key)?'negative':['strategy','settings'].includes(key)?'campaign':key
 const rootSections=[['campaign','广告活动'],['adgroup','广告组'],['ad','广告'],['auto','自动投放'],['keyword','关键词'],['product','商品投放'],['negative_keyword','否定词'],['negative_product','否定投放'],['search','用户搜索词'],['strategy','广告策略'],['placement','广告位']]
-const entitySections=[['campaign','广告活动'],['adgroup','广告组'],['ad','广告'],['target','投放'],['negative','否定投放'],['search','用户搜索词'],['strategy','广告策略'],['placement','广告位'],['logs','操作日志'],['settings','广告活动设置']]
+const entitySections=[['campaign','广告活动'],['adgroup','广告组'],['ad','广告'],['target','投放'],['negative','否定投放'],['search','用户搜索词'],['strategy','广告策略'],['placement','广告位'],['settings','广告活动设置']]
 const sections=computed(()=>(props.context?entitySections:rootSections).filter(([key])=>['campaign','adgroup','placement'].includes(levelFor(key))?can('advertising'):can('advertising.'+levelFor(key))))
 function selectSection(key:string){section.value=key;sort.value='';inlineValues.value={};search()}
 
@@ -29,14 +36,14 @@ function openCreate(){emit('open-create',{mode:section.value,profileId:profile.v
 defineExpose({refresh:()=>load()})
 const canEditAds=computed(()=>can(['campaign','adgroup','placement'].includes(currentLevel.value)?'advertising':'advertising.'+currentLevel.value,'operate'))
 const profiles=ref<any[]>([]),profile=ref(''),country=ref('UK'),store=ref(''),campaign=ref<any>(props.context?.campaign||null),group=ref<any>(props.context?.group||null)
-const dates=ref<string[]>([]),preset=ref('7'),q=ref(''),searchType=ref('all'),state=ref(''),page=ref(1),pageSize=ref(25),loading=ref(false),syncing=ref(false),error=ref(''),data=ref<any>({rows:[],total:0}),jobs=ref<any[]>([]),showJobs=ref(false),sort=ref(''),direction=ref('desc'),hover=ref<number|null>(null)
+const dates=ref<string[]>([]),preset=ref('7'),q=ref(''),searchType=ref('all'),state=ref('NOT_ARCHIVED'),page=ref(1),pageSize=ref(25),loading=ref(false),syncing=ref(false),error=ref(''),data=ref<any>({rows:[],total:0}),jobs=ref<any[]>([]),showJobs=ref(false),sort=ref(''),direction=ref('desc'),hover=ref<number|null>(null)
 const editOpen=ref(false),editBusy=ref(false),editRow=ref<any>(null),isCreate=ref(false),editKind=ref(''),editForm=ref<any>({}),previewData=ref<any>(null),editError=ref('')
 const suggestLoading=ref(false)
 const labels:Record<string,string>={campaign:'广告活动',adgroup:'广告组',ad:'广告',target:'投放',negative:'否定投放',search:'用户搜索词',logs:'操作日志',placement:'广告位'}
 const states:Record<string,string>={ENABLED:'已开启',PAUSED:'已暂停',ARCHIVED:'已归档',UNKNOWN:'未知'}
 const statusNames:Record<string,string>={preview:'待确认',sending:'提交中／待核对',succeeded:'成功',failed:'失败',unknown:'结果待核对'}
 const fieldNames:Record<string,string>={state:'状态',bid:'竞价',defaultBid:'默认竞价',name:'名称',dailyBudget:'每日预算',portfolioId:'广告组合',endDate:'结束日期',biddingStrategy:'竞价策略',placementTop:'首页首位加价',placementRest:'搜索其余位置加价',placementProduct:'商品页面加价',placementBusiness:'亚马逊企业购加价',audiences:'受众加价',offAmazonStrategy:'站外投放设置',note:'备注（仅本地）',keywordText:'否定关键词',matchType:'否定方式',asin:'否定商品ASIN'}
-const matchNames:Record<string,string>={BROAD:'广泛匹配',PHRASE:'词组匹配',EXACT:'精准匹配',AUTO:'自动投放',MANUAL:'商品投放',NEGATIVE_EXACT:'否定精准',NEGATIVE_PHRASE:'否定词组'}
+const matchNames:Record<string,string>={BROAD:'广泛匹配',PHRASE:'词组匹配',EXACT:'精准匹配',AUTO:'自动投放',MANUAL:'商品投放',NEGATIVE_EXACT:'否定精准',NEGATIVE_PHRASE:'否定词组',NEGATIVE_PRODUCT:'否定商品',CLOSE:'紧密匹配',LOOSE:'宽泛匹配',SUBSTITUTES:'同类商品',COMPLEMENTS:'关联商品',UNKNOWN:'未知类型'}
 const periodOptions=[['today','今天'],['yesterday','昨天'],['3','最近3天'],['7','最近7天'],['14','最近14天'],['30','最近30天'],['m3','最近三个月'],['m6','最近半年'],['y1','最近一年'],['custom','自定义']]
 const jobStates:Record<string,string>={queued:'排队中',running:'同步中',waiting:'等待亚马逊生成报表',succeeded:'已完成',failed:'部分或全部失败'}
 const currentLevel=computed(()=>levelFor(section.value))
@@ -54,7 +61,7 @@ const money=(v:any,code=currency.value)=>v==null?'—':new Intl.NumberFormat('zh
 const number=(v:any)=>v==null?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:0})
 const percent=(v:any)=>v==null?'—':Number(v).toFixed(2)+'%'
 const time=(v:any)=>v?new Date(v).toLocaleString('zh-CN',{hour12:false}):'未同步'
-const fieldValue=(key:string,v:any)=>v==null?'未设置':['bid','defaultBid','dailyBudget'].includes(key)?money(v,editCurrency.value):key==='state'?(states[v]||v):key==='matchType'?(matchNames[v]||v):typeof v==='object'?JSON.stringify(v):String(v)
+const fieldValue=(key:string,v:any)=>v==null?'未设置':internalAdId(key)?(campaignSettings.value?.portfolios?.find((p:any)=>String(p.portfolioId)===String(v))?.name||'已设置'):['bid','defaultBid','dailyBudget'].includes(key)?money(v,editCurrency.value):key==='state'?(states[v]||v):key==='matchType'?(matchNames[v]||v):typeof v==='object'?JSON.stringify(adDisplayData(v)):String(v)
 const iso=(d:Date)=>d.toISOString().slice(0,10)
 function refreshRelativeDates(){
  if(preset.value==='custom'||dates.value.length!==2)return false
@@ -72,8 +79,9 @@ async function load(quiet=false){
  if(section.value==='strategy'||!store.value||dates.value?.length!==2)return
  const id=++request;if(!quiet){loading.value=true;selectedCampaigns.value=[];campaignTable.value?.clearSelection()}error.value='';hover.value=null
  if(loadedLevel!==currentLevel.value){data.value={rows:[],total:0};loadedLevel=currentLevel.value}
- try{const p=new URLSearchParams({profile_id:profile.value,level:currentLevel.value,campaign_id:campaign.value?.id||'',adgroup_id:currentLevel.value==='campaign'?'':group.value?.id||'',start:dates.value[0],end:dates.value[1],q:q.value,search_type:searchType.value,state:currentLevel.value==='logs'||currentLevel.value==='search'?'':state.value,page:String(page.value),page_size:String(pageSize.value),sort:sort.value,direction:direction.value,entity_filter:entityFilter.value});if(!props.context){p.delete('profile_id');p.set('store',store.value);p.set('country',country.value)}const r=await api((props.context?'/advertising/workspace?':'/advertising/workspace-overview?')+p);if(id===request){data.value=r;applyPendingBids();if(currentLevel.value==='target')void ensureSuggestions()}}catch(e){if(id===request)error.value=(e as Error).message}finally{if(id===request)loading.value=false}
+ try{const p=new URLSearchParams({profile_id:profile.value,level:currentLevel.value,campaign_id:campaign.value?.id||'',adgroup_id:currentLevel.value==='campaign'?'':group.value?.id||'',start:dates.value[0],end:dates.value[1],q:q.value,search_type:searchType.value,state:currentLevel.value==='logs'||currentLevel.value==='search'?'':(state.value||''),page:String(page.value),page_size:String(pageSize.value),sort:sort.value,direction:direction.value,entity_filter:entityFilter.value,match_types:currentLevel.value==='search'?matchTypes.value.join(','):''});if(!props.context){p.delete('profile_id');p.set('store',store.value);p.set('country',country.value)}const r=await api((props.context?'/advertising/workspace?':'/advertising/workspace-overview?')+p);if(id===request){data.value=r;applyPendingBids();if(currentLevel.value==='target')void ensureSuggestions()}}catch(e){if(id===request)error.value=(e as Error).message}finally{if(id===request)loading.value=false}
 }
+const reportStatusText=computed(()=>!data.value.metrics_ready?'所选日期的日报尚未同步，—不代表0。自动任务会补充当天数据。':`日报更新时间：${time(data.value.report_oldest_at||data.value.report_at)}${data.value.coverage?.complete===false?'；所选日期尚有日报未同步':''}${data.value.report_provisional?'；近期数据仍在更新':''}`)
 const budgetStatus=ref<Record<string,any>>({})
 let budgetCheckAt=0,budgetBusy=false,budgetReload=false
 const budgetProfiles=computed(()=>profiles.value.filter(p=>props.context?p.id===profile.value:p.account===store.value&&(!country.value||(p.country==='GB'?'UK':p.country)===country.value)).map(p=>p.id))
@@ -169,22 +177,30 @@ const columnCatalog=computed(()=>{
  add('country','国家','text',100,!props.context&&!country.value);add('store','店铺')
  if(l!=='campaign'){add('campaign_name','广告活动','text',200,['ad','placement'].includes(l));add('adgroup_name','广告组','text',180)}
  if(['campaign','adgroup','ad'].includes(l))add('targeting_type','活动类型','type',130,true)
+ if(['campaign','adgroup','ad','target','placement'].includes(l))add('servingStatus','投放状态','text',150,true)
  if(l==='campaign'){add('budget','每日预算','budget',180,true);add('top_share','首页首位展示份额','percent',170,true);add('top_adjustment','首页首位竞价调整','percent',170,true);add('start_date','开始日期');add('end_date','结束日期');add('bidding_strategy','竞价策略')}
  if(l==='adgroup'){add('default_bid','默认竞价','default_bid',180,true);add('counts','投放 / 商品','counts',120,true)}
- if(l==='ad'){add('identifiers','ASIN / SKU','identifiers',245,true);add('product_name','品名','text',180,true);add('raw:extendedData.servingStatus','投放状态','raw',150,true);add('stock_total','库存','number',120,true);add('available','FBA可售','number',110);add('image','商品图片','image',90,true)}
+ if(l==='ad'){add('identifiers','ASIN / SKU / 品名','identifiers',285,true);add('stock_total','库存','number',120,true);add('available','FBA可售','number',110);add('image','商品图片','image',90,true)}
  if(l==='placement'){add('adjustment','竞价调整','adjustment',160,true);add('bidding_strategy','竞价策略','text',180,true)}
  if(['target','negative','search'].includes(l))add('match_type','匹配类型','match',140,true)
  if(l==='target'){add('suggestion','建议竞价','suggestion',265,true);add('bid','竞价','bid',180,true);add('top_share','首页首位展示份额','percent',170)}
  if(l==='search')add('target','对应投放','text',180,true)
- if(l!=='negative'){
+ {
+  if(l==='negative')add('image','商品图片','negative_image',90,true)
   for(const m of metricColumns)add(m.key,m.label,m.type,m.type==='money'?125:110,true)
-  add('cvr','转化率','percent',120)
+  add('cvr','转化率','percent',120,l==='negative')
   for(const k of data.value.report_columns||[])if(/^(purchases|sales|attributedSales|unitsSold|acosClicks|roasClicks|addToList|qualifiedBorrows|royaltyQualifiedBorrows|kindleEdition)/.test(k))add(k,metricLabel(k),k.startsWith('acos')?'percent':k.startsWith('roas')?'ratio':/sales|royalties/i.test(k)?'money':'number',175)
  }
- for(const k of data.value.raw_columns||[])if(!(l==='ad'&&['extendedData.servingStatus','servingStatus'].includes(k))&&!['name','sku','asin','startDate','endDate','budget.budget','targetingType','dynamicBidding.strategy'].includes(k))add('raw:'+k,fieldLabels[k]||k,'raw',180)
+ for(const k of data.value.raw_columns||[])if(!internalAdId(k)&&!['extendedData.servingStatus','servingStatus','_budget_status_pending'].includes(k)&&!['name','sku','asin','startDate','endDate','budget.budget','targetingType','dynamicBidding.strategy'].includes(k))add('raw:'+k,fieldLabels[k]||k,'raw',180)
  return c
 })
-const visibleColumns=computed(()=>{const keys=preferences.value[currentLevel.value];return keys?keys.map(k=>columnCatalog.value.find(c=>c.key===(currentLevel.value==='ad'&&k==='raw:servingStatus'?'raw:extendedData.servingStatus':k))).filter(Boolean):columnCatalog.value.filter(c=>c.def)})
+const visibleColumns=computed(()=>{
+ const keys=preferences.value[currentLevel.value]
+ const normalize=(k:string)=>['raw:servingStatus','raw:extendedData.servingStatus'].includes(k)?'servingStatus':currentLevel.value==='ad'&&k==='product_name'?'identifiers':k
+ const saved=keys&&currentLevel.value==='negative'&&!keys.some(k=>['clicks','cost','purchases','sales'].includes(k))?[...new Set([...keys,'image','clicks','cost','purchases','sales','cvr'])]:keys
+ const columns=saved?[...new Set(saved.map(normalize))].map(k=>columnCatalog.value.find(c=>c.key===k)).filter(Boolean):columnCatalog.value.filter(c=>c.def)
+ return currentLevel.value==='ad'?[...columns.filter(c=>c.key==='identifiers'),...columns.filter(c=>c.key!=='identifiers')]:columns
+})
 const filteredColumns=computed(()=>columnCatalog.value.filter(c=>(c.label+' '+c.key).toLowerCase().includes(columnSearch.value.toLowerCase())))
 function openColumns(){columnDraft.value=visibleColumns.value.map(c=>c.key);columnSearch.value='';columnsOpen.value=true}
 function moveColumn(i:number,step:number){const a=[...columnDraft.value];if(i+step<0||i+step>=a.length)return;[a[i],a[i+step]]=[a[i+step],a[i]];columnDraft.value=a}
@@ -192,17 +208,19 @@ async function saveColumns(){columnsBusy.value=true;try{await api('/advertising/
 function inlineValue(row:any,key:string){return inlineValues.value[row.key]?.[key]??row[key]}
 function changeInline(row:any,key:string,v:any){(inlineValues.value[row.key]??={})[key]=v}
 function dirtyInline(row:any,key:string){return inlineValues.value[row.key]?.[key]!=null&&Math.round(Number(inlineValues.value[row.key][key])*100)!==Math.round(Number(row[key])*100)}
-const pendingBids=new Map<string,{profile:string,kind:string,id:string,field:string,value:number,key:string}>()
-function applyPendingBids(){for(const change of pendingBids.values())for(const row of data.value.rows||[])if((row.profile_id||profile.value)===change.profile&&row.kind===change.kind&&row.id===change.id&&(change.field!=='adjustment'||row.placement_field===change.key))row[change.field]=change.value}
+const pendingBids=new Map<string,{profile:string,kind:string,id:string,field:string,value:number,key:string,pendingStatus?:boolean}>()
+function applyPendingBids(){for(const change of pendingBids.values())for(const row of data.value.rows||[])if((row.profile_id||profile.value)===change.profile&&row.kind===change.kind&&row.id===change.id&&(change.field!=='adjustment'||row.placement_field===change.key)){row[change.field]=change.value;if(change.pendingStatus)row.servingStatus='BUDGET_UPDATING'}}
 async function submitInlineBid(row:any,key:string,value:any){
  if(!canEditAds.value||editBusy.value||loading.value||row.state==='ARCHIVED')return
- const field=key==='defaultBid'?'default_bid':key.startsWith('placement')?'adjustment':'bid',amount=Number(value)
- if(value==null||!Number.isFinite(amount)||amount<(field==='adjustment'?0:0.01)||amount>(field==='adjustment'?900:10000)){ElNotification({title:'竞价未提交',message:'请输入有效竞价'+(field==='adjustment'?'百分比（0–900）':''),type:'error',position:'top-right'});delete inlineValues.value[row.key];return}
+ const field=key==='dailyBudget'?'budget':key==='defaultBid'?'default_bid':key.startsWith('placement')?'adjustment':'bid',amount=Number(value)
+ const noun=key==='dailyBudget'?'预算':'竞价'
+ if(value==null||!Number.isFinite(amount)||amount<(field==='adjustment'?0:0.01)||amount>(field==='adjustment'?900:field==='budget'?1000000000:10000)){ElNotification({title:noun+'未提交',message:'请输入有效'+noun+(field==='adjustment'?'百分比（0–900）':''),type:'error',position:'top-right'});delete inlineValues.value[row.key];return}
  if(amount===Number(row[field]))return
+ const oldStatus=row.servingStatus
  const pid=row.profile_id||profile.value,id=[pid,row.kind,row.id,key].join(':'),previous=row[field]
  let restore=previous,submitted=false
- editBusy.value=true;pendingBids.set(id,{profile:pid,kind:row.kind,id:row.id,field,value:amount,key})
- row[field]=amount;delete inlineValues.value[row.key]
+ editBusy.value=true;pendingBids.set(id,{profile:pid,kind:row.kind,id:row.id,field,value:amount,key,pendingStatus:key==='dailyBudget'&&amount>Number(previous)})
+ row[field]=amount;if(key==='dailyBudget'&&amount>Number(previous))row.servingStatus='BUDGET_UPDATING';delete inlineValues.value[row.key]
  try{
   const preview=await api('/advertising/edit/preview',{profile_id:pid,kind:row.kind,entity_id:row.id,changes:{[key]:amount}})
   restore=preview.before[key]??previous;submitted=true
@@ -211,20 +229,21 @@ async function submitInlineBid(row:any,key:string,value:any){
   pendingBids.delete(id)
   if(key==='defaultBid'&&group.value?.id===row.id)group.value={...group.value,default_bid:amount}
   await load(true)
+  if(key==='dailyBudget')void checkBudgets(true)
  }catch(e){
-  pendingBids.delete(id);row[field]=restore
-  for(const visible of data.value.rows||[])if((visible.profile_id||profile.value)===pid&&visible.kind===row.kind&&visible.id===row.id&&(field!=='adjustment'||visible.placement_field===key))visible[field]=restore
+  pendingBids.delete(id);row[field]=restore;row.servingStatus=oldStatus
+  for(const visible of data.value.rows||[])if((visible.profile_id||profile.value)===pid&&visible.kind===row.kind&&visible.id===row.id&&(field!=='adjustment'||visible.placement_field===key)){visible[field]=restore;visible.servingStatus=oldStatus}
   const uncertain=(e as any).uncertain??submitted
-  ElNotification({title:uncertain?'竞价提交结果待核对':'竞价提交失败，已回退',message:uncertain?'已恢复显示原值，请刷新核对亚马逊结果后再修改。'+(e as Error).message:(e as Error).message,type:uncertain?'warning':'error',position:'top-right',duration:0})
+  ElNotification({title:uncertain?noun+'提交结果待核对':noun+'提交失败，已回退',message:uncertain?'已恢复显示原值，请刷新核对亚马逊结果后再修改。'+(e as Error).message:(e as Error).message,type:uncertain?'warning':'error',position:'top-right',duration:0})
  }finally{pendingBids.delete(id);editBusy.value=false}
 }
-async function quickEdit(row:any,key:string,value:any){if(['bid','defaultBid'].includes(key)||key.startsWith('placement')){await submitInlineBid(row,key,value);return}if(editBusy.value||loading.value)return;startEdit(row);quickField.value=key;if(row.kind==='campaign'){campaignBaseline.value={state:row.state,dailyBudget:row.budget,...(row.placement_field?{[row.placement_field]:row.adjustment}:{})};editForm.value={...campaignBaseline.value}}editForm.value[key]=value;await preview()}
+async function quickEdit(row:any,key:string,value:any){if(['bid','defaultBid','dailyBudget'].includes(key)||key.startsWith('placement')){await submitInlineBid(row,key,value);return}if(editBusy.value||loading.value)return;startEdit(row);quickField.value=key;if(row.kind==='campaign'){campaignBaseline.value={state:row.state,dailyBudget:row.budget,...(row.placement_field?{[row.placement_field]:row.adjustment}:{})};editForm.value={...campaignBaseline.value}}editForm.value[key]=value;await preview()}
 async function startCampaign(row:any){startEdit(row);editBusy.value=true;try{const d=await api('/advertising/campaign-settings/'+encodeURIComponent(row.id)+'?'+new URLSearchParams({profile_id:row.profile_id||profile.value}));campaignSettings.value=d;campaignBaseline.value=structuredClone(d.values);editForm.value=structuredClone(d.values)}catch(e){editError.value=(e as Error).message}finally{editBusy.value=false}}
 function audienceChange(id:string){editForm.value.audiences=id?[{shopperCohortType:'AUDIENCE_SEGMENT',percentage:0,audienceSegments:[{audienceId:id}]}]:[]}
 type ServingTone='success'|'danger'|'warning'|'muted'
 type ServingLabel={label:string,tone:ServingTone}
 const servingNames:Record<string,[string,ServingTone]>={
- AD_STATUS_LIVE:['投放中','success'],TARGETING_CLAUSE_STATUS_LIVE:['投放中','success'],AD_ELIGIBLE:['可投放','success'],ELIGIBLE:['可投放','success'],AD_INELIGIBLE:['不可投放','danger'],INELIGIBLE:['不可投放','danger'],OTHER:['其他状态','muted'],UNKNOWN:['未知状态','muted'],AD_CREATION_FAILED:['广告创建失败','danger'],AD_CREATION_OFFLINE_FAILED:['广告创建失败','danger'],AD_CREATION_OFFLINE_IN_PROGRESS:['广告创建中','warning'],AD_CREATION_OFFLINE_PENDING:['等待创建','warning'],PIR_RULE_EXCLUDED:['规则已排除','muted'],VARIATION_PARENT:['父体不可投放','danger'],
+ BUDGET_UPDATING:['预算更新中','warning'],AD_STATUS_LIVE:['投放中','success'],TARGETING_CLAUSE_STATUS_LIVE:['投放中','success'],AD_ELIGIBLE:['可投放','success'],ELIGIBLE:['可投放','success'],AD_INELIGIBLE:['不可投放','danger'],INELIGIBLE:['不可投放','danger'],OTHER:['其他状态','muted'],UNKNOWN:['未知状态','muted'],AD_CREATION_FAILED:['广告创建失败','danger'],AD_CREATION_OFFLINE_FAILED:['广告创建失败','danger'],AD_CREATION_OFFLINE_IN_PROGRESS:['广告创建中','warning'],AD_CREATION_OFFLINE_PENDING:['等待创建','warning'],PIR_RULE_EXCLUDED:['规则已排除','muted'],VARIATION_PARENT:['父体不可投放','danger'],
  OUT_OF_BUDGET:['预算不足','danger'],EXCEED_SPENDS_LIMIT:['超出花费限制','danger'],PAYMENT_FAILURE:['付款失败','danger'],PENDING_REVIEW:['待审核','warning'],PENDING_START_DATE:['未到开始日期','warning'],CREATIVE_REJECTED:['素材审核未通过','danger'],REJECTED:['审核未通过','danger'],POLICING_SUSPENDED:['投放受限','danger'],ARCHIVED:['已归档','muted'],PAUSED:['已暂停','muted'],STATUS_ENABLED:['已启用','success'],INCOMPLETE:['资料不完整','warning'],LOW_BID:['竞价过低','warning'],ENDED:['已结束','muted'],OUT_OF_STOCK:['缺货','danger'],NO_INVENTORY:['缺货','danger'],NOT_BUYABLE:['商品不可购买','danger'],NOT_IN_BUYBOX:['未获得购物车','warning'],NO_PURCHASABLE_OFFER:['没有可购买报价','danger'],MISSING_IMAGE:['缺少图片','warning'],MISSING_DECORATION:['素材不完整','warning'],LANDING_PAGE_NOT_AVAILABLE:['落地页不可用','danger'],ADS_NOT_DELIVERING:['广告未投放','warning'],BLOCKED:['投放被阻止','danger']
 }
 function servingLabels(value:any):ServingLabel[]{
@@ -238,11 +257,11 @@ function servingLabels(value:any):ServingLabel[]{
 }
 function servingStatus(value:any){return servingLabels(value).map(s=>s.label).join('；')||'—'}
 function statusItems(row:any,col:any){
- const value=col.key==='raw:extendedData.servingStatus'?(row.raw_fields?.['extendedData.servingStatus']??row.raw_fields?.servingStatus):(col.type==='raw'?row.raw_fields?.[col.key.slice(4)]:row[col.key])
+ const value=col.key==='servingStatus'?(row.servingStatus??row.raw_fields?.['extendedData.servingStatus']??row.raw_fields?.servingStatus):(col.type==='raw'?row.raw_fields?.[col.key.slice(4)]:row[col.key])
  const labels=servingLabels(value)
  return labels.length?labels:[{label:'—',tone:'muted'}]
 }
-function cellText(row:any,col:any){let v=col.type==='raw'?row.raw_fields?.[col.key.slice(4)]:row.metrics&&col.key in row.metrics?row.metrics[col.key]:row[col.key];if(col.key==='product_name'&&!v)return '';if(v==null||v==='')return '—';if(col.key.toLowerCase().includes('servingstatus'))return servingStatus(v);if(col.key.endsWith('DateTime'))return time(v);if(col.type==='type')return v==='AUTO'?'自动投放':'手动投放';if(col.type==='match')return matchNames[v]||v;if(col.key==='bidding_strategy')return strategyNames[v]||v;if(['money','number','percent','ratio'].includes(col.type))return format(v,col.type,row.currency||currency.value);return typeof v==='object'?JSON.stringify(v):String(v)}
+function cellText(row:any,col:any){let v=col.type==='raw'?row.raw_fields?.[col.key.slice(4)]:row.metrics&&col.key in row.metrics?row.metrics[col.key]:row[col.key];if(col.key==='product_name'&&!v)return '';if(v==null||v==='')return '—';if(col.key.toLowerCase().includes('servingstatus'))return servingStatus(v);if(col.key.endsWith('DateTime'))return time(v);if(col.type==='type')return v==='AUTO'?'自动投放':'手动投放';if(col.type==='match')return matchNames[String(v).toUpperCase()]||v;if(col.key==='bidding_strategy')return strategyNames[v]||v;if(['money','number','percent','ratio'].includes(col.type))return format(v,col.type,row.currency||currency.value);return typeof v==='object'?JSON.stringify(adDisplayData(v)):String(v)}
 const reportedChartRows=computed(()=>data.value.trends?.[currency.value]||data.value.trend||[])
 const chartRows=computed(()=>{
  const rows=reportedChartRows.value
@@ -268,6 +287,7 @@ function inlineEnter(row:any,key:string,event:KeyboardEvent){if(!(event.target i
 function saveInline(row:any,key:string){if(!canEditAds.value||row.state==='ARCHIVED'||!dirtyInline(row,key)||editBusy.value||loading.value)return;quickEdit(row,key==='budget'?'dailyBudget':key==='default_bid'?'defaultBid':'bid',inlineValue(row,key))}
 const campaignTable=ref<any>(null),selectedCampaigns=ref<any[]>([])
 const bulkOpen=ref(false),bulkBusy=ref(false),bulkMode=ref('state'),bulkStage=ref('form'),bulkState=ref('PAUSED'),bulkError=ref('')
+const bulkAdjustment=ref('fixed'),bulkPercent=ref<number|undefined>()
 const bulkRows=ref<any[]>([]),bulkBudgets=ref<Record<string,number|undefined>>({})
 const bulkCurrencies=computed(()=>[...new Set<string>(bulkRows.value.map(r=>r.currency))])
 const bulkReady=computed(()=>bulkRows.value.filter(r=>r.status==='preview'&&r.previewId))
@@ -275,26 +295,30 @@ const bulkStatusNames:Record<string,string>={pending:'待预览',preview:'待确
 function openBulk(mode:string){
  if(!canEditAds.value||!selectedCampaigns.value.length||loading.value)return
  bulkRows.value=selectedCampaigns.value.map(r=>({...r,profile_id:r.profile_id||profile.value,currency:r.currency||currency.value,status:'pending',previewId:null,message:'',before:null,after:null}))
- bulkMode.value=mode;bulkStage.value='form';bulkState.value='PAUSED';bulkBudgets.value={};bulkError.value='';bulkOpen.value=true
+ bulkMode.value=mode;bulkStage.value='form';bulkState.value='PAUSED';bulkBudgets.value={};bulkAdjustment.value='fixed';bulkPercent.value=undefined;bulkError.value='';bulkOpen.value=true
 }
 async function previewBulk(){
  if(bulkBusy.value)return
- if(bulkMode.value==='budget'&&bulkCurrencies.value.some(c=>!Number.isFinite(bulkBudgets.value[c])||Number(bulkBudgets.value[c])<=0)){bulkError.value='请为每种币种填写大于 0 的每日预算';return}
+ if(bulkMode.value!=='state'&&bulkAdjustment.value==='fixed'&&bulkCurrencies.value.some(c=>!Number.isFinite(bulkBudgets.value[c])||Number(bulkBudgets.value[c])<=0)){bulkError.value='请为每种币种填写大于 0 的金额';return}
+ if(bulkMode.value!=='state'&&bulkAdjustment.value!=='fixed'&&(!Number.isFinite(bulkPercent.value)||Number(bulkPercent.value)<=0||Number(bulkPercent.value)>10000||(bulkAdjustment.value==='decrease'&&Number(bulkPercent.value)>=100))){bulkError.value='请填写有效百分比；降低幅度必须小于100%';return}
  bulkBusy.value=true;bulkError.value='';bulkStage.value='preview'
  try{for(const row of bulkRows.value){
   row.status='pending';row.previewId=null;row.message='';row.before=null;row.after=null
-  const key=bulkMode.value==='state'?'state':'dailyBudget',value=bulkMode.value==='state'?bulkState.value:bulkBudgets.value[row.currency]
-  try{const result=await api('/advertising/edit/preview',{profile_id:row.profile_id,kind:'campaign',entity_id:row.id,changes:{[key]:value}});row.previewId=result.id;row.before=result.before[key];row.after=result.changes[key];row.status='preview'}
+  const key=bulkMode.value==='state'?'state':bulkMode.value==='bid'?'bid':'dailyBudget',value=bulkMode.value==='state'?bulkState.value:bulkBudgets.value[row.currency]
+  const adjustment=bulkMode.value!=='state'&&bulkAdjustment.value!=='fixed'?{percentage:{field:key,direction:bulkAdjustment.value,percent:bulkPercent.value}}:{changes:{[key]:value}}
+  try{const result=await api('/advertising/edit/preview',{profile_id:row.profile_id,kind:row.kind||'campaign',entity_id:row.id,...adjustment});row.previewId=result.id;row.before=result.calculated_from??result.before[key];row.after=result.changes[key];row.status='preview'}
   catch(e){row.message=(e as Error).message;row.status=row.message==='没有修改内容'?'skipped':'preview_failed'}
  }}finally{bulkBusy.value=false}
 }
 async function confirmBulk(){
  if(bulkBusy.value||bulkStage.value!=='preview'||!bulkReady.value.length)return
+ const archiving=bulkMode.value==='state'&&bulkState.value==='ARCHIVED'
+ if(archiving){try{await ElMessageBox.confirm(`确认归档这 ${bulkReady.value.length} 项？归档后无法撤回，也不能重新开启。`,'归档不可撤回',{type:'warning',confirmButtonText:'确认归档，无法撤回',cancelButtonText:'取消'})}catch{return}}
  bulkBusy.value=true
  const ready=[...bulkReady.value]
  try{for(const row of ready){
   const id=row.previewId;row.previewId=null;row.status='sending'
-  try{const result=await api('/advertising/edit/confirm',{id});row.status=result.status;row.message=result.message;if(result.status==='succeeded')delete inlineValues.value[row.key]}
+  try{const result=await api('/advertising/edit/confirm',{id,acknowledge_archive:archiving});row.status=result.status;row.message=result.message;if(result.status==='succeeded')delete inlineValues.value[row.key]}
   catch(e){row.status='unknown';row.message=(e as Error).message+'；请在操作日志核对结果'}
  }}finally{bulkStage.value='done';bulkBusy.value=false;await load()}
 }
@@ -312,6 +336,8 @@ const placementRows=computed(()=>data.value.rows.flatMap((r:any)=>{const raw=r.r
 
  <div v-if="active" class="ads-progress">正在同步资料与日报，完成后自动刷新，关闭页面不影响后台同步。</div>
  <AdsStrategyPanel v-if="section==='strategy'" :profiles="profiles" :context="context" :store="store" :country="country"/>
+ <AdsEntityLog v-if="logRow" :row="logRow" @close="logRow=null"/>
+ <AdsSearchActions v-if="searchAction" :mode="searchAction" :rows="searchActionRows" :profiles="profiles" @close="searchAction=null" @done="load()"/>
  <AdsAddProducts v-if="addAdsOpen" :profile-id="profile" :campaign-id="campaign?.id" :group-id="group?.id" @close="addAdsOpen=false" @done="load()"/>
  <section v-if="section!=='strategy'&&!['negative','logs'].includes(currentLevel)" class="panel performance">
   <div class="kpis"><div><span>总花费</span><b>{{money(summary?.cost)}}</b></div><div><span>ACOS</span><b>{{percent(summary?.acos)}}</b></div><div><span>销售额</span><b>{{money(summary?.sales)}}</b></div><div><span>广告订单</span><b>{{number(summary?.purchases)}}</b></div><div><span>曝光</span><b>{{number(summary?.impressions)}}</b></div><div><span>点击</span><b>{{number(summary?.clicks)}}</b></div></div>
@@ -326,43 +352,48 @@ const placementRows=computed(()=>data.value.rows.flatMap((r:any)=>{const raw=r.r
    <el-input v-model="q" :prefix-icon="Search" clearable placeholder="SKU / ASIN / FNSKU / 品名 / 活动或组名称" aria-label="广告搜索"/>
    <el-select v-model="preset" aria-label="时间范围" @change="choosePeriod"><el-option v-for="p in periodOptions" :key="p[0]" :value="p[0]" :label="p[1]"/></el-select>
    <el-date-picker v-model="dates" type="daterange" value-format="YYYY-MM-DD" :shortcuts="shortcuts" start-placeholder="开始日期" end-placeholder="结束日期" range-separator="至" @change="preset='custom'"/>
-   <el-select v-if="!['logs','search'].includes(currentLevel)" v-model="state" clearable placeholder="全部状态" aria-label="状态"><el-option v-for="(v,k) in states" :key="k" :label="v" :value="k"/></el-select><el-button native-type="submit" type="primary">查询</el-button>
-  <el-select v-if="data.currencies?.length>1" v-model="performanceCurrency" aria-label="走势币种" :placeholder="currency"><el-option v-for="c in data.currencies" :key="c" :value="c" :label="c"/></el-select><el-button :disabled="!profile" @click="resetWidths">重置列宽</el-button><el-button :icon="Refresh" @click="refreshPage">刷新页面</el-button><span class="budget-status muted" :title="budgetStatusDetail">{{budgetStatusText}}</span><el-button v-if="canEditAds && ['campaign','adgroup'].includes(section)" type="primary" plain :disabled="!profile||(!props.context&&!country)" @click="openCreate">{{section==='campaign'?'创建广告活动':'创建广告组'}}</el-button><template v-if="section==='campaign'&&canEditAds"><span class="selection-count">已选 {{selectedCampaigns.length}} 项</span><el-button :disabled="!selectedCampaigns.length||loading" @click="openBulk('state')">批量调整状态</el-button><el-button :disabled="!selectedCampaigns.length||loading" @click="openBulk('budget')">批量调整预算</el-button></template><el-button v-if="canEditAds && currentLevel==='negative'" type="primary" @click="startNegative()">新增否定投放</el-button><el-button v-if="section==='ad'&&canEditAds" :disabled="!profile||(!props.context&&!country)" @click="addAdsOpen=true">添加广告</el-button><el-button v-if="currentLevel!=='logs'&&!specialView" :disabled="!profile" @click="openColumns">自定义列</el-button></form>
+   <el-select v-if="currentLevel==='search'" v-model="matchTypes" multiple collapse-tags collapse-tags-tooltip clearable placeholder="匹配类型（多选）" aria-label="匹配类型多选" style="width:210px"><el-option v-for="k in ['EXACT','PHRASE','BROAD','CLOSE','LOOSE','SUBSTITUTES','COMPLEMENTS','AUTO','MANUAL','UNKNOWN']" :key="k" :value="k" :label="matchNames[k]"/></el-select>
+   <el-select v-if="!['logs','search'].includes(currentLevel)" v-model="state" clearable :value-on-clear="''" placeholder="全部状态" aria-label="状态"><el-option label="除归档外" value="NOT_ARCHIVED"/><el-option label="全部状态" value=""/><el-option v-for="k in ['ENABLED','PAUSED','ARCHIVED']" :key="k" :label="states[k]" :value="k"/></el-select><el-button native-type="submit" type="primary">查询</el-button>
+  <el-select v-if="data.currencies?.length>1" v-model="performanceCurrency" aria-label="走势币种" :placeholder="currency"><el-option v-for="c in data.currencies" :key="c" :value="c" :label="c"/></el-select><el-button :disabled="!profile" @click="resetWidths">重置列宽</el-button><el-button :icon="Refresh" @click="refreshPage">刷新页面</el-button><span class="budget-status muted" :title="budgetStatusDetail">{{budgetStatusText}}</span><el-button v-if="canEditAds && ['campaign','adgroup'].includes(section)" type="primary" plain :disabled="!profile||(!props.context&&!country)" @click="openCreate">{{section==='campaign'?'创建广告活动':'创建广告组'}}</el-button><template v-if="['campaign','target'].includes(currentLevel)&&canEditAds"><span class="selection-count">已选 {{selectedCampaigns.length}} 项</span><el-button :disabled="!selectedCampaigns.length||loading" @click="openBulk('state')">批量调整状态</el-button><el-button :disabled="!selectedCampaigns.length||loading" @click="openBulk(currentLevel==='target'?'bid':'budget')">{{currentLevel==='target'?'批量调整竞价':'批量调整预算'}}</el-button></template><template v-if="currentLevel==='search'&&canEditAds"><span>已选 {{selectedCampaigns.length}} 项</span><el-button :disabled="!selectedCampaigns.length||loading" @click="openSearchAction('keyword')">批量添加关键词</el-button><el-button :disabled="!selectedCampaigns.length||loading" @click="openSearchAction('negative')">批量否定</el-button></template><el-button v-if="canEditAds && currentLevel==='negative'" type="primary" @click="startNegative()">新增否定投放</el-button><el-button v-if="section==='ad'&&canEditAds" :disabled="!profile||(!props.context&&!country)" @click="addAdsOpen=true">添加广告</el-button><el-button v-if="currentLevel!=='logs'&&!specialView" :disabled="!profile" @click="openColumns">自定义列</el-button></form>
+  <p v-if="currentLevel==='negative'" class="report-freshness muted">点击、花费、订单、销售额和转化率来自所选日期内，同一广告组（活动级规则为同一活动）匹配到的搜索词；否定词组按完整词组关联。规则之间可能重叠，不代表否定规则自身产生业绩。{{reportStatusText}}</p>
+  <p v-if="!['negative','logs'].includes(currentLevel)" class="report-freshness muted">{{reportStatusText}}<el-button v-if="canEditAds&&profile&&country" link :loading="syncing" :disabled="active" @click="sync">同步所选日期日报</el-button></p>
  <template v-if="specialView">
- <el-table v-if="section==='placement'" :data="placementRows" border v-loading="loading"><el-table-column :render-header="plainHeader" prop="name" label="广告活动" min-width="220"/><el-table-column :render-header="plainHeader" prop="country" label="国家" width="90"/><el-table-column :render-header="plainHeader" prop="placement" label="广告位" min-width="220"/><el-table-column :render-header="plainHeader" label="竞价调整"><template #default="{row}">{{percent(row.adjustment)}}</template></el-table-column><el-table-column :render-header="plainHeader" label="操作" width="120"><template #default="{row}"><el-button v-if="canEditAds" link @click="startCampaign(row)">编辑设置</el-button></template></el-table-column></el-table>
- <el-table v-else :data="data.rows" border v-loading="loading"><el-table-column :render-header="plainHeader" prop="name" label="广告活动" min-width="220"/><el-table-column :render-header="plainHeader" prop="country" label="国家" width="90"/><el-table-column :render-header="plainHeader" label="状态"><template #default="{row}">{{states[row.state]}}</template></el-table-column><el-table-column :render-header="plainHeader" label="竞价策略" min-width="200"><template #default="{row}">{{strategyNames[row.bidding_strategy]||row.bidding_strategy||'—'}}</template></el-table-column><el-table-column :render-header="plainHeader" label="每日预算"><template #default="{row}">{{money(row.budget,row.currency)}}</template></el-table-column><el-table-column :render-header="plainHeader" v-if="section==='settings'" prop="start_date" label="开始日期"/><el-table-column :render-header="plainHeader" v-if="section==='settings'" prop="end_date" label="结束日期"/><el-table-column :render-header="plainHeader" label="操作" width="120"><template #default="{row}"><el-button v-if="canEditAds" link @click="startCampaign(row)">编辑设置</el-button></template></el-table-column></el-table>
+ <el-table v-if="section==='placement'" :data="placementRows" border v-loading="loading"><el-table-column :render-header="plainHeader" prop="name" label="广告活动" min-width="220"/><el-table-column :render-header="plainHeader" prop="country" label="国家" width="90"/><el-table-column :render-header="plainHeader" prop="placement" label="广告位" min-width="220"/><el-table-column :render-header="plainHeader" label="竞价调整" align="center"><template #default="{row}">{{percent(row.adjustment)}}</template></el-table-column><el-table-column :render-header="plainHeader" label="操作" width="120"><template #default="{row}"><el-button v-if="canEditAds" link @click="startCampaign(row)">编辑设置</el-button></template></el-table-column></el-table>
+ <el-table v-else :data="data.rows" border v-loading="loading"><el-table-column :render-header="plainHeader" prop="name" label="广告活动" min-width="220"/><el-table-column :render-header="plainHeader" prop="country" label="国家" width="90"/><el-table-column :render-header="plainHeader" label="状态"><template #default="{row}">{{states[row.state]}}</template></el-table-column><el-table-column :render-header="plainHeader" label="竞价策略" min-width="200"><template #default="{row}">{{strategyNames[row.bidding_strategy]||row.bidding_strategy||'—'}}</template></el-table-column><el-table-column :render-header="plainHeader" label="每日预算" align="center"><template #default="{row}">{{money(row.budget,row.currency)}}</template></el-table-column><el-table-column :render-header="plainHeader" v-if="section==='settings'" prop="start_date" label="开始日期"/><el-table-column :render-header="plainHeader" v-if="section==='settings'" prop="end_date" label="结束日期"/><el-table-column :render-header="plainHeader" label="操作" width="120"><template #default="{row}"><el-button v-if="canEditAds" link @click="startCampaign(row)">编辑设置</el-button></template></el-table-column></el-table>
  </template>
  <el-table v-else-if="currentLevel==='logs'" border class="ads-table" @header-dragend="resizeColumn" :key="widthVersion" :data="data.rows" v-loading="loading"><el-table-column :render-header="plainHeader" label="时间" column-key="created_at" :width="width('created_at',180)"><template #default="{row}">{{time(row.created_at)}}</template></el-table-column><el-table-column :render-header="plainHeader" prop="actor" label="操作人" column-key="actor" :width="width('actor',100)"/><el-table-column :render-header="plainHeader" prop="name" label="对象" column-key="name" :width="width('name',220)"/><el-table-column :render-header="plainHeader" label="修改内容" column-key="changes" :width="width('changes',300)"><template #default="{row}"><div v-for="(v,k) in row.changes" :key="k">{{fieldNames[String(k)]||k}}：{{fieldValue(String(k),row.before[k])}} → {{fieldValue(String(k),v)}}</div></template></el-table-column><el-table-column :render-header="plainHeader" label="结果" column-key="status" :width="width('status',135)"><template #default="{row}">{{statusNames[row.status]||row.status}}</template></el-table-column><el-table-column :render-header="plainHeader" prop="error" label="说明" column-key="error" :width="width('error',220)"/></el-table>
  <el-table v-else ref="campaignTable" border @selection-change="(rows:any[])=>selectedCampaigns=rows" @header-dragend="resizeColumn" :data="data.rows" v-loading="loading" row-key="key" class="ads-table" :key="widthVersion+currentLevel+visibleColumns.map(c=>c.key).join(',')">
-  <el-table-column v-if="section==='campaign'" type="selection" column-key="selection" :width="48" fixed :selectable="(row:any)=>canEditAds&&!loading&&row.state!=='ARCHIVED'"/>
+  <el-table-column v-if="['campaign','target','search'].includes(currentLevel)" type="selection" column-key="selection" :width="48" fixed :selectable="(row:any)=>canEditAds&&!loading&&row.state!=='ARCHIVED'"/>
   <el-table-column v-if="!['search','placement'].includes(currentLevel)" column-key="state" label="开关" :width="width('state',100)" fixed><template #header><span>开关</span><AdsColumnHelp label="开关" :description="columnDescription('state')"/></template><template #default="{row}"><div class="state-control"><el-tooltip :content="states[row.state]||row.state"><el-switch :model-value="row.state==='ENABLED'" :disabled="!canEditAds||row.state==='ARCHIVED'||editBusy" :aria-label="'开启或暂停 '+row.name" @change="(v:any)=>quickEdit(row,'state',v?'ENABLED':'PAUSED')"/></el-tooltip><AdsRecentChange :change="row.recent_changes?.state" field="state"/></div></template></el-table-column>
-  <el-table-column v-if="currentLevel!=='ad'" column-key="name" :width="width('name',250)" fixed><template #header><button class="sort-head" @click="cycleSort('name')">{{currentLevel==='search'?'用户搜索词':currentLevel==='negative'?'否定关键词 / 商品':currentLevel==='target'?'投放项':currentLevel==='placement'?'广告位':labels[currentLevel]+'名称'}}{{sortMark('name')}}</button><AdsColumnHelp :label="labels[currentLevel]||'名称'" :description="columnDescription('name',currentLevel)"/></template><template #default="{row}"><div class="name-cell"><el-button v-if="['campaign','adgroup'].includes(currentLevel)" link type="primary" @click="drill(row)">{{row.name}}</el-button><strong v-else>{{row.name}}</strong><el-button v-if="canEditAds && currentLevel==='campaign'" link :icon="EditPen" :aria-label="'编辑活动 '+row.name" :disabled="!canEditAds||row.state==='ARCHIVED'||editBusy" @click.stop="startCampaign(row)"/></div><div v-if="!['search','placement'].includes(currentLevel)" class="cell-sub">ID {{row.id}}</div></template></el-table-column>
-  <el-table-column v-for="col in visibleColumns" :key="col.key" :column-key="col.key" :width="width(col.key,col.width)" :align="['money','number','percent','ratio'].includes(col.type)?'right':'left'"><template #header><button v-if="!['image','suggestion','counts','identifiers'].includes(col.type)" class="sort-head" :aria-label="col.label+'排序'" @click="cycleSort(col.key)">{{col.label}}{{sortMark(col.key)}}</button><span v-else>{{col.label}}</span><AdsColumnHelp :label="col.label" :description="columnHelp(col)"/><div v-if="col.type==='suggestion'" class="suggest-header"><span>平日</span><el-button link :icon="Refresh" aria-label="刷新建议竞价" :loading="suggestLoading" @click.stop="refreshSuggestions"/></div></template><template #default="{row}">
-   <div v-if="['budget','default_bid','bid'].includes(col.type)" class="inline-price" @keydown.capture="inlineEnter(row,col.key,$event)"><el-input-number :model-value="inlineValue(row,col.key)" @update:model-value="(v:any)=>changeInline(row,col.key,v)" :min="0.01" :precision="2" :step="0.01" controls-position="right" :disabled="!canEditAds||row.state==='ARCHIVED'||editBusy" :aria-label="col.label+' '+row.name"/><AdsRecentChange :change="row.recent_changes?.[col.key==='budget'?'dailyBudget':col.key==='default_bid'?'defaultBid':col.key]" :currency="row.currency"/><el-button v-if="canEditAds && dirtyInline(row,col.key)" link type="success" :icon="Check" :disabled="editBusy" :aria-label="'保存'+col.label+' '+row.name" title="保存（Enter）" @click="saveInline(row,col.key)"/></div>
+  <el-table-column v-if="currentLevel!=='ad'" column-key="name" :width="width('name',250)" fixed><template #header><button class="sort-head" @click="cycleSort('name')">{{currentLevel==='search'?'用户搜索词':currentLevel==='negative'?'否定关键词 / 商品':currentLevel==='target'?'投放项':currentLevel==='placement'?'广告位':labels[currentLevel]+'名称'}}{{sortMark('name')}}</button><AdsColumnHelp :label="labels[currentLevel]||'名称'" :description="columnDescription('name',currentLevel)"/></template><template #default="{row}"><div class="name-cell"><el-button v-if="['campaign','adgroup'].includes(currentLevel)" link type="primary" @click="drill(row)">{{row.name}}</el-button><strong v-else>{{row.name}}</strong><el-button v-if="canEditAds && currentLevel==='campaign'" link :icon="EditPen" :aria-label="'编辑活动 '+row.name" :disabled="!canEditAds||row.state==='ARCHIVED'||editBusy" @click.stop="startCampaign(row)"/></div><div v-if="currentLevel==='search'&&row.existing_matches?.length" class="existing-matches"><el-tag v-for="m in row.existing_matches" :key="m" size="small">{{({EXACT:'已投精准',PHRASE:'已投词组',BROAD:'已投广泛'} as Record<string,string>)[m]}}</el-tag></div></template></el-table-column>
+  <el-table-column v-for="col in visibleColumns" :key="col.key" :column-key="col.key" :width="width(col.key,col.width)" :align="['money','number','percent','ratio','budget','default_bid','bid','adjustment','counts','suggestion'].includes(col.type)?'center':'left'"><template #header><button v-if="!['image','suggestion','counts','identifiers'].includes(col.type)" class="sort-head" :aria-label="col.label+'排序'" @click="cycleSort(col.key)">{{col.label}}{{sortMark(col.key)}}</button><span v-else>{{col.label}}</span><AdsColumnHelp :label="col.label" :description="columnHelp(col)"/><div v-if="col.type==='suggestion'" class="suggest-header"><span>平日</span><el-button link :icon="Refresh" aria-label="刷新建议竞价" :loading="suggestLoading" @click.stop="refreshSuggestions"/></div></template><template #default="{row}">
+   <div v-if="['budget','default_bid','bid'].includes(col.type)" class="inline-price" @keydown.capture="inlineEnter(row,col.key,$event)"><el-input-number :model-value="inlineValue(row,col.key)" @update:model-value="(v:any)=>changeInline(row,col.key,v)" :min="0.01" :precision="2" :step="0.01" controls-position="right" :disabled="!canEditAds||row.state==='ARCHIVED'||editBusy" :placeholder="col.type==='bid'&&row.bid==null?'未同步':undefined" :aria-label="col.label+' '+row.name"/><span v-if="col.type==='bid'&&row.bid_inherited&&!dirtyInline(row,col.key)&&!editBusy" class="inherited-bid" title="未单独设置竞价，使用所属广告组的默认竞价；修改后将设置独立竞价。">广告组默认</span><AdsRecentChange :change="row.recent_changes?.[col.key==='budget'?'dailyBudget':col.key==='default_bid'?'defaultBid':col.key]" :currency="row.currency"/><el-button v-if="canEditAds && dirtyInline(row,col.key)" link type="success" :icon="Check" :disabled="editBusy" :aria-label="'保存'+col.label+' '+row.name" title="保存（Enter）" @click="saveInline(row,col.key)"/></div>
    <div v-else-if="col.type==='suggestion'" class="bid-suggestion"><template v-if="row.suggestion"><el-tooltip :content="'更新于 '+time(row.suggestion.fetched_at)"><span>{{Number(row.suggestion.mid).toFixed(2)}} <span class="muted">({{Number(row.suggestion.low).toFixed(2)}}–{{Number(row.suggestion.high).toFixed(2)}})</span></span></el-tooltip><el-dropdown trigger="click" @command="(key:string)=>applySuggestion(row,key)" :disabled="!canEditAds||row.state==='ARCHIVED'||editBusy"><el-button size="small" :disabled="!canEditAds||row.state==='ARCHIVED'||editBusy">应用⌄</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item v-for="(label,key) in {mid:'建议',low:'最低',high:'最高'}" :key="key" :command="key">{{label}}：{{money(row.suggestion[key],row.currency)}}</el-dropdown-item></el-dropdown-menu></template></el-dropdown></template><span v-else class="muted">—</span></div>
    <div v-else-if="col.type==='adjustment'" class="inline-price" @keydown.capture="inlineEnter(row,'adjustment',$event)"><el-input-number :model-value="inlineValue(row,'adjustment')" @update:model-value="(v:any)=>changeInline(row,'adjustment',v)" :min="0" :max="900" :precision="0" controls-position="right" :disabled="!canEditAds||row.state==='ARCHIVED'||editBusy"/><span>%</span><el-button v-if="dirtyInline(row,'adjustment')" link :icon="Check" @click="quickEdit(row,row.placement_field,inlineValue(row,'adjustment'))"/></div>
    <el-button v-else-if="col.key==='campaign_name'&&row.campaign_id" link type="primary" @click="openEntity('campaign',{id:row.campaign_id,name:row.campaign_name,profile_id:row.profile_id})">{{row.campaign_name}}</el-button>
    <el-button v-else-if="col.key==='adgroup_name'&&row.adgroup_id" link type="primary" @click="openEntity('adgroup',{id:row.adgroup_id,name:row.adgroup_name,profile_id:row.profile_id},{id:row.campaign_id,name:row.campaign_name})">{{row.adgroup_name}}</el-button>
    <el-tooltip v-else-if="col.key==='stock_total'" :content="'FBA可售 '+number(row.available)+' + 接收中 '+number(row.receiving)+' + 入库中 '+number(row.inbound)+'；更新 '+time(row.inventory_synced_at)"><span>{{number(row.stock_total)}}</span></el-tooltip>
    <span v-else-if="col.type==='counts'">{{row.target_count}} / {{row.product_count}}</span>
-   <template v-else-if="col.type==='identifiers'"><strong>{{row.asin||'—'}}</strong><div class="cell-sub">{{row.sku||'—'}}</div><div class="cell-sub">{{row.fnsku||'—'}}</div></template>
+   <template v-else-if="col.type==='identifiers'"><strong>{{row.asin||'—'}}</strong><div class="cell-sub">{{row.sku||'—'}}</div><div class="product-name">{{row.product_name||'未关联标品'}}</div></template>
+   <AdsProductImage v-else-if="col.type==='negative_image'&&row.asin" :profile-id="row.profile_id" :asin="row.asin"/>
    <el-image v-else-if="col.type==='image'&&row.image" :src="row.image" fit="contain" style="width:48px;height:48px"/>
-   <span v-else-if="col.key.toLowerCase().includes('servingstatus')" class="serving-status"><template v-for="(status,i) in statusItems(row,col)" :key="i"><span v-if="i" class="status-separator">；</span><span :class="'serving-status--'+status.tone">{{status.label}}</span></template></span>
+   <span v-else-if="col.key.toLowerCase().includes('servingstatus')" :title="col.key==='servingStatus'&&row.serving_status_inherited?(row.serving_status_source==='campaign'?'受所属广告活动限制':'受所属广告组限制')+' · 状态更新时间：'+time(row.serving_status_at):undefined" class="serving-status"><template v-for="(status,i) in statusItems(row,col)" :key="i"><span v-if="i" class="status-separator">；</span><span :class="'serving-status--'+status.tone">{{status.label}}</span></template></span>
    <span v-else :title="cellText(row,col)">{{cellText(row,col)}}</span>
   </template></el-table-column>
-  <el-table-column v-if="canEditAds && currentLevel==='search'" column-key="actions" label="操作" :width="width('actions',115)" fixed="right"><template #header><span>操作</span><AdsColumnHelp label="操作" :description="columnDescription('actions')"/></template><template #default="{row}"><el-button link type="primary" @click="startNegative(row)">添加否定</el-button></template></el-table-column>
+  <el-table-column v-if="can('advertising.logs')&&currentLevel!=='search'" column-key="actions" label="操作" :width="width('actions',115)" fixed="right"><template #default="{row}"><el-button link type="primary" @click="logRow={...row,profile_id:row.profile_id||profile}">查看日志</el-button></template></el-table-column>
+  <el-table-column v-if="canEditAds && currentLevel==='search'" column-key="actions" label="操作" :width="width('actions',170)" fixed="right"><template #header><span>操作</span><AdsColumnHelp label="操作" :description="columnDescription('actions')"/></template><template #default="{row}"><el-button link type="primary" @click="openSearchAction('keyword',row)">添加关键词</el-button><el-button link type="primary" @click="openSearchAction('negative',row)">添加否定</el-button></template></el-table-column>
   <template #empty><el-empty :description="currentLevel==='search'&&!data.metrics_ready?'尚未同步该时段的搜索词报表':'没有匹配的记录'"/></template>
  </el-table>
  <div class="ads-results-footer">
  <div class="table-footer"><AppPagination v-model:current-page="page" :total="data.total||0" @change="load" v-model:page-size="pageSize"/></div></div></section>
- <el-dialog v-model="bulkOpen" :title="bulkMode==='state'?'批量调整活动状态':'批量调整每日预算'" width="850px" :close-on-click-modal="false" :close-on-press-escape="!bulkBusy" :show-close="!bulkBusy">
- <p>已选择 {{bulkRows.length}} 个广告活动</p><el-alert v-if="bulkError" :title="bulkError" type="error" :closable="false"/>
- <el-form v-if="bulkStage==='form'" label-position="top"><el-form-item v-if="bulkMode==='state'" label="统一调整为"><el-radio-group v-model="bulkState"><el-radio value="ENABLED">开启</el-radio><el-radio value="PAUSED">暂停</el-radio></el-radio-group></el-form-item><template v-else><el-form-item v-for="code in bulkCurrencies" :key="code" :label="'每日预算（'+code+'）'"><el-input-number v-model="bulkBudgets[code]" :min="0.01" :precision="2" :step="0.01" :aria-label="'批量预算 '+code"/></el-form-item><p class="muted">所选活动按各自币种统一设置每日预算。</p></template></el-form>
- <template v-else><p v-if="bulkStage==='preview'">{{bulkBusy?'正在读取最新设置…':`可提交 ${bulkReady.length} 项；无须修改或预览失败的项目不会提交。`}}</p><el-table :data="bulkRows" border max-height="430"><el-table-column prop="name" label="广告活动" min-width="190"/><el-table-column prop="country" label="国家" width="75"/><el-table-column label="修改前" width="110"><template #default="{row}">{{bulkValue(row,row.before)}}</template></el-table-column><el-table-column label="修改后" width="110"><template #default="{row}">{{bulkValue(row,row.after)}}</template></el-table-column><el-table-column label="处理结果" min-width="190"><template #default="{row}"><span :class="row.status==='succeeded'?'serving-status--success':['failed','unknown','preview_failed'].includes(row.status)?'serving-status--danger':''">{{bulkStatusNames[row.status]||row.status}}</span><div class="cell-sub">{{row.message}}</div></template></el-table-column></el-table></template>
+ <el-dialog v-model="bulkOpen" :title="bulkMode==='state'?'批量调整状态':bulkMode==='bid'?'批量调整竞价':'批量调整每日预算'" width="850px" :close-on-click-modal="false" :close-on-press-escape="!bulkBusy" :show-close="!bulkBusy">
+ <p>已选择 {{bulkRows.length}} 个{{currentLevel==='target'?'投放项':'广告活动'}}</p><el-alert v-if="bulkError" :title="bulkError" type="error" :closable="false"/>
+ <el-form v-if="bulkStage==='form'" label-position="top"><el-form-item v-if="bulkMode==='state'" label="统一调整为"><el-radio-group v-model="bulkState"><el-radio value="ENABLED">开启</el-radio><el-radio value="PAUSED">暂停</el-radio><el-radio value="ARCHIVED">归档</el-radio></el-radio-group><p v-if="bulkState==='ARCHIVED'" class="serving-status--danger">归档后无法撤回，也不能重新开启。</p></el-form-item><template v-else><el-form-item label="调整方式"><el-radio-group v-model="bulkAdjustment"><el-radio value="fixed">固定金额</el-radio><el-radio value="increase">提高百分比</el-radio><el-radio value="decrease">降低百分比</el-radio></el-radio-group></el-form-item><template v-if="bulkAdjustment==='fixed'"><el-form-item v-for="code in bulkCurrencies" :key="code" :label="(bulkMode==='bid'?'竞价':'每日预算')+'（'+code+'）'"><el-input-number v-model="bulkBudgets[code]" :min="0.01" :max="bulkMode==='bid'?10000:1000000000" :precision="2" :step="0.01" :aria-label="(bulkMode==='bid'?'批量竞价 ':'批量预算 ')+code"/></el-form-item></template><el-form-item v-else label="调整幅度"><el-input-number v-model="bulkPercent" :min="0.01" :max="bulkAdjustment==='decrease'?99.99:10000" :precision="2" :step="1" aria-label="批量调整百分比"/><span> %</span></el-form-item><p class="muted">{{bulkAdjustment==='fixed'?'按各自币种统一设置金额。':'按每项从亚马逊读取的当前金额分别计算，四舍五入保留两位小数。'}}<template v-if="bulkMode==='bid'">未单独设置竞价的投放项按广告组默认竞价计算，提交后设为独立竞价。</template></p></template></el-form>
+ <template v-else><p v-if="bulkStage==='preview'">{{bulkBusy?'正在读取最新设置…':`可提交 ${bulkReady.length} 项；无须修改或预览失败的项目不会提交。`}}</p><el-table :data="bulkRows" border max-height="430"><el-table-column prop="name" :label="currentLevel==='target'?'投放项':'广告活动'" min-width="190"/><el-table-column prop="country" label="国家" width="75"/><el-table-column label="修改前" width="110" :align="bulkMode==='state'?'left':'center'"><template #default="{row}">{{bulkValue(row,row.before)}}</template></el-table-column><el-table-column label="修改后" width="110" :align="bulkMode==='state'?'left':'center'"><template #default="{row}">{{bulkValue(row,row.after)}}</template></el-table-column><el-table-column label="处理结果" min-width="190"><template #default="{row}"><span :class="row.status==='succeeded'?'serving-status--success':['failed','unknown','preview_failed'].includes(row.status)?'serving-status--danger':''">{{bulkStatusNames[row.status]||row.status}}</span><div class="cell-sub">{{row.message}}</div></template></el-table-column></el-table></template>
  <template #footer><el-button :disabled="bulkBusy" @click="bulkOpen=false">{{bulkStage==='done'?'关闭':'取消'}}</el-button><el-button v-if="bulkStage==='preview'" :disabled="bulkBusy" @click="bulkStage='form'">返回编辑</el-button><el-button v-if="bulkStage==='form'" type="primary" :loading="bulkBusy" @click="previewBulk">预览修改</el-button><el-button v-else-if="bulkStage==='preview'" type="primary" :loading="bulkBusy" :disabled="bulkBusy||!bulkReady.length" @click="confirmBulk">确认提交 {{bulkReady.length}} 项</el-button></template>
  </el-dialog>
  <el-dialog v-model="editOpen" :title="isCreate?'新增否定投放':'编辑广告设置'" :width="editKind==='campaign'?'760px':'620px'" top="6vh" :close-on-click-modal="false" :close-on-press-escape="!editBusy" :show-close="!editBusy"><p><b>{{editRow?.name}}</b> · {{editRow?.store||store}} / {{editRow?.country||country}}</p><el-alert v-if="editError" :title="editError" type="error" :closable="false" show-icon/>
- <template v-if="!previewData"><el-form label-position="top" class="edit-form"><template v-if="isCreate"><el-form-item label="否定类型"><el-radio-group v-model="editKind"><el-radio-button value="negative_keyword">否定关键词</el-radio-button><el-radio-button value="negative_target">否定商品</el-radio-button></el-radio-group></el-form-item><template v-if="editKind==='negative_keyword'"><el-form-item label="否定关键词"><el-input v-model="editForm.keywordText" maxlength="250"/></el-form-item><el-form-item label="否定方式"><el-select v-model="editForm.matchType"><el-option label="否定精准" value="NEGATIVE_EXACT"/><el-option label="否定词组" value="NEGATIVE_PHRASE"/></el-select></el-form-item></template><el-form-item v-else label="商品ASIN"><el-input v-model="editForm.asin" maxlength="10"/></el-form-item></template><template v-else-if="editKind==='campaign'"><template v-if="campaignSettings">
+ <template v-if="!previewData"><el-form label-position="top" class="edit-form"><template v-if="isCreate"><el-form-item label="否定类型"><el-radio-group v-model="editKind"><el-radio-button value="negative_keyword">否定关键词</el-radio-button><el-radio-button value="negative_target">否定商品</el-radio-button></el-radio-group></el-form-item><template v-if="editKind==='negative_keyword'"><el-form-item label="否定关键词"><el-input v-model="editForm.keywordText" maxlength="250"/></el-form-item><el-form-item label="否定方式"><el-select v-model="editForm.matchType"><el-option label="否定精准" value="NEGATIVE_EXACT"/><el-option label="否定词组" value="NEGATIVE_PHRASE"/></el-select></el-form-item></template><el-form-item v-else label="商品ASIN"><el-input v-model="editForm.asin" maxlength="10"/><AdsProductImage v-if="/^[A-Z0-9]{10}$/i.test(editForm.asin||'')" :profile-id="editRow?.profile_id||profile" :asin="editForm.asin"/></el-form-item></template><template v-else-if="editKind==='campaign'"><template v-if="campaignSettings">
  <el-alert v-for="w in campaignSettings.warnings" :key="w" :title="w" type="warning" :closable="false"/>
  <el-form-item label="活动名称"><el-input v-model="editForm.name" maxlength="250"/></el-form-item>
  <el-form-item label="状态"><el-radio-group v-model="editForm.state"><el-radio value="ENABLED">开启</el-radio><el-radio value="PAUSED">暂停</el-radio></el-radio-group></el-form-item>
@@ -384,12 +415,14 @@ const placementRows=computed(()=>data.value.rows.flatMap((r:any)=>{const raw=r.r
 </div>
 </template>
 <style scoped>
+.report-freshness{margin:0;padding:8px 16px;font-size:13px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .advertising-panel{display:flex;flex-direction:column;min-height:calc(100dvh - 46px)}
 .advertising-panel>.results{overflow:visible;display:flex;flex-direction:column;flex:1;margin-bottom:0}
 .advertising-panel>.results>.el-table{flex:0 0 auto}
 .advertising-panel>.results>.ads-results-footer{margin-top:auto;flex-shrink:0;background:white}.ads-results-footer .table-footer{padding:12px;justify-content:flex-end}
 .advertising-panel>.results>.ads-filters,.advertising-panel>.performance{flex-shrink:0}
 
+.existing-matches{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
 .ads-table :deep(th .cell){border-right:2px solid #d5e1d9}.ads-table :deep(.el-table__cell){border-right-color:#edf2ef}.resize-hint{font-size:11px;align-self:center}.suggest-header{display:flex;gap:10px;align-items:center;font-size:12px}.bid-suggestion{display:flex;align-items:center;gap:8px;white-space:nowrap}.bid-suggestion :deep(.el-button){white-space:nowrap}.result-actions{flex-wrap:wrap}
 
 .state-control{display:flex;align-items:center;gap:3px;flex-wrap:nowrap}.state-control :deep(.el-switch){flex-shrink:0}
@@ -401,13 +434,14 @@ const placementRows=computed(()=>data.value.rows.flatMap((r:any)=>{const raw=r.r
 
 .ads-filters{flex-wrap:nowrap;overflow-x:auto;align-items:center}.ads-filters>.el-select{width:110px;min-width:110px;flex:0 0 110px}.ads-filters>.el-input{width:200px;min-width:160px;flex:0 1 200px}.ads-filters :deep(.el-date-editor){width:250px;min-width:250px;flex:0 0 250px}.ads-filters>.el-button{flex-shrink:0;margin-left:0}
 
-.serving-status{font-weight:500}.serving-status--success{color:#20745f}.serving-status--danger{color:#c03639}.serving-status--warning{color:#a86412}.serving-status--muted,.status-separator{color:#727a82}
+.inherited-bid{font-size:11px;color:#7b8f87;white-space:nowrap}.product-name{margin-top:5px;line-height:1.45}.serving-status{font-weight:500}.serving-status--success{color:#20745f}.serving-status--danger{color:#c03639}.serving-status--warning{color:#a86412}.serving-status--muted,.status-separator{color:#727a82}
 
 .chart-tooltip i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px}.selection-count{font-size:12px;align-self:center;white-space:nowrap;flex-shrink:0;color:#72877c}.ads-breadcrumb{background:#fff;font-size:var(--el-font-size-base)}.ads-sections :deep(.el-radio-button:focus-visible){outline:2px solid var(--el-color-primary);outline-offset:2px}
 @media(max-width:800px){.ads-sections{padding-left:18px;padding-right:18px}}
 .results>.ads-table{overflow:visible}.results>.ads-table :deep(.el-table__inner-wrapper){overflow:visible}.results>.ads-table :deep(.el-table__header-wrapper){position:sticky;top:var(--ads-sticky-top,103px);z-index:901;background:#f7faf8;box-shadow:0 2px 4px #183d2910}
 </style>
 <style scoped>
+
 .budget-status{white-space:nowrap;flex-shrink:0}.results>.ads-filters{position:sticky;top:46px;z-index:902;background:white;border-bottom:1px solid #e7eeea}
 .results>.ads-table{overflow:visible}.results>.ads-table :deep(.el-table__inner-wrapper){overflow:visible}.results>.ads-table :deep(.el-table__header-wrapper){position:sticky;top:var(--ads-sticky-top,103px);z-index:901;background:#f7faf8;box-shadow:0 2px 4px #183d2910}
 </style>

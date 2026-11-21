@@ -105,18 +105,24 @@ def image_file(name:str):
  return FileResponse(path,media_type='image/webp')
 
 @router.get('')
-def products(q:str='',supplier:str='',archived:bool=False,unlinked:bool=False,review:bool=False,page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):
+def products(q:str='',supplier:str='',archived:bool=False,unlinked:bool=False,review:bool=False,no_cost:bool=False,no_freight:bool=False,no_supplier:bool=False,page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):
  with Session() as db:
   conditions=[Product.archived==int(archived)]
   if q:conditions.append(or_(Product.code.ilike(pattern(q),escape='\\'),Product.name.ilike(pattern(q),escape='\\'),cast(Product.source['normalization']['aliases'],Text).ilike(pattern(q),escape='\\')))
   if review:conditions.append(or_(func.jsonb_array_length(func.coalesce(Product.source['normalization']['review_notes'],text("'[]'::jsonb")))>0,*[and_(Product.source['packaging_import']['conflicts'].contains([k]),getattr(Product,k).is_(None)) for k in PACK_FIELDS]))
+  if no_cost:conditions.append(or_(Product.cost_cny.is_(None),Product.cost_cny==0))
+  if no_freight:
+   uk=func.coalesce(Product.freight_uk_cny,func.round(Product.gross_weight_g/1000*15,4),0)
+   eu=func.coalesce(Product.freight_eu_cny,func.round(Product.gross_weight_g/1000*20,4),0)
+   conditions.append(or_(uk<=0,eu<=0))
+  if no_supplier:conditions.append(and_(func.trim(Product.primary_supplier)=='',Product.suppliers==[]))
   if supplier:conditions.append(Product.suppliers.contains([supplier]))
   links=select(ProductLink.product_id,func.count().label('n')).group_by(ProductLink.product_id).subquery()
   if unlinked:conditions.append(~exists(select(ProductLink.listing_pk).where(ProductLink.product_id==Product.id)))
   total=db.scalar(select(func.count()).select_from(Product).where(*conditions))
   rows=db.execute(select(Product,func.coalesce(links.c.n,0)).outerjoin(links,links.c.product_id==Product.id).where(*conditions).order_by(Product.id.desc()).offset((page-1)*page_size).limit(page_size)).all()
-  images=product_images(db,[p for p,n in rows])
-  return {'rows':[dict(data(p),linked_count=n,image_url=images.get(p.id)) for p,n in rows],'total':total,'active_count':db.scalar(select(func.count()).select_from(Product).where(Product.archived==0)),'unlinked_listings':db.scalar(select(func.count()).select_from(Listing).where(~exists(select(ProductLink.listing_pk).where(ProductLink.listing_pk==Listing.id))))}
+  images=product_images(db,[p for p,n in rows]);creators=product_creators(db,[p for p,n in rows])
+  return {'rows':[dict(data(p),created_by=creators.get(p.id,''),linked_count=n,image_url=images.get(p.id)) for p,n in rows],'total':total,'active_count':db.scalar(select(func.count()).select_from(Product).where(Product.archived==0)),'unlinked_listings':db.scalar(select(func.count()).select_from(Listing).where(~exists(select(ProductLink.listing_pk).where(ProductLink.listing_pk==Listing.id))))}
 @router.get('/options')
 def options():
  with Session() as db:
@@ -151,7 +157,7 @@ def create(body:ProductBody):
     for kind in ('declaration','clearance'):
      if kind not in body.model_fields_set:values.pop(kind,None)
    validate_link(db,values)
-   ensure_suppliers(db,body.suppliers);p=Product(**values);db.add(p);db.flush();audit(db,'product_create',p.id,body.model_dump(mode='json'));pk=p.id
+   ensure_suppliers(db,body.suppliers);p=Product(**values,source={'created_by':(principal.get() or {}).get('username','')});db.add(p);db.flush();audit(db,'product_create',p.id,body.model_dump(mode='json'));pk=p.id
  except IntegrityError:raise HTTPException(409,'标品编码已存在（含回收站），请使用其他编码或恢复原标品') from None
  return {'id':pk}
 @router.get('/listing-link/{listing_id}')
@@ -161,6 +167,74 @@ def listing_link(listing_id:int):
   if not row:raise HTTPException(404,'Listing 不存在或没有店铺权限')
   link=db.get(ProductLink,listing_id);p=db.get(Product,link.product_id) if link else None
   return {'listing_id':row.id,'sku':row.sku,'store':row.store,'marketplace':row.marketplace,'product':data(p) if p else None}
+PRODUCT_ACTIONS=['product_create','product_update','product_archive','product_restore','product_import','product_normalize','product_merge','product_packaging_import','product_customs_update','product_bulk_update']
+def product_creators(db,rows):
+ result={p.id:str(p.source.get('created_by') or p.source.get('creator') or '') for p in rows}
+ ids={str(p.id):p.id for p in rows if not result[p.id]}
+ if ids:
+  for e in db.scalars(select(AccessAudit).where(AccessAudit.target.in_(ids),AccessAudit.action.in_(['product_create','product_import'])).order_by(AccessAudit.id)):
+   if not result[ids[e.target]]:result[ids[e.target]]=e.actor
+ return result
+
+class BulkItem(BaseModel):
+ model_config=ConfigDict(extra='forbid')
+ id:int=Field(gt=0)
+ revision:int=Field(ge=1)
+class BulkProduct(BaseModel):
+ model_config=ConfigDict(extra='forbid',str_strip_whitespace=True)
+ items:list[BulkItem]=Field(min_length=1,max_length=100)
+ kind:Literal['supplier','packaging','weight','cost']
+ supplier:str|None=Field(default=None,min_length=1,max_length=500)
+ package_length_cm:Decimal|None=Field(default=None,gt=0,max_digits=14,decimal_places=4)
+ package_width_cm:Decimal|None=Field(default=None,gt=0,max_digits=14,decimal_places=4)
+ package_height_cm:Decimal|None=Field(default=None,gt=0,max_digits=14,decimal_places=4)
+ gross_weight_g:Decimal|None=Field(default=None,gt=0,max_digits=14,decimal_places=4)
+ cost_cny:Decimal|None=Field(default=None,ge=0,max_digits=18,decimal_places=4)
+ recalculate_freight:bool=True
+ @model_validator(mode='after')
+ def check_fields(self):
+  wanted={'supplier':{'supplier'},'packaging':set(PACK_FIELDS[:3]),'weight':{'gross_weight_g'},'cost':{'cost_cny'}}[self.kind]
+  if any(getattr(self,k) is None for k in wanted):raise ValueError('请填写完整修改内容')
+  allowed=wanted|{'kind','items'}|({'recalculate_freight'} if self.kind=='weight' else set())
+  if self.model_fields_set-allowed:raise ValueError('只能提交当前选择的修改项')
+  if len({x.id for x in self.items})!=len(self.items):raise ValueError('请勿重复选择产品')
+  return self
+
+@router.post('/bulk')
+def bulk_update(b:BulkProduct):
+ require_admin()
+ with Session.begin() as db:
+  if b.kind=='supplier':
+   from .product_data_models import Supplier
+   if not db.scalar(select(Supplier.id).where(Supplier.name==b.supplier)) and not db.scalar(select(Product.id).where(Product.suppliers.contains([b.supplier])).limit(1)):raise HTTPException(422,'供应商不存在，请从列表重新选择')
+  for item in sorted(b.items,key=lambda x:x.id):
+   p=locked(db,item.id)
+   if p.archived or p.revision!=item.revision:raise HTTPException(409,'部分产品已修改或移入回收站，请刷新后重试；本批次未保存')
+   if b.kind=='supplier':values={'primary_supplier':b.supplier,'suppliers':list(dict.fromkeys([b.supplier,*p.suppliers]))}
+   elif b.kind=='packaging':values={k:getattr(b,k) for k in PACK_FIELDS[:3]}
+   elif b.kind=='cost':values={'cost_cny':b.cost_cny}
+   else:
+    values={'gross_weight_g':b.gross_weight_g}
+    if b.recalculate_freight:values.update(freight_uk_cny=None,freight_eu_cny=None)
+   encode=lambda v:str(v) if isinstance(v,Decimal) else v
+   old={k:encode(getattr(p,k)) for k in values};after={k:encode(v) for k,v in values.items()}
+   if old==after:continue
+   if b.kind=='weight':
+    from .product_costs import freight
+    old.update(freight_uk_effective=encode(freight(p,'UK')),freight_eu_effective=encode(freight(p,'DE')))
+   for k,v in values.items():setattr(p,k,v)
+   if b.kind=='weight':after.update(freight_uk_effective=encode(freight(p,'UK')),freight_eu_effective=encode(freight(p,'DE')))
+   p.revision+=1;p.updated_at=now();audit(db,'product_bulk_update',p.id,{'kind':b.kind,'before':old,'after':after,'recalculate_freight':b.recalculate_freight if b.kind=='weight' else False})
+ return {'updated':len(b.items)}
+
+@router.get('/{pk}/logs')
+def product_logs(pk:int,page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):
+ with Session() as db:
+  if not db.get(Product,pk):raise HTTPException(404,'标品不存在')
+  conditions=[AccessAudit.target==str(pk),AccessAudit.action.in_(PRODUCT_ACTIONS)]
+  events=db.scalars(select(AccessAudit).where(*conditions).order_by(AccessAudit.id.desc()).offset((page-1)*page_size).limit(page_size))
+  return {'rows':[{'action':e.action,'actor':e.actor,'at':e.created_at,'detail':e.detail} for e in events],'total':db.scalar(select(func.count()).select_from(AccessAudit).where(*conditions))}
+
 @router.get('/{pk}')
 def detail(pk:int):
  with Session() as db:
@@ -168,8 +242,8 @@ def detail(pk:int):
   if not p:raise HTTPException(404,'标品不存在')
   history=[]
   if (principal.get() or {}).get('is_admin'):
-   history=[{'action':e.action,'actor':e.actor,'at':e.created_at,'detail':e.detail} for e in db.scalars(select(AccessAudit).where(AccessAudit.target==str(pk),AccessAudit.action.in_(['product_create','product_update','product_archive','product_restore','product_import','product_normalize','product_merge','product_packaging_import','product_customs_update'])).order_by(AccessAudit.id.desc()).limit(30))]
-  return dict(data(p),image_url=product_images(db,[p]).get(p.id),source=p.source,history=history)
+   history=[{'action':e.action,'actor':e.actor,'at':e.created_at,'detail':e.detail} for e in db.scalars(select(AccessAudit).where(AccessAudit.target==str(pk),AccessAudit.action.in_(PRODUCT_ACTIONS)).order_by(AccessAudit.id.desc()).limit(30))]
+  return dict(data(p),created_by=product_creators(db,[p]).get(p.id,''),image_url=product_images(db,[p]).get(p.id),source=p.source,history=history)
 @router.post('/{pk}')
 def update(pk:int,body:ProductBody):
  require_admin()

@@ -114,7 +114,7 @@ def sales(db,row,jobs,at,totals=None):
     # Incremental scans extend a known history window, but cannot prove earlier order coverage.
     intervals=sorted(history+[(j.start_at,j.end_at) for j in relevant if j.mode=='incremental'])
     def covered(start,end):
-        cursors=[b for a,b in history if a<=start<=b]
+        cursors=[b for a,b in history if a<=start]
         if not cursors:return False
         cursor=max(cursors)
         # Sorted intervals need a single pass; repeated fixed-point scans were quadratic.
@@ -124,7 +124,7 @@ def sales(db,row,jobs,at,totals=None):
             if cursor>=end:return True
         return cursor>=end
     sums=totals if totals is not None else db.execute(select(*[func.coalesce(func.sum(case(( (Order.purchased_at>=a)&(Order.purchased_at<b),Item.quantity),else_=0)),0) for a,b in periods.values()]).select_from(Item).join(Order).where(Order.store==row.store,Order.marketplace==row.marketplace,Item.sku==row.sku,Item.asin==row.asin,Order.status.notin_(['CANCELLED','CANCELED']),Order.purchased_at>=periods['30'][0],Order.purchased_at<at)).one()
-    return {'values':{key:{'units':int(sums[i]),'complete':covered(a,min(b,through)) if through and through>=a else False} for i,(key,(a,b)) in enumerate(periods.items())},'timezone':str(tz),'as_of':through,'stale':not through or at-through>timedelta(minutes=30),'note':'按站点当地日期与下单件数统计，排除取消订单；7/14/30 天不含今天，非净退款销量。'}
+    return {'values':{key:{'units':int(sums[i]),'complete':covered(a,min(b,through) if key=='today' else b) if through and through>=a else False} for i,(key,(a,b)) in enumerate(periods.items())},'timezone':str(tz),'as_of':through,'stale':not through or at-through>timedelta(minutes=30),'note':'按站点当地日期与下单件数统计，排除取消订单；7/14/30 天不含今天，非净退款销量。'}
 
 def inventory_info(db,row):
     inv=db.get(ListingInventory,row.id)

@@ -46,6 +46,8 @@ class Row(Body):
  box_key:str=Field(min_length=1,max_length=100)
  sources:list[str]=Field(min_length=1,max_length=2000)
  sku:str=Field(max_length=10000)
+ asins:list[str]=Field(default_factory=list,max_length=2000)
+ asins_complete:bool=False
  fnsku:str=Field(default='',max_length=2000)
  code:str=Field(default='',max_length=2000)
  profile_id:int|None=None
@@ -79,6 +81,11 @@ class Row(Body):
  box_width_cm:Decimal|None=Field(default=None,gt=0,max_digits=18,decimal_places=4)
  box_height_cm:Decimal|None=Field(default=None,gt=0,max_digits=18,decimal_places=4)
  box_weight_kg:Decimal|None=Field(default=None,gt=0,max_digits=18,decimal_places=4)
+ @field_validator('asins')
+ @classmethod
+ def valid_asins(cls,v):
+  if any(not re.fullmatch(r'[A-Z0-9]{10}',x) for x in v):raise ValueError('ASIN格式不正确')
+  return list(dict.fromkeys(v))
  @field_validator('clearance_url','image_url')
  @classmethod
  def safe_link(cls,v,info):
@@ -127,6 +134,7 @@ def apply_reference(items,header):
 
 def row_data(source):
  data={k:v for k,v in source.items() if k in Row.model_fields}
+ if 'asins_complete' not in data:data['asins_complete']=bool(data.get('asins'))
  for key in ('box_length_cm','box_width_cm','box_height_cm','box_weight_kg','weight_g'):
   if data.get(key) is not None:data[key]=str(Decimal(str(data[key])).quantize(Decimal('.0001')))
  return Row.model_validate(data).model_dump(mode='json')
@@ -139,6 +147,8 @@ def merge_rows(rows):
  sources=[s for r in rows for s in r['sources']]
  if len(sources)!=len(set(sources)):raise HTTPException(422,'不能重复合并同一条明细')
  out=deepcopy(rows[0]);out.update(row_id=str(uuid4()),sources=sources,quantity=sum(r['quantity'] for r in rows),total_quantity=sum(r['total_quantity'] for r in rows))
+ out['asins']=list(dict.fromkeys(a for r in rows for a in r.get('asins',[])))
+ out['asins_complete']=all(r.get('asins_complete') and r.get('asins') for r in rows)
  for key in ('sku','fnsku','code'):out[key]=' / '.join(dict.fromkeys(r[key] for r in rows if r.get(key)))
  return out
 @router.post('/merge')
@@ -202,7 +212,19 @@ def packing_token(data):return hashlib.sha256(json.dumps(data['sources'],sort_ke
 
 def result(d,detail=True):
  data=snapshot(d);out={'id':d.id,'store':d.store,'shipment_id':d.shipment_id,'revision':d.revision,'actor':d.actor,'created_at':d.created_at,'updated_at':d.updated_at,**summary(data['header'],data['items'],data['packing_total'])}
- if detail:out.update(header=data['header'],items=data['items'],packing_token=packing_token(data))
+ if detail:
+  missing=[r for r in data['items'] if not r.get('asins_complete')]
+  if missing:
+   from .models import Listing
+   skus={data['sources'][key]['sku'] for r in missing for key in r['sources'] if key in data['sources']}
+   market='UK' if data['header']['country']=='GB' else data['header']['country']
+   with Session() as db:
+    found=dict(db.execute(select(Listing.sku,Listing.asin).where(Listing.store==d.store,Listing.marketplace==market,Listing.sku.in_(skus))).all())
+   for r in missing:
+    values=[found.get(data['sources'].get(key,{}).get('sku')) for key in r['sources']]
+    r['asins_complete']=bool(values) and all(re.fullmatch(r'[A-Z0-9]{10}',a or '') for a in values)
+    r['asins']=list(dict.fromkeys([*r.get('asins',[]),*(a for a in values if re.fullmatch(r'[A-Z0-9]{10}',a or ''))]))
+  out.update(header=data['header'],items=data['items'],packing_token=packing_token(data))
  return out
 @router.get('/prepare')
 def prepare(store:str,shipment_id:str):

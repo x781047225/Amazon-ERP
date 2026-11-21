@@ -106,3 +106,13 @@
  .sidebar.mobile-open{visibility:visible;transform:translateX(0)}
  .sidebar-backdrop{display:block;position:fixed;inset:0;z-index:30;border:0;background:#0006}
 }
+
+/* Numeric columns share centered values and headers across the ERP. */
+.el-table .is-center > .cell .inline-price,
+.el-table .is-center > .cell .bid-suggestion,
+.el-table .is-center > .cell .suggest-header,
+.el-table .is-center > .cell .metric-heading,
+.el-table .is-center > .cell .metric-values,
+.el-table .is-center > .cell .invoice-column-head {justify-content:center}
+.el-table .is-center > .cell .metric-stack,
+.el-table .is-center > .cell .planned-quantity {align-items:center;text-align:center}

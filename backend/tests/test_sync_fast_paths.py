@@ -75,3 +75,21 @@ def test_incremental_shipments_skip_closed_details_but_keep_quantities():
  with Session() as db:
   old=db.scalar(select(Shipment).where(Shipment.shipment_id=='FBADEMO1'));assert old.status=='CLOSED' and old.received==8
   assert db.get(FbaJob,jid).status=='succeeded'
+
+def test_delta_confirms_unchanged_listing_stock_and_keeps_identity_guard(stock_env,monkeypatch):
+ from app.models import Listing,ListingInventory
+ old_at=now()-timedelta(hours=2)
+ with Session.begin() as db:
+  state=db.get(StoreInventory,'DemoStoreB')
+  rows=[{'sellerSku':'same','fnSku':'old-fn','asin':'OLD','inventoryDetails':{'fulfillableQuantity':99}}, {'sellerSku':'same','fnSku':'right-fn','asin':'ASIN-DEMO','inventoryDetails':{'fulfillableQuantity':3}}]
+  state.data={'DE':{**stock_env,'rows':rows}}
+  good=Listing(store='DemoStoreB',marketplace='DE',sku='same',asin='ASIN-DEMO',product_type='PRODUCT',attributes={},fingerprint='demo',listing_data={'summaries':[{'marketplaceId':'market','fnSku':'right-fn'}]})
+  wrong=Listing(store='DemoStoreB',marketplace='DE',sku='missing',asin='ASIN-DEMO',product_type='PRODUCT',attributes={},fingerprint='demo',listing_data={})
+  db.add_all([good,wrong]);db.flush();ids=(good.id,wrong.id)
+  db.add_all([ListingInventory(listing_pk=good.id,data=rows[1],synced_at=old_at),ListingInventory(listing_pk=wrong.id,data=rows[1],synced_at=old_at)])
+ monkeypatch.setattr(stock,'fetch_market',Mock(return_value=[]))
+ stock.run('DemoStoreB')
+ with Session() as db:
+  good,wrong=[db.get(ListingInventory,i) for i in ids]
+  assert good.synced_at>old_at and good.data['inventoryDetails']['fulfillableQuantity']==3
+  assert wrong.synced_at==old_at

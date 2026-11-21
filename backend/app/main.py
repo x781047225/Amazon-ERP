@@ -204,7 +204,7 @@ app.include_router(store_inventory_router)
 from .products import router as products_router
 app.include_router(products_router)
 from .advertising import router as advertising_router
-from . import ads_workspace, ads_creation, ads_live, ads_strategies
+from . import ads_workspace, ads_creation, ads_live, ads_strategies, ads_search_actions
 app.include_router(advertising_router)
 from .warehouse import router as warehouse_router
 app.include_router(warehouse_router)
@@ -231,6 +231,7 @@ DIST=ROOT/'frontend/dist'
 if DIST.exists():
     app.mount('/assets',StaticFiles(directory=DIST/'assets'),name='assets')
 @app.get('/')
+@app.get('/help',include_in_schema=False)
 def index():
     if not (DIST/'index.html').exists():raise HTTPException(503,'前端尚未构建')
     return FileResponse(DIST/'index.html')

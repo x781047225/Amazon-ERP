@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {computed,ref,watch,onUnmounted} from 'vue'
-const props=defineProps<{change?:{before:unknown,after:unknown,changed_at:string},currency?:string,field?:string}>()
+const props=defineProps<{change?:{before:unknown,after:unknown,changed_at:string,actor?:string},currency?:string,field?:string}>()
 const visible=ref(false)
 let expiryTimer:ReturnType<typeof setTimeout>|undefined
 watch(()=>props.change,change=>{
@@ -19,7 +19,7 @@ function value(v:unknown){
 </script>
 <template>
  <el-tooltip v-if="visible&&change" placement="top">
-  <template #content><div>最近修改：{{time}}（北京时间）</div><div>从 {{value(change.before)}} 修改为 {{value(change.after)}}</div></template>
+  <template #content><div>修改人：{{change.actor||'历史记录未保存'}}</div><div>最近修改：{{time}}（北京时间）</div><div>从 {{value(change.before)}} 修改为 {{value(change.after)}}</div></template>
   <span class="ads-recent-change" tabindex="0" aria-label="最近24小时内已修改">*</span>
  </el-tooltip>
 </template>

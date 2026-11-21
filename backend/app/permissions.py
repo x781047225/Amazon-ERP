@@ -58,7 +58,7 @@ def route_keys(path,query,body,method):
   return ['settings.mail'] if path.split('/')[3] in ('messages','message') else ['settings.stores']
  if path.startswith('/api/todos'):return ['todos']
  if path.startswith('/api/users'):return ['users.users']
- if path=='/api/integration/capabilities':return ['listing','orders','fba.list','warehouse','products.products','products.suppliers','products.declaration','products.clearance','settings.clearance','settings.declaration']
+ if path=='/api/integration/capabilities':return ['procurement.plans','procurement.orders','shipping','listing','orders','fba.list','warehouse','products.products','products.suppliers','products.declaration','products.clearance','settings.clearance','settings.declaration']
  if path.startswith('/api/customs/profiles'):return ['products.products','products.declaration','products.clearance','fba.invoice'] if read else ['products.declaration','products.clearance']
  if path.startswith('/api/customs/choices'):return ['products.products','products.declaration','products.clearance']
  if path.startswith('/api/customs/'):
@@ -121,6 +121,9 @@ def route_keys(path,query,body,method):
  if path.startswith('/api/finance/jobs'):return ['finance.jobs']
  if path.startswith('/api/finance'):return ['finance.records']
  if path.startswith('/api/advertising'):
+  if path.endswith('/entity-logs'):return ['advertising.logs']
+  if path.endswith('/create/options'):return ['advertising','advertising.search']
+  if '/search-actions/' in path:return ['advertising.search','advertising.negative'] if path.endswith('/product-image') else ['advertising.search']
   kind=query.get('level') or body.get('level') or body.get('kind')
   if path.endswith('/edit/confirm') or path.endswith('/create/confirm'):
    from .models import AdsChange
@@ -141,6 +144,7 @@ def enforce(request,p,body):
  action='view' if request.method in ('GET','HEAD','OPTIONS') else 'operate'
  # Read-only calculations still use POST, but do not modify business records.
  if path.endswith('/income-estimate') or path.endswith('/estimate') or path in ('/api/advertising/column-widths','/api/advertising/column-preferences','/api/advertising/campaign-refresh','/api/advertising/target-suggestions/ensure'):action='view'
+ if path.endswith('/search-actions/suggestions'):action='view'
  if path.startswith('/api/todos/') and path.endswith('/seen'):action='view'
  if keys==[]:return False
  if keys is None:
@@ -151,6 +155,8 @@ def enforce(request,p,body):
 
 def token_route(method,path):
  from .integration_products import TOKEN_ROUTES
+ from .integration_planning import TOKEN_ROUTES as PLANNING_ROUTES
+ TOKEN_ROUTES=TOKEN_ROUTES|PLANNING_ROUTES
  if any(method==verb and re.fullmatch(pattern,path) for verb,pattern in TOKEN_ROUTES):return True
  if method=='GET':return bool(re.fullmatch(r'/api/(integration/capabilities|listings(?:/\d+)?|fba/shipments(?:/\d+)?|orders(?:/\d+)?|warehouse/stock)',path))
  return method=='POST' and bool(re.fullmatch(r'/api/listings/\d+/(preview|submit|submissions/[0-9a-f-]+/verify)',path))

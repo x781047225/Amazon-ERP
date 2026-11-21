@@ -2,7 +2,7 @@
 from datetime import timedelta,datetime
 from fastapi import APIRouter
 from pydantic import BaseModel
-from sqlalchemy import select,text
+from sqlalchemy import select,text,update
 from .models import StoreInventory,Listing,ListingInventory,now
 from .db import Session
 from .settings import MARKETS
@@ -64,13 +64,21 @@ def run(store):
      merged.update({(x['sellerSku'],x['fnSku']):x for x in changes});rows=list(merged.values())
     with Session.begin() as db:
      r=db.get(StoreInventory,store);r.data={**r.data,market:{'rows':rows,'synced_at':now().isoformat(),'watermark':requested_at.isoformat(),'full_synced_at':previous['full_synced_at'] if incremental else requested_at.isoformat()}}
-     by_sku={x['sellerSku']:x for x in changes}
+     # The merged snapshot confirms unchanged stock too; a delta is not a stale item.
+     by_sku={}
+     for x in rows:by_sku.setdefault(x['sellerSku'],[]).append(x)
+     existing={v.listing_pk:v for v in db.scalars(select(ListingInventory).join(Listing,Listing.id==ListingInventory.listing_pk).where(Listing.store==store,Listing.marketplace==market))}
+     confirmed=[];confirmed_at=now()
      for listing in db.scalars(select(Listing).where(Listing.store==store,Listing.marketplace==market)):
-      data=by_sku.get(listing.sku)
-      if data and data.get('asin')==listing.asin:
-       inv=db.get(ListingInventory,listing.id)
+      fnsku=next((x.get('fnSku') for x in (listing.listing_data or {}).get('summaries',[]) if x.get('marketplaceId')==MARKETS[market]),None)
+      candidates=[x for x in by_sku.get(listing.sku,[]) if x.get('asin')==listing.asin and (not fnsku or x.get('fnSku')==fnsku)]
+      data=candidates[0] if len(candidates)==1 else None
+      if data:
+       inv=existing.get(listing.id)
+       if inv and inv.data==data and not inv.error:confirmed.append(listing.id);continue
        if not inv:inv=ListingInventory(listing_pk=listing.id);db.add(inv)
-       inv.data=data;inv.synced_at=now();inv.error=None
+       inv.data=data;inv.synced_at=confirmed_at;inv.error=None
+     if confirmed:db.execute(update(ListingInventory).where(ListingInventory.listing_pk.in_(confirmed)).values(synced_at=confirmed_at))
 
    except AmazonError as e:
     errors.append(market+': '+str(e))

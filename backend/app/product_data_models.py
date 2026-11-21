@@ -1,9 +1,11 @@
-from sqlalchemy import Column,Integer,String,Text,DateTime,UniqueConstraint,Numeric,Boolean
+from sqlalchemy import Column,Integer,String,Text,DateTime,UniqueConstraint,Numeric,Boolean,CheckConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from .db import Base
 from .models import now
 class Supplier(Base):
  __tablename__='product_suppliers'
+ shipping_days=Column(Integer,nullable=True)
+ __table_args__=(CheckConstraint('shipping_days IN (1,3,5,7,14,30)',name='ck_supplier_shipping_days'),)
  id=Column(Integer,primary_key=True)
  name=Column(String(500),nullable=False,unique=True)
  shop_url=Column(Text,nullable=False,default='')

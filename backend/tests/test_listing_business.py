@@ -122,3 +122,16 @@ def test_sales_coverage_chained_intervals_preserves_gaps_and_history_anchor():
         jobs=[job(0.5,0),job(32,2,'history')]
         assert not b.sales(db,row,jobs,AT,[0]*5)['values']['30']['complete']
         assert not b.sales(db,row,[job(100,0)],AT,[0]*5)['values']['30']['complete']
+
+def test_recent_periods_use_connected_history_before_the_period():
+    pk=seed(priced())
+    def job(start,end,mode):
+        return SimpleNamespace(store='DemoStoreA',markets=['DE'],mode=mode,start_at=AT-timedelta(days=start),end_at=AT-timedelta(days=end))
+    with Session() as db:
+        row=db.get(Listing,pk)
+        jobs=[job(40,10,'history'),job(10,2,'incremental'),job(2,0,'incremental')]
+        assert all(v['complete'] for v in b.sales(db,row,jobs,AT,[0]*5)['values'].values())
+        jobs=[job(40,10,'history'),job(9,0,'incremental')]
+        assert not b.sales(db,row,jobs,AT,[0]*5)['values']['7']['complete']
+        jobs=[job(40,0.8,'history')]
+        assert not b.sales(db,row,jobs,AT,[0]*5)['values']['yesterday']['complete']

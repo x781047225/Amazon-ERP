@@ -34,7 +34,7 @@ async function commit(){if(busy.value||!preview.value)return;busy.value=true;err
    <template v-if="true"><TableReset table-key="PurchasePlanImport/table-1"/><el-table data-width-key="PurchasePlanImport/table-1" @header-dragend="(width: number, _old: number, column: any) => tableWidths.resize('table-1', width, column)" @header-contextmenu="(column: any, event: MouseEvent) => tableWidths.resetColumn('table-1', column, event)" :data="preview.rows" max-height="480" border>
     <el-table-column :column-key="'column-1'" :width="tableWidths.width('table-1', 'column-1', undefined)" label="标品编码 / 品名" min-width="260"><template #default="{row}"><strong>{{row.code}}</strong><div>{{row.name}}</div></template></el-table-column>
     <el-table-column :column-key="'store'" prop="store" label="店铺" :width="tableWidths.width('table-1', 'store', '110')"/><el-table-column :column-key="'warehouse_name'" prop="warehouse_name" label="仓库" :width="tableWidths.width('table-1', 'warehouse_name', '120')"/>
-    <el-table-column :column-key="'column-4:' + (name)" v-for="(name,i) in routes" :key="name" :label="name" :width="tableWidths.width('table-1', 'column-4:' + (name), '100')" align="right"><template #default="{row}">{{row.quantities[i]||'—'}}</template></el-table-column>
+    <el-table-column :column-key="'column-4:' + (name)" v-for="(name,i) in routes" :key="name" :label="name" :width="tableWidths.width('table-1', 'column-4:' + (name), '100')" align="center"><template #default="{row}">{{row.quantities[i]||'—'}}</template></el-table-column>
    </el-table></template>
   </div>
   <template #footer><el-button :disabled="busy" @click="visible=false">取消</el-button><el-button type="primary" :disabled="!preview" :loading="busy" @click="commit">确认生成一个采购批次</el-button></template>

@@ -1,0 +1,14 @@
+<script setup lang="ts">
+import {adDisplayData} from './adDisplay'
+import {ref,onMounted} from 'vue'
+import {api} from './session'
+const props=defineProps<{row:any}>();const emit=defineEmits(['close'])
+const rows=ref<any[]>([]),page=ref(1),total=ref(0),busy=ref(false),error=ref('')
+const names:Record<string,string>={state:'开关状态',bid:'竞价',defaultBid:'默认竞价',dailyBudget:'每日预算',name:'名称',keywordText:'关键词',matchType:'匹配类型',asin:'ASIN',placementTop:'首页首位竞价调整',placementRest:'搜索其余位置竞价调整',placementProduct:'商品页竞价调整',note:'备注',biddingStrategy:'竞价策略',endDate:'结束日期',portfolioId:'广告组合',budget:'预算',expression:'投放条件'}
+const statuses:Record<string,string>={sending:'提交中／待核对',succeeded:'成功',failed:'失败',unknown:'结果待核对'}
+function value(v:any){if(v==null)return '未设置';if(typeof v==='string')return ({ENABLED:'开启',PAUSED:'暂停',ARCHIVED:'归档',EXACT:'精准匹配',PHRASE:'词组匹配',BROAD:'广泛匹配',NEGATIVE_EXACT:'否定精准',NEGATIVE_PHRASE:'否定词组'} as Record<string,string>)[v]||v;return typeof v==='object'?JSON.stringify(adDisplayData(v)):String(v)}
+async function load(){busy.value=true;error.value='';try{const d=await api('/advertising/entity-logs?'+new URLSearchParams({profile_id:props.row.profile_id,kind:props.row.kind,entity_id:props.row.id,field:props.row.placement_field||'',page:String(page.value),page_size:'20'}));rows.value=d.rows;total.value=d.total}catch(e){error.value=(e as Error).message}finally{busy.value=false}}
+onMounted(load)
+</script>
+<template><el-dialog :model-value="true" :title="'操作日志 · '+(row.name||row.asin||row.sku)" width="min(1050px,94vw)" @close="emit('close')"><p>{{row.store}} / {{row.country}} · 仅显示当前{{row.placement_field?'广告位':'对象'}}的操作记录（包含今天）</p><el-alert v-if="error" :title="error" type="error" :closable="false"/><el-table :data="rows" border v-loading="busy" max-height="520"><el-table-column label="时间" width="175"><template #default="{row:log}">{{new Date(log.created_at).toLocaleString('zh-CN',{hour12:false})}}</template></el-table-column><el-table-column prop="actor" label="修改人" width="120"/><el-table-column label="修改内容" min-width="360"><template #default="{row:log}"><div v-for="(v,k) in adDisplayData(log.changes)" :key="k" class="log-change"><b>{{names[k]||k}}</b><span>{{value(log.before?.[k])}} → {{value(v)}}</span></div></template></el-table-column><el-table-column label="提交结果" width="120"><template #default="{row:log}">{{statuses[log.status]||log.status}}</template></el-table-column><el-table-column prop="error" label="说明" min-width="150"/><template #empty>此对象暂无操作记录</template></el-table><div class="footer"><el-pagination v-model:current-page="page" :total="total" :page-size="20" layout="total,prev,pager,next" @current-change="load"/><el-button @click="emit('close')">关闭</el-button></div></el-dialog></template>
+<style scoped>.footer{display:flex;justify-content:space-between;align-items:center;margin-top:16px}.log-change{display:flex;flex-direction:column;gap:3px;margin:6px 0}.log-change b{font-size:12px}</style>

@@ -53,8 +53,8 @@ onUnmounted(()=>{disposed=true;seq++;clearInterval(timer)})
   <el-table-column label="状态更新时间（北京时间）" width="220"><template #default="{row}">{{time(row.updated_at)}}</template></el-table-column>
   <el-table-column label="站点" width="100"><template #default="{row}">{{labels[row.marketplace]||row.marketplace}}</template></el-table-column>
   <el-table-column label="状态" width="145"><template #default="{row}"><el-tag :type="row.status==='succeeded'?'success':['failed','unknown'].includes(row.status)?'warning':'info'">{{states[row.status]||row.status}}</el-tag></template></el-table-column>
-  <el-table-column label="预计付款金额" width="170"><template #default="{row}">{{row.amount==null?'—':row.amount+' '+(row.currency||'')}}</template></el-table-column>
-  <el-table-column label="尝试次数" width="100" prop="attempts"/>
+  <el-table-column label="预计付款金额" width="170" align="center"><template #default="{row}">{{row.amount==null?'—':row.amount+' '+(row.currency||'')}}</template></el-table-column>
+  <el-table-column label="尝试次数" align="center" width="100" prop="attempts"/>
   <el-table-column label="下次重试时间（北京时间）" width="220"><template #default="{row}">{{row.status==='retry_wait'?time(row.next_attempt_at):'—'}}</template></el-table-column>
   <el-table-column prop="message" label="处理结果" min-width="280"/>
   <el-table-column prop="reference" label="提款申请编号" min-width="200"/>
