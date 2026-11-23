@@ -9,6 +9,7 @@ from .permissions import can
 from .listing_editor import FIELDS
 from .listing_api import EditorPreview,ConfirmSubmission
 from .integration_products import TOOLS as PRODUCT_TOOLS, DESTRUCTIVE
+from .integration_documents import TOOLS as DOCUMENT_TOOLS
 from .integration_planning import TOOLS as PLANNING_TOOLS, DESTRUCTIVE as PLANNING_DESTRUCTIVE
 DESTRUCTIVE=DESTRUCTIVE|PLANNING_DESTRUCTIVE
 router=APIRouter()
@@ -24,14 +25,15 @@ TOOLS=[
  ('listing_preview','预览基本信息修改并校验，changes 只使用详情中可编辑字段；不会正式提交修改','listing','operate','POST','/api/listings/{id}/preview',obj({'id':ID,'body':EditorPreview.model_json_schema()},['id','body'])),
  ('listing_submit','用户明确确认预览后提交基本信息修改；相同 preview_id 不重复提交','listing','operate','POST','/api/listings/{id}/submit',obj({'id':ID,'body':ConfirmSubmission.model_json_schema()},['id','body'])),
  ('listing_verify','核对已提交的 Listing 修改','listing','operate','POST','/api/listings/{id}/submissions/{submission_id}/verify',obj({'id':ID,'submission_id':{'type':'string','format':'uuid'}},['id','submission_id'])),
- ('shipments_query','查询 FBA 货件','fba.list','view','GET','/api/fba/shipments',QUERY),
- ('shipment_detail','查询货件详情','fba.list','view','GET','/api/fba/shipments/{id}',obj({'id':ID},['id'])),
+ ('shipments_query','查询 FBA 货件列表，支持货件号精确筛选、SKU/货件名称搜索、店铺、站点、状态、发货日期、未接收及异常筛选。返回目的仓、发货/接收/未接收数量、物流信息和 SKU 预览。','fba.list','view','GET','/api/fba/shipments',obj({**QUERY['properties'],'shipment_id':S,'status':S,'dispatch_start':{'type':'string','format':'date'},'dispatch_end':{'type':'string','format':'date'},'remaining_only':{'type':'boolean'},'anomaly_only':{'type':'boolean'},'logistics_pending':{'type':'boolean'}})),
+ ('shipment_detail','按货件列表返回的数字 id 查询货件详情，包含状态、目的国/仓库、日期、发货/接收/未接收数量、物流跟踪信息、完整 SKU/FNSKU 明细和历史快照','fba.list','view','GET','/api/fba/shipments/{id}',obj({'id':ID},['id'])),
  ('orders_query','查询订单，支持时间与状态筛选','orders','view','GET','/api/orders',obj({**QUERY['properties'],'start':{'type':'string','format':'date'},'end':{'type':'string','format':'date'},'status':S})),
  ('order_detail','查询订单详情','orders','view','GET','/api/orders/{id}',obj({'id':ID},['id'])),
  ('inventory_query','查询授权本地仓库可用、锁定和待到货库存','warehouse','view','GET','/api/warehouse/stock',obj({'q':S,'warehouse_id':ID,'page':PAGE,'page_size':{'type':'integer','minimum':1,'maximum':100}})),
  ('fba_inventory_query','查询 Listing 中的 FBA 库存，按授权店铺限制。inventory 中 available=可售、receiving=接收中、transfer=待调仓（亚马逊仓间调拨）、processing=入库中、shipped=在途；null 表示尚未获取，0 表示已确认零库存；listing_status 为中文状态（在售/停售/已删除/缺货/未知），listing_status_detail 提供判断依据和时间，仅 can_update=true 时可据此更新外部表格，false 应保留原状态。不可购买不等于缺货或删除；目前无删除通知接入，无明确 DELETED 证据时不判已删除。','listing','view','GET','/api/listings',QUERY)]
 TOOLS.extend(PRODUCT_TOOLS)
 TOOLS.extend(PLANNING_TOOLS)
+TOOLS.extend(DOCUMENT_TOOLS)
 def tool_allowed(p,key,action):
  return any(can(p,k,action) for k in (key if isinstance(key,tuple) else (key,)))
 

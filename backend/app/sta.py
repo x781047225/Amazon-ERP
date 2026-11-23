@@ -109,14 +109,14 @@ def address_data(a):return {'id':a.id,'store':a.store,'label':a.label,'country':
 @router.get('/addresses')
 def saved_addresses(store:str,country:str=''):
  require_store(store)
- with Session() as db:return [address_data(a) for a in db.scalars(select(ShippingAddress).where(ShippingAddress.store==store,*([ShippingAddress.country.in_([country,''])] if country else [])).order_by(ShippingAddress.country.desc(),ShippingAddress.id.desc()))]
+ with Session() as db:return [address_data(a) for a in db.scalars(select(ShippingAddress).where(ShippingAddress.store==store).order_by(ShippingAddress.id.desc()))]
 @router.post('/addresses')
 def save_address(b:SavedAddress):
  require_admin();require_store(b.store)
  with Session.begin() as db:
   a=db.get(ShippingAddress,b.id) if b.id else ShippingAddress(store=b.store)
   if not a or a.store!=b.store:raise HTTPException(404,'地址不存在')
-  a.label=b.label or (b.detail.city+' · '+b.detail.addressLine1)[:100];a.country=b.country;a.detail=b.detail.model_dump();db.add(a);db.flush()
+  a.label=b.label or (b.detail.city+' · '+b.detail.addressLine1)[:100];a.country='';a.detail=b.detail.model_dump();db.add(a);db.flush()
   return address_data(a)
 @router.post('/addresses/{address_id}/delete')
 def delete_address(address_id:int):

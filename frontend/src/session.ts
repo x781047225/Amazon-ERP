@@ -9,7 +9,7 @@ export async function api(path:string,body?:unknown,options?:{signal?:AbortSigna
  let data:any
  try{data=await r.json()}
  catch{throw new Error(r.status===401?'登录已过期，请重新登录。':`服务器暂未返回有效数据（HTTP ${r.status}），请稍后刷新；如持续出现，请检查服务和反向代理配置。`)}
- if(!r.ok)throw new Error(typeof data?.detail==='string'?data.detail:`请求未完成（HTTP ${r.status}），请稍后重试。`)
+ if(!r.ok)throw Object.assign(new Error(typeof data?.detail==='string'?data.detail:`请求未完成（HTTP ${r.status}），请稍后重试。`),{httpStatus:r.status})
  return data
 }
 

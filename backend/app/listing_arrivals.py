@@ -29,6 +29,16 @@ def candidates(db,row):
     identity=fnsku(row)
     return list(db.execute(q.where(ShipmentItem.fnsku==identity))) if identity else []
 
+def freshness_policy(db,store):
+    from .data_sync_models import DataSyncConfig
+    policies=db.info.setdefault('arrival_freshness_policies',{})
+    if store not in policies:
+        config=db.get(DataSyncConfig,(store,'shipments'))
+        interval=config.interval_minutes if config and config.enabled else None
+        # Allow a scheduled scan to finish; never treat a failed scan as fresh.
+        policies[store]={'sync_interval_minutes':interval,'freshness_window_minutes':interval+30 if interval else 30}
+    return policies[store]
+
 def arrival_info(db,row,at=None):
     at=at or now();cache=db.get(ArrivalCache,row.store);records=cache.data if cache else {}
     today=at.astimezone(ZoneInfo(ZONES[row.marketplace])).date()
@@ -69,7 +79,12 @@ def arrival_info(db,row,at=None):
     unresolved=unknown+overdue+unverified
     # Zero is meaningful only after a successful scan; absent FNSKU is never matched by SKU alone.
     ready=bool(cache and cache.synced_at and identity)
-    return {'values':totals if ready else {str(n):None for n in (15,30,60)},'later':later,'unknown':unknown,'overdue':overdue,'unverified':unverified,'partial':not ready or bool(unresolved) or bool(cache and cache.error),'details':details,'synced_at':cache.synced_at if cache else None,'status':cache.status if cache else 'idle','error':cache.error if cache else None,'stale':not ready or any(at-t>timedelta(minutes=30) for t in timestamps) or (bool(cache and cache.synced_at) and at-cache.synced_at>timedelta(minutes=30)),'timezone':ZONES[row.marketplace]}
+    policy=freshness_policy(db,row.store);limit=timedelta(minutes=policy['freshness_window_minutes']);reasons=[]
+    if not ready:reasons.append('not_ready')
+    if any(at-t>limit for t in timestamps):reasons.append('shipment_data_expired')
+    if cache and cache.synced_at and at-cache.synced_at>limit:reasons.append('scan_expired')
+    if cache and (cache.error or cache.status=='failed') or any(d.get('error') for d in details):reasons.append('sync_failed')
+    return {'values':totals if ready else {str(n):None for n in (15,30,60)},'later':later,'unknown':unknown,'overdue':overdue,'unverified':unverified,'partial':not ready or bool(unresolved) or bool(cache and cache.error),'details':details,'synced_at':cache.synced_at if cache else None,'status':cache.status if cache else 'idle','error':cache.error if cache else None,'stale':bool(reasons),'stale_reasons':reasons,**policy,'timezone':ZONES[row.marketplace]}
 
 def queue_refresh():
     from .fba_tasks import arrival_task

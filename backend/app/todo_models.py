@@ -10,6 +10,8 @@ class Todo(Base):
     __tablename__='todos'
     id=Column(Integer,primary_key=True)
     title=Column(String(200),nullable=False)
+    store=Column(String(40),nullable=False,default='',server_default='')
+    marketplace=Column(String(10),nullable=False,default='',server_default='')
     description=Column(Text,nullable=False)
     instructions=Column(Text,nullable=False)
     creator_id=Column(Integer,ForeignKey('users.id'),nullable=False)

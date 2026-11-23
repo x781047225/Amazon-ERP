@@ -2,12 +2,13 @@
 from datetime import datetime,timedelta
 from typing import Literal
 from uuid import uuid4
-import io,warnings
+import io,warnings,json
 from fastapi import APIRouter,HTTPException,Query,Request,Response
 from pydantic import BaseModel,Field,field_validator
 from sqlalchemy import select,func,or_,and_,delete
 from PIL import Image,ImageOps
-from .auth import principal
+from .auth import principal,allowed_stores,require_store
+from .settings import ORDER_MARKETS
 from .permissions import can,grants
 from .db import Session
 from .models import User,now
@@ -42,7 +43,7 @@ def eligible(u):
 def image_json(i):return {'id':i.id,'url':'/api/todos/images/'+i.id}
 
 def pack(row,names,uid,ccs):
-    return {**{k:getattr(row,k) for k in ('id','title','creator_id','assignee_id','deadline','status','version','created_at','updated_at','completed_at','cancelled_at','priority')},'creator':names.get(row.creator_id,'已停用用户'),'assignee':names.get(row.assignee_id,'已停用用户'),'cc_users':[{'id':c.user_id,'username':names.get(c.user_id,'已停用用户')} for c in ccs],'unread':any(c.user_id==uid and c.seen_version<row.version for c in ccs) or (row.creator_id==uid and row.creator_seen<row.version) or (row.assignee_id==uid and row.assignee_seen<row.version),'overdue':row.status not in ('completed','cancelled') and row.deadline<now()}
+    return {**{k:getattr(row,k) for k in ('id','title','store','marketplace','creator_id','assignee_id','deadline','status','version','created_at','updated_at','completed_at','cancelled_at','priority')},'creator':names.get(row.creator_id,'已停用用户'),'assignee':names.get(row.assignee_id,'已停用用户'),'cc_users':[{'id':c.user_id,'username':names.get(c.user_id,'已停用用户')} for c in ccs],'unread':any(c.user_id==uid and c.seen_version<row.version for c in ccs) or (row.creator_id==uid and row.creator_seen<row.version) or (row.assignee_id==uid and row.assignee_seen<row.version),'overdue':row.status not in ('completed','cancelled') and row.deadline<now()}
 
 def bind_images(db,ids,row,event,uid):
     if len(ids)!=len(set(ids)):raise HTTPException(422,'图片重复')
@@ -52,6 +53,11 @@ def bind_images(db,ids,row,event,uid):
     for image in images:image.todo_id=row.id;image.event_id=event.id
 
 class NewTodo(BaseModel):
+    store:str=Field(default='',max_length=40)
+    marketplace:str=Field(default='',max_length=10)
+    @field_validator('store','marketplace',mode='before')
+    @classmethod
+    def optional_text(cls,v):return '' if v is None else v.strip() if isinstance(v,str) else v
     title:str=Field(min_length=1,max_length=200)
     description:str=Field(min_length=1,max_length=10000)
     instructions:str=Field(min_length=1,max_length=10000)
@@ -72,10 +78,17 @@ class NewTodo(BaseModel):
         return v
 
 class Version(BaseModel):version:int=Field(ge=1)
+class EditTodo(NewTodo,Version):pass
+
 class Action(Version):
     action:Literal['start','submit','return','approve','comment','cancel']
     note:str=Field(default='',max_length=10000)
     image_ids:list[str]=Field(default_factory=list,max_length=9)
+
+@router.get('/options')
+def options():
+    actor()
+    return {'stores':allowed_stores(),'marketplaces':list(ORDER_MARKETS)}
 
 @router.get('/users')
 def assignees():
@@ -90,8 +103,10 @@ def summary():
         return {'unread':count(unseen(uid)),'review':count(Todo.creator_id==uid,Todo.status=='review'),'pending':count(Todo.assignee_id==uid,Todo.status.in_(['pending','in_progress','returned'])),'overdue':count(Todo.status.notin_(['completed','cancelled']),Todo.deadline<now()),'initiated_unread':count(Todo.creator_id==uid,Todo.creator_seen<Todo.version),'assigned_unread':count(Todo.assignee_id==uid,Todo.assignee_seen<Todo.version),'copied_unread':count(copied(uid),unseen(uid))}
 
 @router.get('')
-def listing(view:Literal['initiated','assigned','copied','completed']='assigned',status:Literal['','pending','in_progress','review','returned','completed','cancelled','overdue']='',q:str=Query('',max_length=200),sort:Literal['priority_desc','deadline_desc','updated_desc']='priority_desc',page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100)):
+def listing(view:Literal['initiated','assigned','copied','completed']='assigned',status:Literal['','pending','in_progress','review','returned','completed','cancelled','overdue']='',q:str=Query('',max_length=200),sort:Literal['priority_desc','deadline_desc','updated_desc']='priority_desc',page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100),store:str=Query('',max_length=40)):
     uid=actor();filters=[Todo.creator_id==uid if view=='initiated' else Todo.assignee_id==uid if view=='assigned' else copied(uid) if view=='copied' else involved(uid)]
+    if store:
+        require_store(store);filters.append(Todo.store==store)
     if view=='completed':filters.append(Todo.status=='completed')
     if status=='overdue':filters.extend([Todo.status.notin_(['completed','cancelled']),Todo.deadline<now()])
     elif status:filters.append(Todo.status==status)
@@ -108,6 +123,8 @@ def listing(view:Literal['initiated','assigned','copied','completed']='assigned'
 @router.post('')
 def create(body:NewTodo):
     uid=actor()
+    if body.store:require_store(body.store)
+    if body.marketplace and body.marketplace not in ORDER_MARKETS:raise HTTPException(422,'请选择有效站点')
     if body.deadline<=now():raise HTTPException(422,'截止时间应晚于当前时间')
     with Session.begin() as db:
         user=db.get(User,body.assignee_id)
@@ -115,12 +132,53 @@ def create(body:NewTodo):
         if len(body.cc_user_ids)!=len(set(body.cc_user_ids)) or uid in body.cc_user_ids or user.id in body.cc_user_ids:raise HTTPException(422,'抄送人不能重复，也不能包含发起人或负责人')
         cc_users=list(db.scalars(select(User).where(User.id.in_(body.cc_user_ids))))
         if len(cc_users)!=len(body.cc_user_ids) or any(not eligible(u) for u in cc_users):raise HTTPException(422,'抄送人不存在、已停用或没有待办事项操作权限')
-        row=Todo(priority=body.priority,title=body.title,description=body.description,instructions=body.instructions,deadline=body.deadline,creator_id=uid,assignee_id=user.id,assignee_seen=1 if uid==user.id else 0)
+        row=Todo(store=body.store,marketplace=body.marketplace,priority=body.priority,title=body.title,description=body.description,instructions=body.instructions,deadline=body.deadline,creator_id=uid,assignee_id=user.id,assignee_seen=1 if uid==user.id else 0)
         db.add(row);db.flush()
         db.add_all([TodoCc(todo_id=row.id,user_id=u.id) for u in cc_users])
         event=TodoEvent(todo_id=row.id,actor_id=uid,action='create',status=row.status,note='创建待办')
         db.add(event);db.flush();bind_images(db,body.image_ids,row,event,uid)
         return {'id':row.id}
+
+@router.post('/{pk}/edit')
+def edit(pk:int,body:EditTodo):
+    uid=actor()
+    with Session.begin() as db:
+        row=get_task(db,pk,uid,True)
+        if row.creator_id!=uid:raise HTTPException(403,'只有发起人可以编辑待办')
+        if row.status in ('completed','cancelled'):raise HTTPException(409,'已完成或已撤销的待办不能编辑')
+        if row.version!=body.version:raise HTTPException(409,'待办已被修改，请重新打开编辑后核对')
+        if body.store:require_store(body.store)
+        if body.marketplace and body.marketplace not in ORDER_MARKETS:raise HTTPException(422,'请选择有效站点')
+        if body.deadline!=row.deadline and body.deadline<=now():raise HTTPException(422,'新的截止时间应晚于当前时间')
+        user=db.get(User,body.assignee_id)
+        if not user or not eligible(user):raise HTTPException(422,'负责人不存在、已停用或没有待办事项操作权限')
+        if len(body.cc_user_ids)!=len(set(body.cc_user_ids)) or uid in body.cc_user_ids or user.id in body.cc_user_ids:raise HTTPException(422,'抄送人不能重复，也不能包含发起人或负责人')
+        cc_users=list(db.scalars(select(User).where(User.id.in_(body.cc_user_ids))))
+        if len(cc_users)!=len(body.cc_user_ids) or any(not eligible(u) for u in cc_users):raise HTTPException(422,'抄送人不存在、已停用或没有待办事项操作权限')
+        old_ccs=list(db.scalars(select(TodoCc).where(TodoCc.todo_id==pk)))
+        fields={'title':'事项标题','store':'店铺','marketplace':'站点','description':'事件详情','instructions':'处理要求 / 验收标准','deadline':'截止时间','priority':'优先级','assignee_id':'负责人'}
+        changes=[]
+        for field,label in fields.items():
+            before=getattr(row,field);after=getattr(body,field)
+            if before!=after:changes.append({'field':field,'label':label,'before':before.isoformat() if isinstance(before,datetime) else before,'after':after.isoformat() if isinstance(after,datetime) else after})
+        if sorted(c.user_id for c in old_ccs)!=sorted(body.cc_user_ids):changes.append({'field':'cc_user_ids','label':'抄送人','before':[c.user_id for c in old_ccs],'after':body.cc_user_ids})
+        if not changes and not body.image_ids:return {'id':pk,'version':row.version,'notified':False,'unchanged':True}
+        started=row.status!='pending' or bool(db.scalar(select(TodoEvent.id).where(TodoEvent.todo_id==pk,TodoEvent.action.in_(['start','submit'])).limit(1)))
+        previous_version=row.version;previous_assignee=row.assignee_id
+        for field in fields:setattr(row,field,getattr(body,field))
+        for c in old_ccs:
+            if c.user_id not in body.cc_user_ids:db.delete(c)
+        old_ids={c.user_id for c in old_ccs}
+        for ccid in body.cc_user_ids:
+            if ccid not in old_ids:db.add(TodoCc(todo_id=pk,user_id=ccid))
+        row.version+=1;row.updated_at=now()
+        if previous_assignee!=row.assignee_id:row.assignee_seen=0
+        elif not started and row.assignee_seen==previous_version:row.assignee_seen=row.version
+        mark_seen(db,row,uid,row.version)
+        notified=(started or previous_assignee!=row.assignee_id) and row.assignee_id!=uid
+        event=TodoEvent(todo_id=pk,actor_id=uid,action='edit',status=row.status,note=json.dumps({'changes':changes,'notified':notified},ensure_ascii=False))
+        db.add(event);db.flush();bind_images(db,body.image_ids,row,event,uid)
+        return {'id':pk,'version':row.version,'notified':notified}
 
 @router.post('/images')
 async def upload(request:Request):
@@ -171,7 +229,21 @@ def detail(pk:int):
         ccs=list(db.scalars(select(TodoCc).where(TodoCc.todo_id==pk).order_by(TodoCc.user_id)))
         ids={row.creator_id,row.assignee_id,*[e.actor_id for e in events],*[c.user_id for c in ccs]};names=dict(db.execute(select(User.id,User.username).where(User.id.in_(ids))).all())
         images=list(db.scalars(select(TodoImage).where(TodoImage.todo_id==pk).order_by(TodoImage.created_at)))
-        return {**pack(row,names,uid,ccs),'description':row.description,'instructions':row.instructions,'events':[{'id':e.id,'action':e.action,'status':e.status,'actor_id':e.actor_id,'actor':names.get(e.actor_id,'已停用用户'),'note':e.note,'created_at':e.created_at,'images':[image_json(i) for i in images if i.event_id==e.id]} for e in events]}
+        initial={'description':row.description,'instructions':row.instructions};captured=set();edit_notes={}
+        for event in events:
+            if event.action!='edit':continue
+            data=json.loads(event.note);lines=[]
+            for change in data['changes']:
+                field=change['field']
+                if field in initial and field not in captured:initial[field]=change['before'];captured.add(field)
+                def display(value):
+                    if field=='assignee_id':return db.get(User,value).username if db.get(User,value) else '已停用用户'
+                    if field=='cc_user_ids':return '、'.join(db.get(User,i).username if db.get(User,i) else '已停用用户' for i in value) or '无'
+                    if field=='priority':return {1:'低',2:'普通',3:'高',4:'紧急'}.get(value,str(value))
+                    return str(value) if value not in ('',None) else '未填写'
+                lines.append(change['label']+'：'+display(change['before'])+' → '+display(change['after']))
+            edit_notes[event.id]='\n'.join(lines) or '补充图片'
+        return {**pack(row,names,uid,ccs),'initial_description':initial['description'],'initial_instructions':initial['instructions'],'description':row.description,'instructions':row.instructions,'events':[{'id':e.id,'action':e.action,'status':e.status,'actor_id':e.actor_id,'actor':names.get(e.actor_id,'已停用用户'),'note':edit_notes.get(e.id,e.note),'created_at':e.created_at,'images':[image_json(i) for i in images if i.event_id==e.id]} for e in events]}
 
 @router.post('/{pk}/seen')
 def seen(pk:int,body:Version):

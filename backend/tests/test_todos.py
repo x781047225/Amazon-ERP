@@ -24,7 +24,7 @@ def users(monkeypatch):
         for pk in (1,2):db.add(UserRole(user_id=pk,role_id=1))
     current={'id':1}
     def resolve(r):
-        return {'id':current['id'],'username':'demo-user-'+str(current['id']),'is_admin':current['id']==3,'stores':[],'permissions':current.get('permissions',['todos.view','todos.operate']),'warehouse_ids':[]}
+        return {'id':current['id'],'username':'demo-user-'+str(current['id']),'is_admin':current['id']==3,'stores':current.get('stores',[]),'permissions':current.get('permissions',['todos.view','todos.operate']),'warehouse_ids':[]}
     monkeypatch.setattr(auth,'resolve_session',resolve)
     return current
 
@@ -157,14 +157,16 @@ def test_migration_upgrade_and_downgrade(users):
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     spec2=importlib.util.spec_from_file_location('todo_cc_migration',Path(__file__).parents[1]/'migrations/versions/0045_todo_cc_priority.py')
     extra=importlib.util.module_from_spec(spec2);spec2.loader.exec_module(extra)
+    spec3=importlib.util.spec_from_file_location('todo_context_migration',Path(__file__).parents[1]/'migrations/versions/0058_todo_store_marketplace.py')
+    context_fields=importlib.util.module_from_spec(spec3);spec3.loader.exec_module(context_fields)
     with engine.begin() as conn:
         for table in (TodoCc.__table__,TodoImage.__table__,TodoEvent.__table__,Todo.__table__):table.drop(conn)
         with Operations.context(MigrationContext.configure(conn)):
-            module.upgrade();extra.upgrade()
+            module.upgrade();extra.upgrade();context_fields.upgrade()
             assert {'todo_cc','todos','todo_events','todo_images'}.issubset(inspect(conn).get_table_names())
-            extra.downgrade();module.downgrade()
+            context_fields.downgrade();extra.downgrade();module.downgrade()
             assert 'todos' not in inspect(conn).get_table_names()
-            module.upgrade();extra.upgrade()
+            module.upgrade();extra.upgrade();context_fields.upgrade()
     assert new().status_code==200
 
 
@@ -354,3 +356,125 @@ def test_completed_tab_includes_participants_only_and_excludes_review_cancelled(
  users['id']=1;action(other,'approve',2)
  users['id']=3
  assert client.get(BASE+'?view=completed').json()['total']==1
+
+
+def test_optional_store_marketplace_and_store_filter(users):
+    users['stores']=['DemoStoreA','DemoStoreB']
+    options=client.get(BASE+'/options').json()
+    assert set(options['stores'])=={'DemoStoreA','DemoStoreB'}
+    assert 'UK' in options['marketplaces'] and 'DE' in options['marketplaces']
+    blank=new().json()['id']
+    first=new(store='DemoStoreA',marketplace='UK').json()['id']
+    second=new(store='DemoStoreB',marketplace='DE').json()['id']
+    assert client.get(BASE+f'/{blank}').json()['store']==''
+    assert client.get(BASE+f'/{blank}').json()['marketplace']==''
+    detail=client.get(BASE+f'/{first}').json()
+    assert (detail['store'],detail['marketplace'])==('DemoStoreA','UK')
+    assert client.get(BASE+'?view=initiated').json()['total']==3
+    filtered=client.get(BASE+'?view=initiated&store=DemoStoreA').json()
+    assert [r['id'] for r in filtered['items']]==[first]
+    assert client.get(BASE+'?view=initiated&store=').json()['total']==3
+    assert new(store=None,marketplace=None).status_code==200
+    assert new(store='DemoStoreA').status_code==200
+    assert new(marketplace='DE').status_code==200
+    assert new(store='DemoStoreC',marketplace='UK').status_code==403
+    assert new(marketplace='invalid').status_code==422
+    assert client.get(BASE+'?view=initiated&store=DemoStoreC').status_code==403
+    users['id']=2
+    assert client.get(BASE+'?view=assigned&store=DemoStoreB').json()['items'][0]['id']==second
+    users['id']=3
+    assert client.get(BASE+'?view=initiated&store=DemoStoreA').json()['total']==0
+    assert client.get(BASE+f'/{first}').status_code==404
+
+
+def test_context_migration_preserves_existing_tasks(users):
+    import importlib.util
+    from pathlib import Path
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from app.db import engine
+    from sqlalchemy import text
+    pk=new().json()['id']
+    spec=importlib.util.spec_from_file_location('todo_context_upgrade',Path(__file__).parents[1]/'migrations/versions/0058_todo_store_marketplace.py')
+    migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
+    with engine.begin() as conn:
+        with Operations.context(MigrationContext.configure(conn)):
+            migration.downgrade()
+            migration.upgrade()
+        row=conn.execute(text('SELECT store, marketplace FROM todos WHERE id=:id'),{'id':pk}).one()
+        assert tuple(row)==('','')
+    assert client.get(BASE+f'/{pk}').json()['title']=='Investigate demo issue'
+
+
+def edit_task(pk,**changes):
+    detail=client.get(BASE+f'/{pk}').json()
+    data={k:detail[k] for k in ('title','description','instructions','store','marketplace','assignee_id','priority','deadline','version')}
+    data['cc_user_ids']=[c['id'] for c in detail['cc_users']]
+    data.update(changes)
+    return post(f'/{pk}/edit',data)
+
+
+def test_edit_pending_optional_context_and_history(users):
+    users['stores']=['DemoStoreA'];pk=new().json()['id']
+    users['id']=2;post(f'/{pk}/seen',{'version':1});users['id']=1
+    result=edit_task(pk,title='Updated title',description='Updated context',instructions='Updated expectations',store='DemoStoreA',marketplace='DE')
+    assert result.status_code==200 and not result.json()['notified']
+    detail=client.get(BASE+f'/{pk}').json()
+    assert detail['version']==2 and detail['status']=='pending'
+    assert detail['description']=='Updated context'
+    assert detail['initial_description']=='What happened'
+    assert detail['initial_instructions']=='Fix and show evidence'
+    assert detail['events'][-1]['action']=='edit'
+    assert 'What happened → Updated context' in detail['events'][-1]['note']
+    assert edit_task(pk).json()['unchanged']
+    assert edit_task(pk,version=1,title='stale').status_code==409
+    users['id']=2
+    assert client.get(BASE+'/summary').json()['assigned_unread']==0
+    assert edit_task(pk,title='Not creator').status_code==403
+
+
+def test_edit_after_started_notifies_assignee_and_preserves_workflow(users):
+    pk=new().json()['id'];users['id']=2
+    assert action(pk,'start',1).status_code==200
+    users['id']=1
+    result=edit_task(pk,instructions='New acceptance criteria')
+    assert result.status_code==200 and result.json()['notified']
+    users['id']=2
+    assert client.get(BASE+'/summary').json()['assigned_unread']==1
+    detail=client.get(BASE+f'/{pk}').json()
+    assert detail['status']=='in_progress' and detail['unread']
+    assert action(pk,'submit',2,'Stale result').status_code==409
+    post(f'/{pk}/seen',{'version':3})
+    assert client.get(BASE+'/summary').json()['assigned_unread']==0
+    assert action(pk,'submit',3,'Done').status_code==200
+    users['id']=1
+    assert edit_task(pk,title='Review clarification').json()['notified']
+    assert client.get(BASE+f'/{pk}').json()['status']=='review'
+    assert action(pk,'approve',5).status_code==200
+    assert edit_task(pk,title='Cannot edit completion').status_code==409
+    other=new().json()['id'];action(other,'cancel',1,'No longer required')
+    assert edit_task(other,title='Cannot edit cancellation').status_code==409
+
+
+def test_edit_validation_reassignment_and_images(users):
+    users['stores']=['DemoStoreA'];original=upload().json()['id'];pk=new(image_ids=[original]).json()['id']
+    assert edit_task(pk,store='DemoStoreB').status_code==403
+    assert edit_task(pk,marketplace='invalid').status_code==422
+    assert edit_task(pk,deadline=(now()-timedelta(days=1)).isoformat()).status_code==422
+    assert edit_task(pk,cc_user_ids=[2]).status_code==422
+    assert edit_task(pk,assignee_id=4).status_code==422
+    assert edit_task(pk,image_ids=[original]).status_code==422
+    assert client.get(BASE+f'/{pk}').json()['version']==1
+    extra=upload().json()['id']
+    assert edit_task(pk,assignee_id=3,cc_user_ids=[2],image_ids=[extra]).json()['notified']
+    detail=client.get(BASE+f'/{pk}').json()
+    assert detail['events'][0]['images'][0]['id']==original
+    assert detail['events'][-1]['images'][0]['id']==extra
+    assert 'demo-user-2 → demo-user-3' in detail['events'][-1]['note']
+    users['id']=3
+    assert client.get(BASE+'/summary').json()['assigned_unread']==1
+    users['id']=2
+    assert client.get(BASE+f'/{pk}').json()['unread']
+    assert edit_task(pk,title='CC cannot edit').status_code==403
+    users['id']=1;users['permissions']=['todos.view']
+    assert edit_task(pk,title='No write access').status_code==403

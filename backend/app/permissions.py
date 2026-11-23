@@ -58,7 +58,7 @@ def route_keys(path,query,body,method):
   return ['settings.mail'] if path.split('/')[3] in ('messages','message') else ['settings.stores']
  if path.startswith('/api/todos'):return ['todos']
  if path.startswith('/api/users'):return ['users.users']
- if path=='/api/integration/capabilities':return ['procurement.plans','procurement.orders','shipping','listing','orders','fba.list','warehouse','products.products','products.suppliers','products.declaration','products.clearance','settings.clearance','settings.declaration']
+ if path=='/api/integration/capabilities':return ['procurement.plans','procurement.orders','shipping','listing','orders','fba.list','fba.invoice','fba.declaration','warehouse','products.products','products.suppliers','products.declaration','products.clearance','settings.clearance','settings.declaration']
  if path.startswith('/api/customs/profiles'):return ['products.products','products.declaration','products.clearance','fba.invoice'] if read else ['products.declaration','products.clearance']
  if path.startswith('/api/customs/choices'):return ['products.products','products.declaration','products.clearance']
  if path.startswith('/api/customs/'):
@@ -85,6 +85,7 @@ def route_keys(path,query,body,method):
  if path.startswith('/api/sta/addresses'):return ['settings.addresses'] if not read else ['settings.addresses','fba.sta','shipping']
  if path.startswith('/api/sta'):return ['fba.sta','shipping']
  if path.startswith('/api/logistics/invoices'):return ['fba.invoice']
+ if path.startswith('/api/logistics/declarations'):return ['fba.declaration']
  if path.startswith('/api/logistics/'):
   leaf=path.split('/')[3]
   if leaf in ('options','channels'):return ['logistics.channels'] if not read else ['logistics.channels','logistics.settlements','logistics.invoice','logistics.declaration']
@@ -156,7 +157,8 @@ def enforce(request,p,body):
 def token_route(method,path):
  from .integration_products import TOKEN_ROUTES
  from .integration_planning import TOKEN_ROUTES as PLANNING_ROUTES
- TOKEN_ROUTES=TOKEN_ROUTES|PLANNING_ROUTES
+ from .integration_documents import TOKEN_ROUTES as DOCUMENT_ROUTES
+ TOKEN_ROUTES=TOKEN_ROUTES|PLANNING_ROUTES|DOCUMENT_ROUTES
  if any(method==verb and re.fullmatch(pattern,path) for verb,pattern in TOKEN_ROUTES):return True
  if method=='GET':return bool(re.fullmatch(r'/api/(integration/capabilities|listings(?:/\d+)?|fba/shipments(?:/\d+)?|orders(?:/\d+)?|warehouse/stock)',path))
  return method=='POST' and bool(re.fullmatch(r'/api/listings/\d+/(preview|submit|submissions/[0-9a-f-]+/verify)',path))

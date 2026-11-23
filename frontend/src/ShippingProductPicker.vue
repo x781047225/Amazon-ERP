@@ -4,7 +4,7 @@ import {ref,reactive,computed,watch,onMounted,onBeforeUnmount} from 'vue'
 import {api} from './session'
 import {useTableWidths} from './tableWidths'
 const widths=useTableWidths('ShippingProductPicker')
-const props=defineProps<{modelValue:any[],store:string,country:string,disabled:boolean,protectedIds?:number[]}>()
+const props=defineProps<{modelValue:any[],store:string,country:string,disabled:boolean,protectedIds?:number[],hideReset?:boolean}>()
 const emit=defineEmits(['update:modelValue','busy'])
 const rows=ref<any[]>([]),total=ref(0),page=ref(1),pageSize=ref(25),q=ref(''),loading=ref(false),error=ref(''),pending=ref(0)
 const picked=computed(()=>new Map(props.modelValue.map(i=>[i.product_id,i])))
@@ -20,7 +20,7 @@ onMounted(load)
 onBeforeUnmount(()=>{alive=false;generation++;context++})
 </script>
 <template><section class="product-picker">
-<div class="picker-toolbar"><el-input v-model="q" aria-label="搜索发货产品" placeholder="搜索标品编码 / 中文品名" clearable @keyup.enter="search"/><el-button @click="search">查询产品</el-button><span>已选 {{modelValue.length}} 款 · {{quantity}} 件</span><TableReset :table-key="'ShippingProductPicker/'+'products'"/></div>
+<div class="picker-toolbar"><el-input v-model="q" aria-label="搜索发货产品" placeholder="搜索标品编码 / 中文品名" clearable @keyup.enter="search"/><el-button @click="search">查询产品</el-button><span>已选 {{modelValue.length}} 款 · {{quantity}} 件</span><TableReset v-if="!hideReset" :table-key="'ShippingProductPicker/'+'products'"/></div>
 <el-alert v-if="error" :title="error" type="error" :closable="false"/>
 <template v-if="true"><el-table :data-width-key="'ShippingProductPicker/'+'products'"    :data="rows" row-key="id" v-loading="loading" max-height="430" border @header-dragend="(w:number,_old:number,c:any)=>widths.resize('products',w,c)">
 <el-table-column :column-key="'column-1'" :width="widths.width('products','column-1','48')" ><template #default="{row}"><el-checkbox :model-value="picked.has(row.id)" :disabled="disabled||!!protectedIds?.includes(row.id)" :aria-label="'选择'+row.code" @change="(v:any)=>toggle(row,!!v)"/></template></el-table-column>

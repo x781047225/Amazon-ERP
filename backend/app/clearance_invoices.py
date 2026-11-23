@@ -234,16 +234,21 @@ def prepare(store:str,shipment_id:str):
  data=build(store,shipment_id)
  return {'store':store,'shipment_id':shipment_id,'revision':None,'packing_token':packing_token(data),'header':data['header'],'items':data['items'],**summary(data['header'],data['items'],data['packing_total'])}
 @router.get('')
-def listing(q:str='',page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100)):
+def listing(q:str='',page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100),store:str='',shipment_id:str=''):
+ if store:require_store(store)
  with Session() as db:
   cond=[Document.store.in_(allowed_stores()),Document.kind=='invoice']
+  if store:cond.append(Document.store==store)
+  if shipment_id:cond.append(Document.shipment_id==shipment_id)
   if q:cond.append(Document.shipment_id.ilike(pattern(q),escape='\\'))
   rows=db.scalars(select(Document).options(defer(Document.content)).where(*cond).order_by(Document.updated_at.desc(),Document.id.desc()).offset((page-1)*page_size).limit(page_size))
   return {'rows':[result(d,False) for d in rows],'total':db.scalar(select(func.count()).select_from(Document).where(*cond))}
 @router.get('/{pk}')
 def detail(pk:int):
  with Session() as db:
-  d=require_invoice(db,pk);out=result(d);out['header']=reference_header(db,d.store,d.shipment_id,tax_header(db,d.store,out['header']));apply_reference(out['items'],out['header']);return out
+  from .document_shipments import link_info
+  d=require_invoice(db,pk);out=result(d);out['header']=reference_header(db,d.store,d.shipment_id,tax_header(db,d.store,out['header']));apply_reference(out['items'],out['header'])
+  out.update(link_info(db,d,out['header'].get('boxes')));return out
 def validate_sources(items,data):
  expected=data['sources'];seen=[];boxes={}
  for row in items:

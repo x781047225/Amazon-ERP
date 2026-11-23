@@ -103,6 +103,10 @@ Listing 的调价、编辑、关联等操作记录在 Listing 业务日志中；
 
 ## MCP 接入
 
+FBA 货件单据提供只读工具：`fba_invoices_query` / `fba_invoice_detail`（清关发票），`fba_declarations_query` / `fba_declaration_detail`（报关单）。列表支持 `store`、`shipment_id` 精确匹配、`q` 货件号模糊搜索和分页；详情的 `id` 使用单据列表返回的数字编号。发票详情与编辑页保持相同口径；报关单读取生成时保存的抬头和明细，不解析 Excel 或重新生成单据。
+
+单据详情的 `shipment` 包含对应店铺货件的当前状态、目的国/仓库、日期、发货/接收数量和物流信息，箱数明确标注来自单据。关联货件还需「FBA货件 → 货件列表」查看权限：`shipment_info_status` 为 `available`、`no_permission` 或 `not_synced`，后两种返回 `shipment=null`。独立工具 `shipments_query` / `shipment_detail` 提供货件列表、完整 SKU/FNSKU 明细、跟踪信息和历史快照；列表可按货件号、状态、日期和异常筛选。发票、报关单分别要求对应 Tab 查看权限，所有查询受店铺范围限制并记录调用用户；未开放单据创建、修改、删除或导出。
+
 Listing 查询工具 `listings_query`、`listing_detail`、`fba_inventory_query` 返回独立的 `inventory.transfer`（待调仓）；库存字段 `null` 表示尚未获取，`0` 表示已确认零库存。首页在库包含待调仓，不再次与在库相加。
 
 以上工具还返回 `listing_status`（在售／停售／已删除／缺货／未知）、`listing_status_code` 和 `listing_status_detail`。后者包含 `can_update`、判断原因、数据来源、Listing/库存读取时间与相关问题。更新外部表格前检查读取时间，仅在 `can_update=true` 时采用该状态；未知时保留原值。BUYABLE 优先于零库存，父体和读取异常不误判缺货；缺货须确认所有配送渠道可售为零且没有未解决的 ERROR；停售限制或目录移除不等于删除。当前未接入删除通知，无明确 DELETED 证据不会返回已删除。

@@ -121,6 +121,35 @@ def preview(body:Batch,actor=Depends(require_admin)):
         db.add(a)
     return result(a)
 
+class SubmitKeywords(Batch):
+    request_id:uuid.UUID
+    mode:Literal['keyword']='keyword'
+
+@router.post('/search-actions/submit')
+def submit_keywords(body:SubmitKeywords,tasks:BackgroundTasks,actor=Depends(require_admin)):
+    """Persist intent first; all Amazon checks and writes run after the response."""
+    identifier=str(body.request_id)
+    digest=hashlib.sha256(json.dumps(body.model_dump(mode='json',exclude={'request_id'}),sort_keys=True).encode()).hexdigest()
+    with Session.begin() as db:
+        p,c,g=group_checked(db,body.profile_id,body.adgroup_id)
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':'search-action:'+body.profile_id+':'+body.adgroup_id})
+        old=db.get(AdsChange,identifier)
+        if old:
+            if old.actor!=actor['username'] or old.before.get('request_digest')!=digest:raise HTTPException(409,'请求编号已用于其他操作，请核对提交记录')
+            return result(old)
+        if c.data.get('targetingType')!='MANUAL':raise HTTPException(422,'请选择手动投放广告组')
+        recent=db.scalars(select(AdsChange).where(AdsChange.profile_id==body.profile_id,AdsChange.adgroup_id==body.adgroup_id,AdsChange.kind=='search_keyword',AdsChange.actor==actor['username'],AdsChange.created_at>now()-timedelta(minutes=15)))
+        for old in recent:
+            if old.before.get('request_digest')==digest:return result(old)
+        if db.scalar(select(AdsChange.id).where(AdsChange.profile_id==body.profile_id,AdsChange.adgroup_id==body.adgroup_id,AdsChange.kind.in_(['search_keyword','search_negative']),AdsChange.status=='sending').limit(1)):
+            raise HTTPException(409,'此广告组有正在提交的操作，请等待任务结束后再添加')
+        plan=plan_items(body,g.data.get('defaultBid'))
+        for item in plan:item['status']='ready'
+        a=AdsChange(id=identifier,profile_id=p.id,kind='search_keyword',entity_id='',campaign_id=c.entity_id,adgroup_id=g.entity_id,actor=actor['username'],status='sending',before={'_name':g.name,'items':plan,'request_digest':digest,'mode':'keyword'},changes={'操作':'添加关键词','条数':len(plan)})
+        db.add(a)
+    tasks.add_task(run,a.id)
+    return result(a)
+
 class Confirm(Strict):id:str
 @router.get('/search-actions/status/{identifier}')
 def status(identifier:str,actor=Depends(require_admin)):

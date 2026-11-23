@@ -32,13 +32,14 @@ def enrich_items(db,items,store_by_pk):
     return items
 
 @router.get('/shipments')
-def shipments(store:str='',marketplace:str='',status:str='',q:str='',dispatch_start:date|None=None,dispatch_end:date|None=None,remaining_only:bool=False,anomaly_only:bool=False,logistics_pending:bool=False,page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100)):
+def shipments(store:str='',marketplace:str='',status:str='',q:str='',dispatch_start:date|None=None,dispatch_end:date|None=None,remaining_only:bool=False,anomaly_only:bool=False,logistics_pending:bool=False,page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100),shipment_id:str=''):
     from .shipment_logistics import logistics_view
     conditions=[];q=q.strip()
     if dispatch_start and dispatch_end and dispatch_start>dispatch_end:raise HTTPException(422,"开始日期不能晚于结束日期")
     if dispatch_start:conditions.append(Shipment.dispatched_on>=dispatch_start)
     if dispatch_end:conditions.append(Shipment.dispatched_on<=dispatch_end)
     if store:conditions.append(Shipment.store==store)
+    if shipment_id:conditions.append(Shipment.shipment_id==shipment_id)
     if status:conditions.append(Shipment.status==status)
     if marketplace:conditions.append(exists(select(ShipmentMarket.shipment_pk).where(ShipmentMarket.shipment_pk==Shipment.id,ShipmentMarket.marketplace==marketplace)))
     if remaining_only:conditions.append(Shipment.remaining>0)
@@ -118,7 +119,10 @@ def detail(pk:int,q:str='',exact:bool=False):
         if q:conditions.append(item_match(q,exact))
         items=enrich_items(db,[dict(serialize(i,ITEM_FIELDS),shipment_pk=pk) for i in db.scalars(select(ShipmentItem).where(*conditions).order_by(ShipmentItem.sku,ShipmentItem.fnsku))],{pk:row.store})
         history=[serialize(s,['id','observed_at','status','shipped','received','remaining','over_received','decreased']) for s in db.scalars(select(ShipmentSnapshot).where(ShipmentSnapshot.shipment_pk==pk).order_by(ShipmentSnapshot.id.desc()).limit(100))]
-        return dict(serialize(row,FIELDS),items=items,history=history,markets=list(db.scalars(select(ShipmentMarket.marketplace).where(ShipmentMarket.shipment_pk==pk).order_by(ShipmentMarket.marketplace))))
+        from .shipment_logistics import logistics_view
+        cache=db.get(ArrivalCache,row.store)
+        logistics=logistics_view(row,((cache.data or {}) if cache else {}).get(row.shipment_id,{}) or {})
+        return dict(serialize(row,FIELDS),items=items,history=history,logistics=logistics,markets=list(db.scalars(select(ShipmentMarket.marketplace).where(ShipmentMarket.shipment_pk==pk).order_by(ShipmentMarket.marketplace))))
 @router.get('/snapshots/{pk}')
 def snapshot(pk:int):
     with Session() as db:

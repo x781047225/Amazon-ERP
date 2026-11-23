@@ -4,34 +4,35 @@ const tableWidths=useTableWidths('Workspace')
 
 import {checkPriceJobs} from './priceJobs'
 import {displayCurrency} from './currency'
-import LogisticsPanel from './LogisticsPanel.vue'
-import SettingsPanel from './SettingsPanel.vue'
+const LogisticsPanel=defineAsyncComponent(()=>import('./LogisticsPanel.vue'))
+const SettingsPanel=defineAsyncComponent(()=>import('./SettingsPanel.vue'))
 import DashboardPanel from './DashboardPanel.vue'
+import AdsSearchTaskStatus from './AdsSearchTaskStatus.vue'
 import TodoReminder from './TodoReminder.vue'
-import TodoPanel from './TodoPanel.vue'
+const TodoPanel=defineAsyncComponent(()=>import('./TodoPanel.vue'))
 async function openTodos(){await navigate('todos')}
 import OrderRows from './OrderRows.vue'
 import OrderIncomeDialog from './OrderIncomeDialog.vue'
 const calculatorOrder=ref<any>(null)
 function newAdsTabKey(prefix:string){return prefix+Array.from(crypto.getRandomValues(new Uint32Array(4)),n=>n.toString(16).padStart(8,'0')).join('')}
 function openListingAds(row:any){if(!canAccessAds.value)return;const key=newAdsTabKey('ads-listing-');insertTab({key,title:'广告 · '+row.sku,adsFocus:{store:row.store,marketplace:row.marketplace,asin:row.asin,request:Date.now()}});tab.value=key;nextTick(()=>window.scrollTo({top:0}))}
-import UserPanel from './UserPanel.vue'
-import FinancePanel from './FinancePanel.vue'
-import ProductPanel from './ProductPanel.vue'
-import ProductEditor from './ProductEditor.vue'
-import InvoiceEditor from './InvoiceEditor.vue'
-import CustomsProfileEditor from './CustomsProfileEditor.vue'
-import WarehousePanel from './WarehousePanel.vue'
-import ProcurementPanel from './ProcurementPanel.vue'
-import ReplenishmentPanel from './ReplenishmentPanel.vue'
-import ShippingPanel from './ShippingPanel.vue'
-import StaPanel from './StaPanel.vue'
-import AdvertisingPanel from './AdvertisingPanel.vue'
-import AdsCreatePage from './AdsCreatePage.vue'
+const UserPanel=defineAsyncComponent(()=>import('./UserPanel.vue'))
+const FinancePanel=defineAsyncComponent(()=>import('./FinancePanel.vue'))
+const ProductPanel=defineAsyncComponent(()=>import('./ProductPanel.vue'))
+const ProductEditor=defineAsyncComponent(()=>import('./ProductEditor.vue'))
+const InvoiceEditor=defineAsyncComponent(()=>import('./InvoiceEditor.vue'))
+const CustomsProfileEditor=defineAsyncComponent(()=>import('./CustomsProfileEditor.vue'))
+const WarehousePanel=defineAsyncComponent(()=>import('./WarehousePanel.vue'))
+const ProcurementPanel=defineAsyncComponent(()=>import('./ProcurementPanel.vue'))
+const ReplenishmentPanel=defineAsyncComponent(()=>import('./ReplenishmentPanel.vue'))
+const ShippingPanel=defineAsyncComponent(()=>import('./ShippingPanel.vue'))
+const StaPanel=defineAsyncComponent(()=>import('./StaPanel.vue'))
+const AdvertisingPanel=defineAsyncComponent(()=>import('./AdvertisingPanel.vue'))
+const AdsCreatePage=defineAsyncComponent(()=>import('./AdsCreatePage.vue'))
 import {session,can,api as authApi} from './session'
-import FbaPanel from './FbaPanel.vue'
-import ListingPanel from './ListingPanel.vue'
-import {ref,reactive,onMounted,onUnmounted,computed,nextTick,watch} from 'vue'
+const FbaPanel=defineAsyncComponent(()=>import('./FbaPanel.vue'))
+const ListingPanel=defineAsyncComponent(()=>import('./ListingPanel.vue'))
+import {ref,reactive,onMounted,onUnmounted,computed,nextTick,watch,defineAsyncComponent} from 'vue'
 import {ElMessage,ElMessageBox} from 'element-plus'
 import {QuestionFilled,Box,Search,Refresh,Document,ArrowRight,Clock,ShoppingCart,OfficeBuilding,Setting,Download,Check,Warning} from '@element-plus/icons-vue'
 type Item={item_id:string,sku:string,asin:string,title:string,quantity:number,amount:string|null,currency:string|null}
@@ -150,7 +151,7 @@ async function retry(job:Job){try{await api('/sync/jobs/'+job.id+'/retry',{});El
 async function toggleAuto(value:string|number|boolean){try{await api('/sync/automatic',{enabled:!!value});options.auto_sync=!!value;ElMessage.success(value?'已开启每 5 分钟增量同步（全部店铺、已配置订单站点）':'已关闭自动同步；当前任务仍继续')}catch(e){options.auto_sync=!value;ElMessage.error((e as Error).message)}}
 function openSync(){form.stores=filters.store?[filters.store]:[...options.stores];form.markets=filters.marketplace?[filters.marketplace]:['DE','UK'];syncDialog.value=true}
 let timer:ReturnType<typeof setInterval>,polling=false
-onMounted(async()=>{try{const o=await api('/options');Object.assign(options,o,{markets:o.order_markets||o.markets});form.stores=[...options.stores]}catch(e){error.value=(e as Error).message}await refresh();timer=setInterval(async()=>{if(polling)return;polling=true;try{const wasActive=activeJobs.value.length>0;await fetchJobs();if(activeJobs.value.length||wasActive||(tab.value==='orders'&&(orderSync.value?.active||orders.value.some(o=>o.estimate?.pending))))await loadOrders(true)}finally{polling=false}},8000)})
+onMounted(async()=>{try{const o=await api('/options');Object.assign(options,o,{markets:o.order_markets||o.markets});form.stores=[...options.stores]}catch(e){error.value=(e as Error).message}if(tab.value==='orders')await refresh();timer=setInterval(async()=>{if(polling)return;polling=true;try{const wasActive=activeJobs.value.length>0;await fetchJobs();if(activeJobs.value.length||wasActive||(tab.value==='orders'&&(orderSync.value?.active||orders.value.some(o=>o.estimate?.pending))))await loadOrders(true)}finally{polling=false}},8000)})
 onUnmounted(()=>clearInterval(timer))
 
 const titles:Record<string,string>={home:'首页',todos:'待办事项',orders:'订单中心',listing:'Listing',fba:'FBA 货件',finance:'利润结算',users:'用户管理',products:'产品管理',warehouse:'仓库',logistics:'物流中心',settings:'设置',procurement:'采购管理',shipping:'发货计划',replenishment:'补货建议',advertising:'广告活动'}
@@ -188,9 +189,9 @@ async function logout(){try{await ElMessageBox.confirm('退出会清除本次会
  </aside>
  <main class="main">
 
-  <div class="workspace-bar"><button class="mobile-nav-toggle" aria-label="展开导航菜单" aria-controls="workspace-navigation" :aria-expanded="mobileMenuOpen" @click="mobileMenuOpen=!mobileMenuOpen">☰ 菜单</button><nav ref="tabStrip" class="work-tabs" aria-label="已打开页面"><div v-for="t in opened" :key="t.key" :data-tab-key="t.key" draggable="true" @dragstart="startTabDrag($event,t.key)" @dragover.prevent="dragOver=t.key" @drop.prevent="dropTab(t.key)" @dragend="dragging='';dragOver=''" :class="{active:tab===t.key,dragging:dragging===t.key,'drag-over':dragOver===t.key&&dragging!==t.key}" @contextmenu.prevent="tabMenu={key:t.key,x:$event.clientX,y:$event.clientY}"><button class="tab-title" @click="tab=t.key" :title="tabTitle(t.key)">{{tabTitle(t.key)}}</button><button class="tab-close" :aria-label="'关闭'+tabTitle(t.key)" @click.stop="closeTab(t.key)">×</button></div></nav><div class="workspace-account"><el-tooltip content="帮助文档"><a class="help-button" href="/help" target="_blank" rel="noopener noreferrer" aria-label="帮助文档"><el-icon><QuestionFilled/></el-icon></a></el-tooltip><el-dropdown trigger="click" @command="accountAction"><button class="account-avatar" :aria-label="session?.username+' 账户菜单'" :title="session?.username">{{session?.username.slice(0,1).toUpperCase()}}</button><template #dropdown><el-dropdown-menu><el-dropdown-item disabled>{{session?.username}}</el-dropdown-item><el-dropdown-item command="password" divided>修改密码</el-dropdown-item><el-dropdown-item command="logout">退出登录</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></div>
+  <div class="workspace-bar"><button class="mobile-nav-toggle" aria-label="展开导航菜单" aria-controls="workspace-navigation" :aria-expanded="mobileMenuOpen" @click="mobileMenuOpen=!mobileMenuOpen">☰ 菜单</button><nav ref="tabStrip" class="work-tabs" aria-label="已打开页面"><div v-for="t in opened" :key="t.key" :data-tab-key="t.key" draggable="true" @dragstart="startTabDrag($event,t.key)" @dragover.prevent="dragOver=t.key" @drop.prevent="dropTab(t.key)" @dragend="dragging='';dragOver=''" :class="{active:tab===t.key,dragging:dragging===t.key,'drag-over':dragOver===t.key&&dragging!==t.key}" @contextmenu.prevent="tabMenu={key:t.key,x:$event.clientX,y:$event.clientY}"><button class="tab-title" @click="tab=t.key" :title="tabTitle(t.key)">{{tabTitle(t.key)}}</button><button class="tab-close" :aria-label="'关闭'+tabTitle(t.key)" @click.stop="closeTab(t.key)">×</button></div></nav><div class="workspace-account"><AdsSearchTaskStatus/><el-tooltip content="帮助文档"><a class="help-button" href="/help" target="_blank" rel="noopener noreferrer" aria-label="帮助文档"><el-icon><QuestionFilled/></el-icon></a></el-tooltip><el-dropdown trigger="click" @command="accountAction"><button class="account-avatar" :aria-label="session?.username+' 账户菜单'" :title="session?.username">{{session?.username.slice(0,1).toUpperCase()}}</button><template #dropdown><el-dropdown-menu><el-dropdown-item disabled>{{session?.username}}</el-dropdown-item><el-dropdown-item command="password" divided>修改密码</el-dropdown-item><el-dropdown-item command="logout">退出登录</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></div>
   <div v-if="tabMenu" class="tab-menu-mask" @click="tabMenu=null"><div class="tab-menu" :style="{left:tabMenu.x+'px',top:tabMenu.y+'px'}" @click.stop><button @click="closeTabs('others')">关闭其他</button><button @click="closeTabs('left')">关闭左边</button><button @click="closeTabs('right')">关闭右边</button></div></div>
-  <div class="content" :class="{'shipping-content':tab==='shipping','compact-content':compactPage,'advertising-content':tab==='advertising'||tab.startsWith('ads-')}">
+  <div class="content" :class="{'shipping-content':tab==='shipping','compact-content':compactPage,'campaign-workspace-content':tab==='advertising'||tab.startsWith('ads-')}">
    <div v-if="!compactPage" class="page-heading"><div><div class="eyebrow">{{tab==='home'?'STORE OVERVIEW':tab==='finance'?'PAYMENTS & PROFIT':tab==='users'?'PEOPLE & ACCESS':tab.toUpperCase()}}</div><h1>{{tabTitle(tab)}}</h1><p>{{tab==='home'?'掌握当前店铺的销售、库存与经营进展。':tab==='orders'?'汇集店铺订单，掌握销售与履约进度。':tab==='listing'?'查看亚马逊商品信息，预览修改后确认提交。':tab==='finance'?'查询订单回款，逐步建立完整利润口径。':tab==='users'?'管理账号、主营店铺和访问权限。':tab==='advertising'?'查看广告活动、广告组及广告表现。':tab==='shipping'?'按采购到货安排发货，维护装箱与标签。':tab==='replenishment'?'结合销量、本地库存及在途供应，安排普通商品补货。':tab==='procurement'?'汇总采购需求，跟踪采购与到货入库。':tab==='warehouse'?'管理本地仓库、库存及出入库记录。':tab==='products'?'维护本地标品，统一管理跨店铺 SKU 对应关系。':'追踪货件状态与商品接收进度。'}}</p></div></div>
 
    <el-empty v-if="tab==='no-access'" description="尚未分配页面权限，请联系管理员"/><el-alert v-if="error && tab==='orders'" :title="error" type="error" show-icon :closable="false" class="error-alert"/>
@@ -242,5 +243,5 @@ async function logout(){try{await ElMessageBox.confirm('退出会清除本次会
 .help-button{display:grid;place-items:center;background:transparent;color:#d8e6e1;border:0;border-radius:50%;width:34px;height:34px;margin-right:8px;font-size:21px;cursor:pointer}.help-button:hover{background:#ffffff18;color:white}.help-button:focus-visible{outline:2px solid #6ee7ca}
 
 .order-filters{flex-wrap:nowrap!important;align-items:center;overflow-x:auto}.order-filters>.keyword{flex:0 0 245px;width:245px;min-width:245px}.order-filters>.el-select{flex:0 0 115px;width:115px}.order-filters>.el-button{flex-shrink:0}.compact-order-today{display:flex;gap:28px;margin:0;background:white;padding:12px}.compact-order-today>.stat-card{border:0;border-radius:0;min-height:0;padding:0;min-width:230px}.compact-order-today .stat-value{font-size:24px;margin:5px 0}.compact-order-today .stat-foot{margin-top:2px}
-.workspace-bar{position:sticky;top:0;z-index:1000;display:flex;align-items:stretch;background:#263548;min-width:0;height:46px}.workspace-account{display:flex;align-items:center;padding:4px 16px 4px 10px;flex-shrink:0}.workspace-bar .work-tabs{flex:1;min-width:0}.workspace-bar>.mobile-nav-toggle{align-self:center;margin-left:12px}@media(max-width:760px){.workspace-account{padding:4px 8px}.workspace-bar .work-tabs{padding-left:8px}}.work-tabs{display:flex;align-items:flex-start;gap:4px;padding:4px 16px 0;overflow-x:auto;overflow-y:hidden;background:#263548;border-bottom:0;scrollbar-width:none;scrollbar-color:transparent transparent}.work-tabs:hover,.work-tabs:focus-within{scrollbar-color:#72809466 transparent}.work-tabs::-webkit-scrollbar{display:none;height:0}.work-tabs::-webkit-scrollbar-track{background:transparent}.work-tabs::-webkit-scrollbar-thumb{background:transparent;border-radius:8px}.work-tabs:hover::-webkit-scrollbar-thumb,.work-tabs:focus-within::-webkit-scrollbar-thumb{background:#72809466}.work-tabs>div{display:flex;flex:0 0 140px;width:140px;height:42px;box-sizing:border-box;align-items:center;border:1px solid transparent;border-radius:7px 7px 0 0}.work-tabs>div.active{background:white;border-color:#dce5df;border-bottom-color:white}.work-tabs button{border:0;background:transparent;color:#cbd7e5;padding:8px 10px;font-size:13px;line-height:18px;cursor:pointer;white-space:nowrap}.work-tabs .tab-title{flex:1 1 auto;min-width:0;text-overflow:ellipsis;overflow:hidden}.work-tabs .active button{color:#21745f;font-weight:600}.work-tabs .tab-close{flex:0 0 30px;width:30px;padding:7px 4px;font-size:18px;text-overflow:clip;overflow:visible}.tab-menu-mask{position:fixed;inset:0;z-index:3000}.tab-menu{position:absolute;background:white;box-shadow:0 4px 24px #0002;padding:6px;border-radius:6px;display:grid}.tab-menu button{border:0;background:white;text-align:left;padding:10px 25px;cursor:pointer}.tab-menu button:hover{background:#edf5f1}.work-tabs>div{cursor:grab}.work-tabs>div.dragging{opacity:.45}.work-tabs>div.drag-over{box-shadow:inset 3px 0 #6ee7ca}.work-tabs>div:not(.active):hover{background:#33465e}.work-tabs button:focus-visible{outline:2px solid #6ee7ca;outline-offset:-3px}.account-avatar{height:32px;width:32px;border-radius:50%;border:2px solid #b3d7cd;background:#247b69;color:#fff;font-size:16px;font-weight:700;cursor:pointer}.account-avatar:focus-visible{outline:3px solid #68b4a3;outline-offset:3px}.content.advertising-content{padding:0}
+.workspace-bar{position:sticky;top:0;z-index:1000;display:flex;align-items:stretch;background:#263548;min-width:0;height:46px}.workspace-account{display:flex;align-items:center;padding:4px 16px 4px 10px;flex-shrink:0}.workspace-bar .work-tabs{flex:1;min-width:0}.workspace-bar>.mobile-nav-toggle{align-self:center;margin-left:12px}@media(max-width:760px){.workspace-account{padding:4px 8px}.workspace-bar .work-tabs{padding-left:8px}}.work-tabs{display:flex;align-items:flex-start;gap:4px;padding:4px 16px 0;overflow-x:auto;overflow-y:hidden;background:#263548;border-bottom:0;scrollbar-width:none;scrollbar-color:transparent transparent}.work-tabs:hover,.work-tabs:focus-within{scrollbar-color:#72809466 transparent}.work-tabs::-webkit-scrollbar{display:none;height:0}.work-tabs::-webkit-scrollbar-track{background:transparent}.work-tabs::-webkit-scrollbar-thumb{background:transparent;border-radius:8px}.work-tabs:hover::-webkit-scrollbar-thumb,.work-tabs:focus-within::-webkit-scrollbar-thumb{background:#72809466}.work-tabs>div{display:flex;flex:0 0 140px;width:140px;height:42px;box-sizing:border-box;align-items:center;border:1px solid transparent;border-radius:7px 7px 0 0}.work-tabs>div.active{background:white;border-color:#dce5df;border-bottom-color:white}.work-tabs button{border:0;background:transparent;color:#cbd7e5;padding:8px 10px;font-size:13px;line-height:18px;cursor:pointer;white-space:nowrap}.work-tabs .tab-title{flex:1 1 auto;min-width:0;text-overflow:ellipsis;overflow:hidden}.work-tabs .active button{color:#21745f;font-weight:600}.work-tabs .tab-close{flex:0 0 30px;width:30px;padding:7px 4px;font-size:18px;text-overflow:clip;overflow:visible}.tab-menu-mask{position:fixed;inset:0;z-index:3000}.tab-menu{position:absolute;background:white;box-shadow:0 4px 24px #0002;padding:6px;border-radius:6px;display:grid}.tab-menu button{border:0;background:white;text-align:left;padding:10px 25px;cursor:pointer}.tab-menu button:hover{background:#edf5f1}.work-tabs>div{cursor:grab}.work-tabs>div.dragging{opacity:.45}.work-tabs>div.drag-over{box-shadow:inset 3px 0 #6ee7ca}.work-tabs>div:not(.active):hover{background:#33465e}.work-tabs button:focus-visible{outline:2px solid #6ee7ca;outline-offset:-3px}.account-avatar{height:32px;width:32px;border-radius:50%;border:2px solid #b3d7cd;background:#247b69;color:#fff;font-size:16px;font-weight:700;cursor:pointer}.account-avatar:focus-visible{outline:3px solid #68b4a3;outline-offset:3px}.content.campaign-workspace-content{padding:0}
 </style>

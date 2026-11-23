@@ -43,7 +43,7 @@ def numeric(v,label,whole=False):
  if not math.isfinite(n) or n<0 or n>1000000 or whole and n!=int(n):raise ValueError(f'{label}须为有效的非负'+('整数' if whole else '数值'))
  return int(n) if whole else n
 
-def parse_packing(raw,items,task_number):
+def parse_packing(raw,items,task_number,resolve_new=None):
  try:
   with zipfile.ZipFile(BytesIO(raw)) as z:
    if len(z.infolist())>3000 or sum(i.file_size for i in z.infolist())>40000000:raise ValueError('装箱文件过大，请缩小后上传')
@@ -60,7 +60,7 @@ def parse_packing(raw,items,task_number):
  s,hr,cols=sheets[0];sku_col=cols.get('MSKU',cols.get('SKU'));fn_col=cols['FNSKU'];qty_col=cols['发货数量']
  box_cols={c:int(re.fullmatch(r'第\s*(\d+)\s*箱',name).group(1)) for name,c in cols.items() if re.fullmatch(r'第\s*(\d+)\s*箱',name)}
  if not box_cols or len(box_cols)>200 or len(set(box_cols.values()))!=len(box_cols) or any(n<1 for n in box_cols.values()):raise ValueError('箱号须为不重复的第1箱、第2箱等，最多200箱')
- expected={i['sku']:i for i in items};seen=set();result=[];box_items={n:[] for n in box_cols.values()};metadata={n:{} for n in box_cols.values()}
+ expected={i['sku']:i for i in items};original_skus=set(expected);additions=[];seen=set();result=[];box_items={n:[] for n in box_cols.values()};metadata={n:{} for n in box_cols.values()}
  allrows=list(s.iter_rows(values_only=True));finished=False
  for idx,values in enumerate(allrows,1):
   vals=list(values)
@@ -79,11 +79,18 @@ def parse_packing(raw,items,task_number):
   if any(str(v)=='合计' for v in vals[:qty_col+1]):finished=True;continue
   if finished:continue
   if not sku and not cell(fn_col) and not cell(qty_col):continue
-  if sku not in expected:raise ValueError(f'第{idx}行SKU不在当前发货计划中：{sku}')
+  if not sku:raise ValueError(f'第{idx}行请填写SKU')
   if sku in seen:raise ValueError(f'SKU重复：{sku}')
+  if sku not in expected:
+   if not resolve_new:raise ValueError(f'第{idx}行SKU不在当前发货计划中：{sku}')
+   declared=numeric(cell(qty_col),f'{sku}发货数量',True)
+   packed_new=sum(0 if cell(c) in (None,'') else numeric(cell(c),f'{sku}第{n}箱数量',True) for c,n in box_cols.items())
+   if not packed_new:raise ValueError(f'{sku}为新增商品，请填写实际装箱数量')
+   i=resolve_new(sku,str(cell(fn_col) or '').strip(),max(declared,packed_new))
+   expected[sku]=i;additions.append(i)
   seen.add(sku);i=expected[sku]
   if str(cell(fn_col) or '').strip()!=i['fnsku']:raise ValueError(f'{sku}的FNSKU与计划不一致')
-  if numeric(cell(qty_col),f'{sku}发货数量',True)!=i['quantity']:raise ValueError(f'{sku}的发货数量被修改，请先变更计划再下载装箱单')
+  if sku in original_skus and numeric(cell(qty_col),f'{sku}发货数量',True)!=i['quantity']:raise ValueError(f'{sku}的发货数量被修改，请先变更计划再下载装箱单')
   qs={}
   for c,n in box_cols.items():
    q=0 if cell(c) in (None,'') else numeric(cell(c),f'{sku}第{n}箱数量',True)
@@ -98,7 +105,7 @@ def parse_packing(raw,items,task_number):
   if any(meta.get(k,0)<=0 for k in ['weight_kg','length_cm','width_cm','height_cm']):raise ValueError(f'第{n}箱请填写大于0的重量及长宽高（kg/cm）')
   boxes.append({'number':n,**meta,'items':box_items[n],'quantity':sum(i['quantity'] for i in box_items[n])})
  if not boxes:raise ValueError('没有填写实际装箱数量')
- return {'items':result,'boxes':boxes,'packed':sum(i['packed'] for i in result),'remaining':sum(i['remaining'] for i in result)}
+ return {'items':result,'boxes':boxes,'packed':sum(i['packed'] for i in result),'remaining':sum(i['remaining'] for i in result),'plan_additions':additions}
 
 def labels_pdf(items,profile,country,title,task_number,separators=True):
  from reportlab.pdfgen import canvas

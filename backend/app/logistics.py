@@ -9,6 +9,7 @@ import re,zipfile,base64
 from fastapi import APIRouter,HTTPException,UploadFile,File,Form,Query
 from pydantic import BaseModel,Field,ConfigDict,field_validator
 from sqlalchemy import select,func,text,or_
+from sqlalchemy.orm import defer
 from openpyxl import load_workbook
 from openpyxl.utils.cell import column_index_from_string
 from .db import Session
@@ -382,12 +383,30 @@ def generate(b:Generate):
   buf=BytesIO();wb.save(buf);filename=f"{b.shipment_id}-{'清关发票' if t.kind=='invoice' else '报关单'}.xlsx"
   d=Document(store=b.store,shipment_id=b.shipment_id,kind=t.kind,template_id=t.id,filename=filename,content=buf.getvalue(),detail={'values':values,'items':items,'mapping':m},actor=principal.get()['username']);db.add(d);db.flush();audit(db,'logistics_document_create',d.id,{'shipment_id':b.shipment_id,'kind':t.kind,'template_id':t.id});return {'id':d.id,'filename':filename}
 @router.get('/documents')
-def documents(kind:str='',q:str='',page:int=Query(1,ge=1),page_size:int=Query(30,ge=1,le=100)):
+def documents(kind:str='',q:str='',page:int=Query(1,ge=1),page_size:int=Query(30,ge=1,le=100),store:str='',shipment_id:str=''):
+ if store:require_store(store)
  with Session() as db:
   cond=[Document.store.in_(allowed_stores())]
+  if store:cond.append(Document.store==store)
+  if shipment_id:cond.append(Document.shipment_id==shipment_id)
   if kind:cond.append(Document.kind==kind)
   if q:cond.append(Document.shipment_id.ilike(pattern(q),escape='\\'))
-  return {'total':db.scalar(select(func.count()).select_from(Document).where(*cond)),'rows':[{'id':d.id,'store':d.store,'shipment_id':d.shipment_id,'kind':d.kind,'filename':d.filename,'actor':d.actor,'created_at':d.created_at} for d in db.scalars(select(Document).where(*cond).order_by(Document.id.desc()).offset((page-1)*page_size).limit(page_size))]}
+  return {'total':db.scalar(select(func.count()).select_from(Document).where(*cond)),'rows':[{'id':d.id,'store':d.store,'shipment_id':d.shipment_id,'kind':d.kind,'filename':d.filename,'actor':d.actor,'created_at':d.created_at} for d in db.scalars(select(Document).options(defer(Document.content),defer(Document.detail)).where(*cond).order_by(Document.id.desc()).offset((page-1)*page_size).limit(page_size))]}
+@router.get('/declarations')
+def declarations(q:str='',page:int=Query(1,ge=1),page_size:int=Query(30,ge=1,le=100),store:str='',shipment_id:str=''):
+ return documents(kind='declaration',q=q,page=page,page_size=page_size,store=store,shipment_id=shipment_id)
+
+@router.get('/declarations/{pk}')
+def declaration_detail(pk:int):
+ with Session() as db:
+  d=db.scalar(select(Document).options(defer(Document.content)).where(Document.id==pk,Document.kind=='declaration'))
+  if not d:raise HTTPException(404,'报关单不存在')
+  require_store(d.store)
+  from .document_shipments import link_info
+  saved=d.detail or {}
+  shipment=link_info(db,d,(saved.get('values') or {}).get('boxes'))
+  return {'id':d.id,'store':d.store,'shipment_id':d.shipment_id,'kind':d.kind,'filename':d.filename,'template_id':d.template_id,'revision':d.revision,'actor':d.actor,'created_at':d.created_at,'updated_at':d.updated_at,'header':saved.get('values') or {},'items':saved.get('items') or [],**shipment}
+
 @router.get('/documents/{pk}/download')
 def download_document(pk:int):
  with Session() as db:

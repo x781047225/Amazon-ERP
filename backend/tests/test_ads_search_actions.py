@@ -136,3 +136,56 @@ def test_automatic_report_expression_aliases():
  assert match_code('TARGETING_EXPRESSION_PREDEFINED','complements')=='COMPLEMENTS'
  assert match_code('TARGETING_EXPRESSION_PREDEFINED','close-match')=='CLOSE'
  assert match_code('TARGETING_EXPRESSION_PREDEFINED','loose-match')=='LOOSE'
+
+
+def submit(**kw):
+ from uuid import uuid4
+ return client.post('/api/advertising/search-actions/submit',json={**body(), 'request_id':str(uuid4()), **kw},headers=HEAD)
+
+def test_direct_submit_persists_before_remote_work_and_is_idempotent(monkeypatch):
+ from uuid import uuid4
+ setup();scheduled=[]
+ monkeypatch.setattr(a,'run',lambda identifier:scheduled.append(identifier))
+ monkeypatch.setattr(a,'Client',lambda *args:pytest.fail('Remote calls must run in the background'))
+ request_id=str(uuid4())
+ r=submit(request_id=request_id);assert r.status_code==200,r.text
+ assert r.json()['status']=='sending' and scheduled==[request_id]
+ assert r.json()['items'][0]['payload']['bid']==.2
+ assert submit(request_id=request_id).json()['id']==request_id
+ assert submit().json()['id']==request_id
+ assert scheduled==[request_id]
+ assert submit(request_id=request_id,items=[{'text':'changed','match':'EXACT','bid':.4}]).status_code==409
+ assert submit(items=[{'text':'another','match':'EXACT','bid':.4}]).status_code==409
+ with Session() as db:
+  log=db.get(AdsChange,request_id);assert log.actor=='test-admin' and log.adgroup_id=='3'
+
+@pytest.mark.parametrize('failure',['','failed','unknown'])
+def test_direct_submit_worker_results_and_no_duplicate_writes(monkeypatch,failure):
+ setup();calls=fake(monkeypatch,fail=failure)
+ r=submit();assert r.status_code==200,r.text
+ identifier=r.json()['id'];final=status(identifier)
+ assert final['status']==(failure or 'succeeded')
+ count=len(calls);assert count==(1 if failure=='unknown' else 2)
+ assert submit(request_id=identifier).json()['status']==final['status']
+ assert len(calls)==count
+
+
+def test_direct_submit_skips_existing_and_rechecks_remote_manual(monkeypatch):
+ setup();calls=fake(monkeypatch,existing=[('keyword',{'adGroupId':'3','keywordText':'IVORY ribbon','matchType':'EXACT','state':'PAUSED'})])
+ r=submit();assert r.status_code==200,r.text
+ final=status(r.json()['id']);assert final['status']=='succeeded'
+ assert final['items'][0]['status']=='exists' and len(calls)==1
+ calls=fake(monkeypatch,automatic=True)
+ r=submit(items=[{'text':'new term','match':'EXACT','bid':.4}]);assert r.status_code==200
+ assert status(r.json()['id'])['status']=='failed' and not calls
+
+
+def test_direct_submit_validation_scope_and_permission(monkeypatch):
+ setup();fake(monkeypatch)
+ assert submit(profile_id='other').status_code==404
+ assert submit(mode='negative').status_code==422
+ assert submit(items=[{'text':'   ','match':'EXACT'}]).status_code==422
+ assert submit(items=[{'text':'test','match':'NEGATIVE_EXACT'}]).status_code==422
+ assert submit(items=[{'text':'test','match':'EXACT','bid':0}]).status_code==422
+ monkeypatch.setattr(auth,'resolve_session',lambda r:{'id':4,'username':'reader','is_admin':False,'stores':['DemoStoreD'],'permissions':['advertising.view','advertising.search.view']})
+ assert submit().status_code==403

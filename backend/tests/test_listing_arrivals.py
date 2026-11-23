@@ -107,3 +107,41 @@ def test_newly_shipped_local_working_shipment_becomes_arrival_candidate():
     with patch('app.listing_arrivals.redis.lock',return_value=Lock()),patch('app.listing_arrivals.shipment_page',return_value={'ShipmentData':[head]}),patch('app.listing_arrivals.all_items',return_value=items):
         a.refresh_sources('DemoStoreA',lambda:None)
     d=info(pk);assert len(d['details'])==1 and d['details'][0]['units']==90 and d['details'][0]['status']=='SHIPPED'
+
+
+def test_freshness_follows_store_schedule_and_retains_real_expiry():
+    from app.data_sync_models import DataSyncConfig
+    from app.models import Shipment
+    pk=seed(priced());sid=ship();r=record();r['synced_at']=(AT-timedelta(hours=3)).isoformat();cache({'FBA_TEST':r})
+    with Session.begin() as db:
+        db.get(ArrivalCache,'DemoStoreA').synced_at=AT-timedelta(hours=3)
+        db.get(Shipment,sid).details_synced_at=AT-timedelta(hours=3)
+        db.add(DataSyncConfig(store='DemoStoreA',kind='shipments',enabled=True,interval_minutes=240))
+    d=info(pk);assert not d['stale'] and d['stale_reasons']==[]
+    assert d['sync_interval_minutes']==240 and d['freshness_window_minutes']==270
+    with Session.begin() as db:
+        db.get(ArrivalCache,'DemoStoreA').synced_at=AT-timedelta(minutes=271)
+    d=info(pk);assert d['stale'] and 'scan_expired' in d['stale_reasons']
+    with Session.begin() as db:
+        db.get(ArrivalCache,'DemoStoreA').synced_at=AT
+        r['synced_at']=(AT-timedelta(minutes=271)).isoformat()
+        db.get(ArrivalCache,'DemoStoreA').data={'FBA_TEST':r}
+        db.get(Shipment,sid).details_synced_at=AT-timedelta(minutes=271)
+    assert 'shipment_data_expired' in info(pk)['stale_reasons']
+    with Session.begin() as db:db.get(DataSyncConfig,('DemoStoreA','shipments')).interval_minutes=360
+    assert not info(pk)['stale']
+    with Session.begin() as db:db.get(DataSyncConfig,('DemoStoreA','shipments')).enabled=False
+    assert info(pk)['stale'] and info(pk)['freshness_window_minutes']==30
+
+
+def test_freshness_does_not_hide_failures_or_incomplete_data():
+    from app.data_sync_models import DataSyncConfig
+    pk=seed(priced());ship();cache({'FBA_TEST':record()})
+    with Session.begin() as db:
+        db.add(DataSyncConfig(store='DemoStoreA',kind='shipments',enabled=True,interval_minutes=240))
+        c=db.get(ArrivalCache,'DemoStoreA');c.status='failed';c.error='temporary'
+    d=info(pk);assert d['stale'] and d['partial'] and 'sync_failed' in d['stale_reasons']
+    with Session.begin() as db:
+        c=db.get(ArrivalCache,'DemoStoreA');c.status='succeeded';c.error=None
+        r=record();r['end']=None;c.data={'FBA_TEST':r}
+    d=info(pk);assert not d['stale'] and d['partial'] and d['unknown']==40

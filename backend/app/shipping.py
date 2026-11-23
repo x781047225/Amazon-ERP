@@ -441,13 +441,13 @@ def listing(q:str='',store:str='',country:str='',channel:str='',warehouse_id:int
 @router.get('/{pk}/detail')
 def detail(pk:int):
  with Session() as db:return data(db,get_task(db,pk),True)
-LOG_TITLES={'shipping_dispatch_complete':'完成发货','shipping_create':'创建发货计划','shipping_change':'变更发货计划','shipping_merge':'合并发货计划','shipping_delete':'删除发货计划','shipping_packing_download':'下载装箱单','shipping_packing':'上传装箱单','shipping_repack':'删除装箱单','shipping_packing_edit':'编辑装箱单','shipping_release_stock':'释放库存','shipping_remainder':'创建剩货计划','shipping_labels':'打印 FNSKU 标签','shipping_stock_lock':'锁定库存','shipping_stock_unlock':'释放库存','shipping_stock_outbound':'确认发货 / 库存出库','shipping_sta_create':'创建 STA 任务','shipping_sta_action':'提交货件操作','shipping_sta_result':'货件操作结果','shipping_box_labels':'下载箱子标签','shipping_manual_outbound':'出库','shipping_stock_return':'撤销出库 / 恢复可用库存','shipping_sta_delete':'删除货件和费用','shipping_sta_complete':'货件追踪完成'}
+LOG_TITLES={'shipping_packing_additions':'通过装箱单新增发货计划','shipping_dispatch_complete':'完成发货','shipping_create':'创建发货计划','shipping_change':'变更发货计划','shipping_merge':'合并发货计划','shipping_delete':'删除发货计划','shipping_packing_download':'下载装箱单','shipping_packing':'上传装箱单','shipping_repack':'删除装箱单','shipping_packing_edit':'编辑装箱单','shipping_release_stock':'释放库存','shipping_remainder':'创建剩货计划','shipping_labels':'打印 FNSKU 标签','shipping_stock_lock':'锁定库存','shipping_stock_unlock':'释放库存','shipping_stock_outbound':'确认发货 / 库存出库','shipping_sta_create':'创建 STA 任务','shipping_sta_action':'提交货件操作','shipping_sta_result':'货件操作结果','shipping_box_labels':'下载箱子标签','shipping_manual_outbound':'出库','shipping_stock_return':'撤销出库 / 恢复可用库存','shipping_sta_delete':'删除货件和费用','shipping_sta_complete':'货件追踪完成'}
 @router.get('/{pk}/logs')
 def logs(pk:int,page:int=Query(1,ge=1),page_size:int=Query(100,ge=1,le=100)):
  with Session() as db:
   t=get_task(db,pk)
   cond=[AccessAudit.target==str(pk),AccessAudit.action.in_(list(LOG_TITLES))]
-  rows=[{'id':a.id,'actor':a.actor,'action':a.action,'title':LOG_TITLES[a.action],'created_at':a.created_at,'detail':{k:v for k,v in a.detail.items() if k in ('message','filename','boxes','packed','quantity','sta_id','step','status','name','shipments')}} for a in db.scalars(select(AccessAudit).where(*cond).order_by(AccessAudit.id.desc()).offset((page-1)*page_size).limit(page_size))]
+  rows=[{'id':a.id,'actor':a.actor,'action':a.action,'title':LOG_TITLES[a.action],'created_at':a.created_at,'detail':{k:v for k,v in a.detail.items() if k in ('message','filename','boxes','packed','quantity','sta_id','step','status','name','shipments','source','origin','changes')}} for a in db.scalars(select(AccessAudit).where(*cond).order_by(AccessAudit.id.desc()).offset((page-1)*page_size).limit(page_size))]
   total=db.scalar(select(func.count()).select_from(AccessAudit).where(*cond))
   # Historical creation is known from the plan record; never invent past downloads.
   historical=not db.scalar(select(AccessAudit.id).where(*cond,AccessAudit.action.in_(['shipping_create','shipping_merge'])).limit(1))
@@ -530,6 +530,35 @@ def template(pk:int,boxes:int=Query(5,ge=1,le=200)):
   content=packing_template(t,heading(t),boxes)
   audit(db,'shipping_packing_download',pk,{'filename':number(t)+'-装箱单.xlsx','template':True})
   return attachment(content,number(t)+'-装箱单.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+def resolve_packing_item(db,t,sku,uploaded_fn,quantity):
+ if quantity>100000:raise HTTPException(422,f'{sku}新增数量不能超过100000')
+ matches=list(db.execute(select(Listing,ProductLink.product_id).join(ProductLink,ProductLink.listing_pk==Listing.id).where(Listing.store==t.store,Listing.marketplace==t.country,Listing.sku==sku)))
+ if len(matches)!=1:raise HTTPException(422,f'{sku}未关联当前店铺、国家的唯一标品，请先在Listing中维护关联')
+ listing,pid=matches[0]
+ item=item_snapshot(db,pid,quantity,t.store,t.country,listing.id)
+ if not re.fullmatch(r'[A-Z0-9]{10}',item['fnsku']):raise HTTPException(422,f'{sku}缺少有效FNSKU，请先同步Listing')
+ if uploaded_fn!=item['fnsku']:raise HTTPException(422,f'{sku}的FNSKU与当前店铺、国家的Listing不一致')
+ return item
+
+def add_packing_plan_items(db,t,additions,origin):
+ if not additions:return
+ updated=[dict(i) for i in t.items];changes=[]
+ for item in additions:
+  found=next((i for i in updated if i['sku']==item['sku']),None)
+  if found and (found['product_id'],found.get('listing_id'),found['fnsku'])!=(item['product_id'],item.get('listing_id'),item['fnsku']):raise HTTPException(409,'商品关联已变更，请核对发货计划后重试')
+  before=found['quantity'] if found else 0
+  after=before+item['quantity']
+  if after>100000:raise HTTPException(422,f"{item['sku']}累计计划数量不能超过100000")
+  if found:found['quantity']=after;found['original_quantity']=found.get('original_quantity',before)
+  else:found=dict(item);updated.append(found)
+  found['packing_added_quantity']=found.get('packing_added_quantity',0)+item['quantity']
+  changes.append({'sku':item['sku'],'product_id':item['product_id'],'before':before,'added':item['quantity'],'after':after})
+ if len(updated)>200:raise HTTPException(422,'单个发货计划最多200个商品')
+ t.items=updated
+ # Manual packing additions do not invent purchase-order allocations.
+ reserve_task(db,t)
+ audit(db,'shipping_packing_additions',t.id,{'source':'packing','origin':origin,'changes':changes,'message':'通过装箱单新增发货计划商品或增加数量：'+'；'.join(f"{c['sku']} 增加 {c['added']} 件（{c['before']} → {c['after']}）" for c in changes)})
+
 class Upload(Body):
  revision:int
  filename:str=Field(min_length=1,max_length=255)
@@ -548,9 +577,10 @@ def upload(pk:int,b:Upload):
   if t.revision!=b.revision:raise HTTPException(409,'计划已变更，请刷新并重新上传')
   if t.packing_id:raise HTTPException(409,'已有装箱单，请先删除装箱单后再上传')
   complete(t)
-  try:d=parse_packing(raw,t.items,number(t))
+  try:d=parse_packing(raw,t.items,number(t),lambda sku,fn,qty:resolve_packing_item(db,t,sku,fn,qty))
   except ValueError as e:raise HTTPException(422,str(e))
   if not b.confirm:return {'preview':d}
+  add_packing_plan_items(db,t,d['plan_additions'],'upload')
   digest=sha256(raw).hexdigest()
   p=Packing(task_id=pk,digest=digest,filename=Path(b.filename).name,content=raw,detail=d,actor=actor());db.add(p);db.flush();t.packing_id=p.id;t.packer=actor();t.status='packed' if d['remaining']==0 else 'packing';t.revision+=1;t.updated_at=now();audit(db,'shipping_packing',pk,{'packing_id':p.id,'boxes':len(d['boxes']),'packed':d['packed']})
  return {'ok':True,'packing':d}
@@ -721,7 +751,9 @@ class PackedBox(Body):
  width_cm:float=Field(gt=0,le=100000,allow_inf_nan=False)
  height_cm:float=Field(gt=0,le=100000,allow_inf_nan=False)
  items:list[PackedLine]=Field(min_length=1,max_length=200)
-class PackingEdit(Version):boxes:list[PackedBox]=Field(min_length=1,max_length=200)
+class PackingEdit(Version):
+ boxes:list[PackedBox]=Field(min_length=1,max_length=200)
+ additions:list[Line]=Field(default_factory=list,max_length=200)
 @router.post('/{pk}/packing-edit')
 def edit_packing(pk:int,b:PackingEdit):
  require_admin()
@@ -731,6 +763,9 @@ def edit_packing(pk:int,b:PackingEdit):
   if t.revision!=b.revision:raise HTTPException(409,'计划已变更，请刷新')
   if not t.packing_id:raise HTTPException(409,'请先上传装箱单')
   complete(t)
+  additions=[item_snapshot(db,i.product_id,i.quantity,t.store,t.country,i.listing_id) for i in b.additions]
+  if any(not i['sku'] or not re.fullmatch(r'[A-Z0-9]{10}',i['fnsku']) for i in additions):raise HTTPException(422,'新增商品请选择当前店铺、国家的SKU及有效FNSKU')
+  add_packing_plan_items(db,t,additions,'editor')
   try:raw,d=packing_from_boxes(t,heading(t),[box.model_dump() for box in b.boxes])
   except ValueError as e:raise HTTPException(422,str(e))
   old=t.packing_id;p=Packing(task_id=pk,digest=sha256(raw).hexdigest(),filename=number(t)+'-装箱单.xlsx',content=raw,detail=d,actor=actor());db.add(p);db.flush()
