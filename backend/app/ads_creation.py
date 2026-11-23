@@ -10,7 +10,7 @@ from .advertising import router, profile_checked, IDS
 from .ads_client import Client, AdsError, AdsUnknown
 from .ads_controls import PLACEMENTS, campaign_payload, validate_campaign, save_note
 from .ads_keyword_validation import validate_keyword
-from .ads_workspace import remote_one, enrich
+from .ads_workspace import remote_one, enrich, bulk_permission
 from .ads_suggestions import AUTO, expression_key, parse_recommendations
 from .auth import require_admin
 from .db import Session
@@ -189,17 +189,66 @@ def preview_creation(body:Creation,actor=Depends(require_admin)):
         a=AdsChange(id=str(uuid.uuid4()),profile_id=p.id,kind='create_'+body.mode,entity_id='',campaign_id=body.campaign_id or None,actor=actor['username'],status='preview',before={'_name':body.campaign.get('name') or body.name,'plan':plan,'parent':parent,'digest':digest,'steps':[]},changes={'创建类型':{'campaign':'广告活动及首个广告组','adgroup':'广告组','ad':'广告商品'}[body.mode],'广告组':body.name,'商品数量':len(body.products),'投放类型':body.targeting,'完成后状态':body.state});db.add(a)
     return {'id':a.id,'plan':plan,'parent':parent,'currency':p.currency}
 
+class AddProducts(Strict):
+    request_id: uuid.UUID
+    profile_id: str
+    campaign_id: str = Field(min_length=1)
+    adgroup_id: str = Field(min_length=1)
+    products: list[Product] = Field(min_length=1, max_length=100)
+
+@router.post('/create/ad-submit')
+def submit_products(body:AddProducts,tasks:BackgroundTasks,actor=Depends(require_admin)):
+    bulk_permission(actor,'ad','operate')
+    plan=Creation(profile_id=body.profile_id,mode='ad',campaign_id=body.campaign_id,adgroup_id=body.adgroup_id,products=body.products).model_dump()
+    for product in plan['products']:
+        product['sku']=product['sku'].strip();product['asin']=product['asin'].strip().upper()
+        if not product['sku'] or (product['asin'] and not re.fullmatch('[A-Z0-9]{10}',product['asin'])):raise HTTPException(422,'商品SKU或ASIN无效')
+    skus={p['sku'] for p in plan['products']}
+    if len(skus)!=len(plan['products']):raise HTTPException(422,'不能重复添加同一个SKU')
+    identifier=str(body.request_id)
+    with Session.begin() as db:
+        p=profile_checked(db,body.profile_id)
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:k))'),{'k':'ads-create-request:'+identifier})
+        old=db.get(AdsChange,identifier)
+        if old:
+            if old.actor!=actor['username'] or old.kind!='create_ad' or old.before.get('plan')!=plan:raise HTTPException(409,'提交编号已使用，请查看原任务')
+            return status_result(old)
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:k))'),{'k':'ads-create-group:'+body.profile_id+':'+body.adgroup_id})
+        parent=db.get(AdsEntity,(p.id,'adgroup',body.adgroup_id));campaign=db.get(AdsEntity,(p.id,'campaign',body.campaign_id))
+        if not parent or parent.state=='ARCHIVED' or parent.campaign_id!=body.campaign_id or not campaign or campaign.state=='ARCHIVED':raise HTTPException(409,'请选择此账户下有效的广告活动和广告组')
+        valid={r['sku']:r for r in product_rows(db,p)}
+        existing={e.data.get('sku') for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==p.id,AdsEntity.kind=='ad',AdsEntity.adgroup_id==body.adgroup_id,AdsEntity.state!='ARCHIVED'))}
+        for product in plan['products']:
+            if product['sku'] not in valid or (product['asin'] and product['asin']!=valid[product['sku']].get('asin')):raise HTTPException(422,'请选择当前店铺站点的商品')
+            if product['sku'] in existing:raise HTTPException(409,'该广告组已包含商品 '+product['sku'])
+        for pending in db.scalars(select(AdsChange).where(AdsChange.profile_id==p.id,AdsChange.kind=='create_ad',AdsChange.status.in_(['sending','unknown']))):
+            previous=pending.before.get('plan',{})
+            if previous.get('adgroup_id')==body.adgroup_id and skus.intersection(r['sku'] for r in previous.get('products',[])):raise HTTPException(409,'所选商品已有处理中或结果待核对的添加任务，请勿重复提交')
+        a=AdsChange(id=identifier,profile_id=p.id,kind='create_ad',entity_id='',campaign_id=body.campaign_id,adgroup_id=body.adgroup_id,actor=actor['username'],status='sending',before={'_name':'添加广告商品','plan':plan,'steps':[],'direct':True},changes={'创建类型':'广告商品','商品数量':len(plan['products'])})
+        db.add(a)
+    tasks.add_task(run_creation,identifier)
+    return status_result(a)
+
 class Confirm(Strict):
     id:str
 
 def status_result(a):
-    return {'id':a.id,'status':a.status,'message':a.error or ('创建成功' if a.status=='succeeded' else '正在创建，请稍候'),'campaign_id':a.campaign_id,'adgroup_id':a.adgroup_id,'steps':a.before.get('steps',[]),'current':a.before.get('current')}
+    result={'id':a.id,'status':a.status,'message':a.error or ('创建成功' if a.status=='succeeded' else '正在创建，请稍候'),'campaign_id':a.campaign_id,'adgroup_id':a.adgroup_id,'steps':a.before.get('steps',[]),'current':a.before.get('current')}
+    if a.before.get('direct'):
+        completed={s['label'] for s in a.before.get('steps',[]) if s['kind']=='ad'}
+        result['items']=[]
+        for product in a.before['plan']['products']:
+            label='添加商品 '+product['sku'];done=label in completed
+            state='succeeded' if done else ('queued' if a.status=='sending' else 'unknown' if a.status=='unknown' and label==a.before.get('current') else 'failed')
+            result['items'].append({'text':product['sku'],'asin':product['asin'],'status':state,'message':'' if done or a.status=='sending' else a.error if label==a.before.get('current') else '未执行；请核对任务结果后再添加'})
+    return result
 @router.get('/create/status/{identifier}')
 def creation_status(identifier:str,actor=Depends(require_admin)):
     with Session() as db:
         a=db.get(AdsChange,identifier)
         if not a or a.actor!=actor['username'] or not a.kind.startswith('create_'):raise HTTPException(404,'创建记录不存在')
         profile_checked(db,a.profile_id)
+        if a.kind=='create_ad':bulk_permission(actor,'ad','view')
         return status_result(a)
 
 @router.post('/create/confirm')
@@ -215,9 +264,10 @@ def confirm_creation(body:Confirm,tasks:BackgroundTasks,actor=Depends(require_ad
 
 def run_creation(identifier):
     c=None;status='unknown';error=None
-    with Session() as db:
-        a=db.get(AdsChange,identifier)
-        if not a or a.status!='sending':return
+    with Session.begin() as db:
+        a=db.scalar(select(AdsChange).where(AdsChange.id==identifier).with_for_update())
+        if not a or a.status!='sending' or a.before.get('started'):return
+        a.before={**a.before,'started':True}
         plan=copy.deepcopy(a.before['plan']);pid=a.profile_id
     cid=plan['campaign_id'];gid=None
     def checkpoint(label,kind,payload,create=True):
@@ -241,7 +291,9 @@ def run_creation(identifier):
         c=Client(pid)
         if plan['mode']=='ad':
             gid=plan['adgroup_id'];parent=remote_one(c,'adgroup',gid)
-            if not parent or parent.get('state')=='ARCHIVED' or str(parent.get('campaignId'))!=cid:raise AdsError('广告组已变化，请重新预览')
+            if not parent or parent.get('state')=='ARCHIVED' or str(parent.get('campaignId'))!=cid:raise AdsError('广告组已变化，请同步后核对')
+            campaign=remote_one(c,'campaign',cid)
+            if not campaign or campaign.get('state')=='ARCHIVED':raise AdsError('所属广告活动已归档或不存在')
             existing=c.list('ad',{'adGroupIdFilter':{'include':[gid]}})
             if any(e.get('sku') in {r['sku'] for r in plan['products']} and e.get('state')!='ARCHIVED' for e in existing):raise AdsError('广告组中已存在所选商品，请同步后核对')
             for product in plan['products']:checkpoint('添加商品 '+product['sku'],'ad',{'campaignId':cid,'adGroupId':gid,'sku':product['sku'],'state':plan['state']})

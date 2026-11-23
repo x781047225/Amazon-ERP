@@ -129,3 +129,72 @@ def test_fba_400_reports_parameter_failure_without_blame_on_credentials():
         with pytest.raises(AmazonError,match='查询参数.*400') as error:read('DemoStoreA','/fba/inbound/v0/shipments',{},'shipments')
         assert '权限' not in str(error.value)
         assert http.get.call_count==1
+
+
+def test_incremental_refreshes_omitted_active_shipments_with_scope_and_dedup():
+    from app.models import FbaWork
+    pk=seed(markets=['UK','DE'])
+    with Session() as db:old_time=db.get(Shipment,pk).details_synced_at
+    seed(header('FBATEST00007'),markets=['UK'])
+    seed(header('FBATEST00008',status='CLOSED'))
+    seed(header('FBATEST00009'),markets=['FR'])
+    seed(header('FBATEST00010'),store='DemoStoreC')
+    def pages(store,market,mode,*args):
+        if mode=='ids':
+            assert args[3]==['FBATEST00004']
+            return {'ShipmentData':[header()]}
+        return {'ShipmentData':[header('FBATEST00007')]}
+    jid,_=create_fba_job('DemoStoreB',['UK','DE'],'incremental')
+    with patch('app.amazon.redis.lock',return_value=Lock()),patch('app.fba_amazon.shipment_page',side_effect=pages) as page,patch('app.fba_amazon.all_items',return_value=[item(received=95)]) as items:
+        run_fba_job(jid)
+    assert page.call_count==3 and items.call_count==2
+    assert {c.args[1] for c in items.call_args_list}=={'FBATEST00004','FBATEST00007'}
+    with Session() as db:
+        row=db.get(Shipment,pk)
+        assert row.received==95 and row.details_synced_at>old_time
+        j=db.get(FbaJob,jid);assert j.status=='succeeded' and j.discovered==j.processed==2
+        assert db.scalar(select(func.count()).select_from(FbaWork).where(FbaWork.job_id==jid))==2
+        for sid in ['FBATEST00008','FBATEST00009','FBATEST00010']:
+            assert db.scalar(select(Shipment).where(Shipment.shipment_id==sid)).received==60
+
+
+def test_incremental_omitted_refresh_failure_preserves_data_and_retries():
+    pk=seed();jid,_=create_fba_job('DemoStoreB',['UK'],'incremental')
+    with Session() as db:old_time=db.get(Shipment,pk).details_synced_at
+    with patch('app.amazon.redis.lock',return_value=Lock()),patch('app.fba_amazon.shipment_page',return_value={'ShipmentData':[]}),patch('app.fba_amazon.all_items') as items:
+        run_fba_job(jid)
+    items.assert_not_called()
+    with Session() as db:
+        row=db.get(Shipment,pk);assert row.received==60 and row.details_synced_at==old_time and row.sync_error
+        j=db.get(FbaJob,jid);assert j.status=='partial' and j.failed==1
+    assert client.post('/api/fba/jobs/'+jid+'/retry',headers=HEAD,json={}).status_code==200
+    with patch('app.amazon.redis.lock',return_value=Lock()),patch('app.fba_amazon.shipment_page',return_value={'ShipmentData':[header()]}) as page,patch('app.fba_amazon.all_items',return_value=[item(received=90)]) as items:
+        run_fba_job(jid)
+    assert page.call_count==items.call_count==1 and page.call_args.args[2]=='ids'
+    with Session() as db:
+        row=db.get(Shipment,pk);assert row.received==90 and row.sync_error is None
+        j=db.get(FbaJob,jid);assert j.status=='succeeded' and j.discovered==j.processed==1
+
+
+def test_incremental_omitted_refresh_checks_current_status_before_items():
+    pk=seed();jid,_=create_fba_job('DemoStoreB',['UK'],'incremental')
+    with patch('app.amazon.redis.lock',return_value=Lock()),patch('app.fba_amazon.shipment_page',side_effect=[{'ShipmentData':[]},{'ShipmentData':[header(status='CLOSED')]}]),patch('app.fba_amazon.all_items') as items:
+        run_fba_job(jid)
+    items.assert_not_called()
+    with Session() as db:
+        row=db.get(Shipment,pk);assert row.status=='CLOSED' and row.received==60
+        assert db.get(FbaJob,jid).status=='succeeded'
+
+
+def test_active_supplement_is_atomic_idempotent_and_incremental_only():
+    from app.fba_sync import queue_active_shipments
+    from app.models import FbaWork
+    seed()
+    jid,_=create_fba_job('DemoStoreB',['UK'],'recent')
+    with Session.begin() as db:
+        j=db.get(FbaJob,jid);queue_active_shipments(db,j)
+        assert j.discovered==0
+        j.mode='incremental';queue_active_shipments(db,j);db.flush()
+        queue_active_shipments(db,j);db.flush()
+        assert j.discovered==1
+        assert db.scalar(select(func.count()).select_from(FbaWork).where(FbaWork.job_id==jid))==1

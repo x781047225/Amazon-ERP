@@ -543,3 +543,16 @@ def test_overview_batched_latest_active_and_single_credentials_read(monkeypatch)
  rows=response.json()['rows'];orders=next(r for r in rows if r['kind']=='orders')
  assert len(rows)==9 and orders['latest']['id']=='newer-complete' and orders['active']
  assert orders['enabled'] and orders['interval_minutes']==5 and orders['revision']==3
+
+
+def test_shipment_frequency_change_recalculates_next_trigger(monkeypatch):
+ at=now();monkeypatch.setattr(sync,'now',lambda:at)
+ with Session.begin() as db:
+  db.add(Config(store='DemoStoreB',kind='shipments',enabled=True,interval_minutes=240,
+                revision=2,last_success_at=at-timedelta(hours=3),next_run_at=at+timedelta(hours=3)))
+ response=post('/DemoStoreB/shipments/schedule',{'enabled':True,'interval_minutes':60,'days':1,'revision':2})
+ assert response.status_code==200
+ with Session() as db:
+  c=db.get(Config,('DemoStoreB','shipments'))
+  assert c.interval_minutes==60 and c.next_run_at==at+timedelta(hours=1)
+  assert c.last_success_at==at-timedelta(hours=3)

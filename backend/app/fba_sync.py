@@ -7,6 +7,8 @@ from .models import Shipment,ShipmentItem,ShipmentMarket,ShipmentSnapshot,FbaJob
 from .amazon import redis,AmazonError
 from . import fba_amazon
 
+TERMINAL_STATUSES=('CLOSED','CANCELLED','DELETED')
+
 HEADER_FIELDS=['ShipmentId','ShipmentName','ShipmentStatus','DestinationFulfillmentCenterId']
 def header(data):
     if not data.get('ShipmentId') or not data.get('ShipmentStatus'):raise AmazonError('FBA 货件身份或状态缺失。')
@@ -69,6 +71,39 @@ def create_fba_job(store,markets,mode='all',days=90,shipment_ids=None):
         j=FbaJob(id=str(uuid4()),store=store,markets=list(dict.fromkeys(markets)),mode=mode,days=days,shipment_ids=list(dict.fromkeys(shipment_ids or [])),status='queued',phase='discovery')
         db.add(j);db.flush();return j.id,True
 
+def queue_active_shipments(db,job):
+    """Quantity changes may be absent from the upstream updated-date window."""
+    if job.mode!='incremental':return
+    existing=set(db.scalars(select(FbaWork.shipment_id).where(FbaWork.job_id==job.id)))
+    rows=db.execute(select(Shipment,ShipmentMarket.marketplace).join(
+        ShipmentMarket,ShipmentMarket.shipment_pk==Shipment.id).where(
+        Shipment.store==job.store,Shipment.status.notin_(TERMINAL_STATUSES),
+        ShipmentMarket.marketplace.in_(job.markets)).order_by(Shipment.id,ShipmentMarket.marketplace))
+    candidates={}
+    for row,market in rows:
+        if row.shipment_id in existing:continue
+        if row.shipment_id not in candidates:
+            candidates[row.shipment_id]=FbaWork(job_id=job.id,shipment_id=row.shipment_id,
+                metadata_json={'refresh_by_id':True},markets=[])
+        candidates[row.shipment_id].markets.append(market)
+    for work in candidates.values():db.add(work)
+    job.discovered+=len(candidates)
+
+
+def refresh_work_header(store,work,job,heartbeat):
+    # Fetch current status too: a formerly active shipment may now be closed.
+    cursor=None;seen=set()
+    while True:
+        payload=fba_amazon.shipment_page(store,work.markets[0],'ids',job.days,
+            job.created_at,cursor,[work.shipment_id],heartbeat)
+        for raw in payload['ShipmentData']:
+            if raw.get('ShipmentId')==work.shipment_id:return header(raw)
+        cursor=payload.get('NextToken')
+        if not cursor:raise AmazonError('复核时未找到货件，保留原明细，下轮继续复核。')
+        if cursor in seen:raise AmazonError('FBA 货件复核分页标记重复，保留原明细。')
+        seen.add(cursor)
+
+
 def run_fba_job(job_id):
     with Session() as db:
         j=db.get(FbaJob,job_id)
@@ -93,7 +128,10 @@ def run_fba_job(job_id):
             with Session() as db:j=db.get(FbaJob,job_id)
             if j.phase!='discovery':break
             if j.market_index>=len(j.markets):
-                with Session.begin() as db:db.get(FbaJob,job_id).phase='items'
+                with Session.begin() as db:
+                    current=db.get(FbaJob,job_id)
+                    queue_active_shipments(db,current)
+                    current.phase='items'
                 break
             market=j.markets[j.market_index]
             payload=fba_amazon.shipment_page(j.store,market,j.mode,j.days,j.created_at,j.cursor,j.shipment_ids,heartbeat)
@@ -115,11 +153,17 @@ def run_fba_job(job_id):
             heartbeat()
             with Session() as db:work=db.scalar(select(FbaWork).where(FbaWork.job_id==job_id,FbaWork.status=='pending').order_by(FbaWork.id))
             if work is None:break
-            if j.mode=='incremental' and work.metadata_json.get('ShipmentStatus') in ('CLOSED','CANCELLED','DELETED'):
-                with Session.begin() as db:
-                    db.get(FbaWork,work.id).status='done';db.get(FbaJob,job_id).processed+=1
-                continue
             try:
+                if work.metadata_json.get('refresh_by_id'):
+                    data=refresh_work_header(store,work,j,heartbeat)
+                    with Session.begin() as db:
+                        save_header(db,store,data,work.markets)
+                        db.get(FbaWork,work.id).metadata_json=data
+                    work.metadata_json=data
+                if j.mode=='incremental' and work.metadata_json.get('ShipmentStatus') in TERMINAL_STATUSES:
+                    with Session.begin() as db:
+                        db.get(FbaWork,work.id).status='done';db.get(FbaJob,job_id).processed+=1
+                    continue
                 items=fba_amazon.all_items(store,work.shipment_id,work.markets[0],heartbeat)
                 with Session.begin() as db:
                     save_complete(db,store,work.metadata_json,work.markets,items)

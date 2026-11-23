@@ -10,7 +10,7 @@ from app.models import AdsEntity
 from test_advertising import seed,save_entities,PID,client
 HEAD={'x-erp-client':'web'}
 
-@pytest.mark.parametrize('kind,id_field,filter_key',[('negative_keyword','keywordId','negativeKeywordIdFilter'),('negative_target','targetId','negativeTargetIdFilter')])
+@pytest.mark.parametrize('kind,id_field,filter_key',[('ad','adId','adIdFilter'),('negative_keyword','keywordId','negativeKeywordIdFilter'),('negative_target','targetId','negativeTargetIdFilter')])
 @pytest.mark.parametrize('state',['ENABLED','PAUSED','ARCHIVED'])
 def test_negative_state_preview_confirm_and_cache(monkeypatch,kind,id_field,filter_key,state):
  seed();remote={id_field:'55','campaignId':'1','adGroupId':'3','state':'PAUSED' if state=='ENABLED' else 'ENABLED'};save_entities(PID,kind,[remote]);writes=[]
@@ -33,7 +33,7 @@ def test_negative_state_preview_confirm_and_cache(monkeypatch,kind,id_field,filt
  assert client.post('/api/advertising/edit/confirm',headers=HEAD,json=body).status_code==409
 
 @pytest.mark.parametrize('kind,id_field,filter_key',[
- ('campaign','campaignId','campaignIdFilter'),('keyword','keywordId','keywordIdFilter'),('target','targetId','targetIdFilter'),
+ ('ad','adId','adIdFilter'),('campaign','campaignId','campaignIdFilter'),('keyword','keywordId','keywordIdFilter'),('target','targetId','targetIdFilter'),
  ('negative_keyword','keywordId','negativeKeywordIdFilter'),('negative_target','targetId','negativeTargetIdFilter')])
 def test_archive_adapter_uses_dedicated_endpoint(kind,id_field,filter_key):
  c=Client.__new__(Client);c.endpoint='https://ads.test';c.profile='demo';c.credentials={'client_id':'demo'};c.token=lambda:'fake';calls=[]

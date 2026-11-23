@@ -58,7 +58,7 @@ def route_keys(path,query,body,method):
   return ['settings.mail'] if path.split('/')[3] in ('messages','message') else ['settings.stores']
  if path.startswith('/api/todos'):return ['todos']
  if path.startswith('/api/users'):return ['users.users']
- if path=='/api/integration/capabilities':return ['procurement.plans','procurement.orders','shipping','listing','orders','fba.list','fba.invoice','fba.declaration','warehouse','products.products','products.suppliers','products.declaration','products.clearance','settings.clearance','settings.declaration']
+ if path=='/api/integration/capabilities':return ['advertising','advertising.ad','advertising.target','advertising.negative','advertising.search','advertising.logs','procurement.plans','procurement.orders','shipping','listing','orders','fba.list','fba.invoice','fba.declaration','warehouse','products.products','products.suppliers','products.declaration','products.clearance','settings.clearance','settings.declaration']
  if path.startswith('/api/customs/profiles'):return ['products.products','products.declaration','products.clearance','fba.invoice'] if read else ['products.declaration','products.clearance']
  if path.startswith('/api/customs/choices'):return ['products.products','products.declaration','products.clearance']
  if path.startswith('/api/customs/'):
@@ -121,10 +121,19 @@ def route_keys(path,query,body,method):
  if path.startswith('/api/finance/summary'):return ['finance.summary']
  if path.startswith('/api/finance/jobs'):return ['finance.jobs']
  if path.startswith('/api/finance'):return ['finance.records']
+ if path.startswith('/api/integration/advertising/'):
+  from .integration_advertising import route_keys as advertising_query_keys
+  return advertising_query_keys(path,query)
  if path.startswith('/api/advertising'):
   if '/edit/bulk-' in path:return ['advertising','advertising.ad','advertising.target','advertising.negative']
   if path.endswith('/entity-logs'):return ['advertising.logs']
-  if path.endswith('/create/options'):return ['advertising','advertising.search','advertising.target']
+  if path.endswith('/create/ad-submit'):return ['advertising.ad']
+  if '/create/status/' in path:
+   from .models import AdsChange
+   with Session() as db:
+    row=db.get(AdsChange,path.rsplit('/',1)[-1])
+    if row and row.kind=='create_ad':return ['advertising.ad']
+  if path.endswith('/create/products') or path.endswith('/create/options'):return ['advertising','advertising.ad','advertising.search','advertising.target']
   if any(path.endswith('/search-actions/'+action) for action in ['context','suggestions','submit']) or '/search-actions/status/' in path:return ['advertising.search','advertising.target']
   if '/search-actions/' in path:return ['advertising.search','advertising.negative'] if path.endswith('/product-image') else ['advertising.search']
   kind=query.get('level') or body.get('level') or body.get('kind')
@@ -160,7 +169,8 @@ def token_route(method,path):
  from .integration_products import TOKEN_ROUTES
  from .integration_planning import TOKEN_ROUTES as PLANNING_ROUTES
  from .integration_documents import TOKEN_ROUTES as DOCUMENT_ROUTES
- TOKEN_ROUTES=TOKEN_ROUTES|PLANNING_ROUTES|DOCUMENT_ROUTES
+ from .integration_advertising import TOKEN_ROUTES as ADVERTISING_ROUTES
+ TOKEN_ROUTES=TOKEN_ROUTES|PLANNING_ROUTES|DOCUMENT_ROUTES|ADVERTISING_ROUTES
  if any(method==verb and re.fullmatch(pattern,path) for verb,pattern in TOKEN_ROUTES):return True
  if method=='GET':return bool(re.fullmatch(r'/api/(integration/capabilities|listings(?:/\d+)?|fba/shipments(?:/\d+)?|orders(?:/\d+)?|warehouse/stock)',path))
  return method=='POST' and bool(re.fullmatch(r'/api/listings/\d+/(preview|submit|submissions/[0-9a-f-]+/verify)',path))

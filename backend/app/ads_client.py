@@ -86,7 +86,7 @@ class Client:
         resource,typ,key=RESOURCES[kind];media='application/vnd.'+typ+'.v3+json'
         method='POST' if create else 'PUT';path='/sp/'+resource;body={key:[payload]}
         if not create and payload.get('state')=='ARCHIVED':
-            archive_fields={'campaign':('campaignId','campaignIdFilter'),'keyword':('keywordId','keywordIdFilter'),'target':('targetId','targetIdFilter'),'negative_keyword':('keywordId','negativeKeywordIdFilter'),'negative_target':('targetId','negativeTargetIdFilter')}
+            archive_fields={'ad':('adId','adIdFilter'),'campaign':('campaignId','campaignIdFilter'),'keyword':('keywordId','keywordIdFilter'),'target':('targetId','targetIdFilter'),'negative_keyword':('keywordId','negativeKeywordIdFilter'),'negative_target':('targetId','negativeTargetIdFilter')}
             if kind not in archive_fields:raise AdsError('当前对象不支持归档')
             id_field,filter_key=archive_fields[kind]
             if set(payload)!={id_field,'state'}:raise AdsError('归档请单独提交，不能同时修改其他字段')

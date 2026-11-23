@@ -103,6 +103,26 @@ Listing 的调价、编辑、关联等操作记录在 Listing 业务日志中；
 
 ## MCP 接入
 
+广告提供 10 个只读 MCP 工具：
+
+| 内容 | 工具 |
+| --- | --- |
+| 广告账户、店铺、国家、币种和时区 | `advertising_profiles_query` |
+| 广告活动 | `advertising_campaigns_query` |
+| 广告组 | `advertising_adgroups_query` |
+| 广告商品（SKU / ASIN） | `advertising_ads_query` |
+| 关键词、自动定向、商品投放 | `advertising_targets_query` |
+| 用户搜索词 | `advertising_search_terms_query` |
+| 否定关键词、否定商品 | `advertising_negatives_query` |
+| 广告位 | `advertising_placements_query` |
+| 操作日志 | `advertising_logs_query` |
+| 广告实体完整设置 | `advertising_entity_detail` |
+
+先调用 `advertising_profiles_query` 获取授权账户 `profile_id`，再传入其他查询。列表支持 `campaign_id`、`adgroup_id`、起止日期 `start/end`、`state`、`q/search_type`、`sort/direction` 和分页（每页最多100条）；默认包括归档记录。投放可用 `entity_filter=keyword/auto/product`，否定投放可用 `negative_keyword/negative_product`；匹配类型可用逗号分隔的 `match_types`。详情使用列表返回的 `kind`、`id`，将 `id` 作为 `entity_id`。
+
+这些工具读取 ERP 已同步的 Sponsored Products 数据，与网页报表口径一致，不触发同步或亚马逊写入；返回 `source=erp_synced`、实体同步时间、报表更新时间和覆盖范围。未同步指标为 `null`，不能解释为零；否定投放指标来自匹配搜索词且规则可能重叠。各工具及详情按广告页面查看权限、Token有效期和授权店铺隔离，记录 MCP 调用日志；不会开放广告创建、调价、状态修改或归档权限。后端更新后需让 MCP 客户端重新发现工具，已有有效 Token 按其用户当前权限生效，无需仅为新增工具换 Token。
+
+
 FBA 货件单据提供只读工具：`fba_invoices_query` / `fba_invoice_detail`（清关发票），`fba_declarations_query` / `fba_declaration_detail`（报关单）。列表支持 `store`、`shipment_id` 精确匹配、`q` 货件号模糊搜索和分页；详情的 `id` 使用单据列表返回的数字编号。发票详情与编辑页保持相同口径；报关单读取生成时保存的抬头和明细，不解析 Excel 或重新生成单据。
 
 单据详情的 `shipment` 包含对应店铺货件的当前状态、目的国/仓库、日期、发货/接收数量和物流信息，箱数明确标注来自单据。关联货件还需「FBA货件 → 货件列表」查看权限：`shipment_info_status` 为 `available`、`no_permission` 或 `not_synced`，后两种返回 `shipment=null`。独立工具 `shipments_query` / `shipment_detail` 提供货件列表、完整 SKU/FNSKU 明细、跟踪信息和历史快照；列表可按货件号、状态、日期和异常筛选。发票、报关单分别要求对应 Tab 查看权限，所有查询受店铺范围限制并记录调用用户；未开放单据创建、修改、删除或导出。

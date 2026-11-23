@@ -9,10 +9,12 @@ from .permissions import can
 from .listing_editor import FIELDS
 from .listing_api import EditorPreview,ConfirmSubmission
 from .integration_products import TOOLS as PRODUCT_TOOLS, DESTRUCTIVE
+from .integration_advertising import TOOLS as ADVERTISING_TOOLS, router as advertising_query_router
 from .integration_documents import TOOLS as DOCUMENT_TOOLS
 from .integration_planning import TOOLS as PLANNING_TOOLS, DESTRUCTIVE as PLANNING_DESTRUCTIVE
 DESTRUCTIVE=DESTRUCTIVE|PLANNING_DESTRUCTIVE
 router=APIRouter()
+router.include_router(advertising_query_router)
 
 def obj(properties,required=()):return {'type':'object','properties':properties,'required':list(required),'additionalProperties':False}
 S={'type':'string'}
@@ -34,6 +36,7 @@ TOOLS=[
 TOOLS.extend(PRODUCT_TOOLS)
 TOOLS.extend(PLANNING_TOOLS)
 TOOLS.extend(DOCUMENT_TOOLS)
+TOOLS.extend(ADVERTISING_TOOLS)
 def tool_allowed(p,key,action):
  return any(can(p,k,action) for k in (key if isinstance(key,tuple) else (key,)))
 

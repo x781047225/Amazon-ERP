@@ -396,7 +396,7 @@ def clean_changes(body):
  if body.kind=='campaign':validate_campaign(changes)
  if body.kind not in allowed or not changes or not set(changes)<=allowed[body.kind]:raise HTTPException(422,'修改字段不支持')
  for k,v in changes.items():
-  if k=='state' and (v not in ['ENABLED','PAUSED','ARCHIVED'] or (v=='ARCHIVED' and body.kind not in ['campaign','keyword','target','negative_keyword','negative_target'])):raise HTTPException(422,'当前对象不支持此状态')
+  if k=='state' and (v not in ['ENABLED','PAUSED','ARCHIVED'] or (v=='ARCHIVED' and body.kind not in ['campaign','ad','keyword','target','negative_keyword','negative_target'])):raise HTTPException(422,'当前对象不支持此状态')
   if k in ['bid','defaultBid']:
    if isinstance(v,bool) or not isinstance(v,(int,float)) or not Decimal(str(v)).is_finite() or not 0<float(v)<=10000:raise HTTPException(422,'竞价须大于0且不超过10000')
   if k in ['name','keywordText'] and (not isinstance(v,str) or not v.strip() or len(v)>250):raise HTTPException(422,'名称或关键词须为1至250个字符')
@@ -475,7 +475,30 @@ def execute_confirm(body,actor,queued=False):
   values=remote
   if a.kind=='campaign':
    with Session() as db:values=campaign_values(remote,note_value(db,a.profile_id,a.entity_id))
-  if not create and any(not equal_value(k,values.get(k),a.before.get(k)) for k in a.changes):raise AdsError('亚马逊上的值已变化，请同步后重新预览')
+  direct=a.before.get('_direct_bid')
+  if direct:
+   request=EditBody(**direct);changes=clean_changes(request);base=values.get('bid')
+   if request.percentage:
+    if base is None:
+     parent=remote_one(c,'adgroup',str(remote.get('adGroupId') or a.adgroup_id))
+     if not parent or parent.get('state')=='ARCHIVED':raise AdsError('广告组已归档或不存在，请同步')
+     base=parent.get('defaultBid')
+    if base is None or not Decimal(str(base)).is_finite() or Decimal(str(base))<=0:raise AdsError('当前竞价或广告组默认竞价不可用，未修改')
+    adjustment=request.percentage
+    factor=1+(adjustment.percent if adjustment.direction=='increase' else -adjustment.percent)/100
+    value=(Decimal(str(base))*factor).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
+    changes=clean_changes(EditBody(profile_id=a.profile_id,kind=a.kind,entity_id=a.entity_id,changes={'bid':float(value)}))
+   before={**a.before,'bid':values.get('bid'),'_calculated_from':base}
+   with Session.begin() as db:
+    saved=db.get(AdsChange,a.id);saved.before=before;saved.changes=changes;saved.updated_at=now()
+   a.before=before;a.changes=changes
+   if equal_value('bid',values.get('bid'),changes['bid']):
+    with Session.begin() as db:
+     entity=db.get(AdsEntity,(a.profile_id,a.kind,a.entity_id))
+     if entity:entity.data=remote;entity.state=remote.get('state',entity.state);entity.synced_at=now()
+    status='succeeded';error='竞价已是目标值，无须修改'
+    return {'status':status,'message':error}
+  if not create and not direct and any(not equal_value(k,values.get(k),a.before.get(k)) for k in a.changes):raise AdsError('亚马逊上的值已变化，请同步后重新预览')
   if a.before.get('_bid_base'):
    saved=a.before['_bid_base'];parent=remote_one(c,'adgroup',saved['adgroup_id'])
    if not parent or parent.get('state')=='ARCHIVED' or not equal_value('defaultBid',parent.get('defaultBid'),saved['default_bid']):raise AdsError('广告组默认竞价已变化，请重新预览')
@@ -500,6 +523,7 @@ def execute_confirm(body,actor,queued=False):
     if eid:
      row={**payload,**returned,IDS[a.kind]:eid};db.merge(AdsEntity(profile_id=a.profile_id,kind=a.kind,entity_id=eid,campaign_id=a.campaign_id,adgroup_id=a.adgroup_id,name=title(row),state=row['state'],data=row,synced_at=now()))
     else:error='提交已成功，请同步广告数据获取新建记录'
+ except HTTPException as exc:status='failed';error=str(exc.detail)
  except AdsUnknown as exc:status='unknown';error=str(exc)
  except AdsError as exc:status='failed';error=str(exc)
  except Exception:status='unknown';error='处理结果待核对，请同步广告数据；不要直接重复提交'
@@ -526,7 +550,7 @@ def bulk_result(db,job):
  for identifier in job.before['ids']:
   a=db.get(AdsChange,identifier)
   if not a:continue
-  items.append({'id':a.id,'profile_id':a.profile_id,'kind':a.kind,'entity_id':a.entity_id,'text':a.before.get('_name',''),'status':a.status,'message':a.error,'before':{k:a.before.get(k) for k in a.changes},'changes':a.changes})
+  items.append({'id':a.id,'profile_id':a.profile_id,'kind':a.kind,'entity_id':a.entity_id,'text':a.before.get('_name',''),'status':a.status,'message':a.error,'before':{k:a.before.get(k) for k in a.changes},'changes':a.changes,**({'before_value':a.before.get('_calculated_from',a.before.get('bid')),'after_value':a.changes.get('bid')} if a.before.get('_direct_bid') else {})})
  return {'id':job.id,'status':job.status,'message':job.error,'items':items}
 
 @router.post('/edit/bulk-submit')
@@ -557,6 +581,47 @@ def submit_bulk(body:BulkConfirmBody,tasks:BackgroundTasks,actor=Depends(require
   job=AdsChange(id=identifier,profile_id=rows[0].profile_id,kind='bulk_edit',entity_id='',actor=actor['username'],status='sending',before={'ids':ids},changes={'操作':'批量调整','条数':len(ids)})
   db.add(job);db.flush();result=bulk_result(db,job)
  tasks.add_task(run_bulk,identifier,dict(actor),body.acknowledge_archive)
+ return result
+
+class BulkBidBody(BaseModel):
+ request_id:uuid.UUID
+ items:list[EditBody]=Field(min_length=1,max_length=1000)
+
+@router.post('/edit/bulk-bid-submit')
+def submit_bulk_bids(body:BulkBidBody,tasks:BackgroundTasks,actor=Depends(require_admin)):
+ identifier=str(body.request_id)
+ requests=[item.model_dump(mode='json') for item in body.items]
+ with Session.begin() as db:
+  db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':'ads-bulk:'+identifier})
+  old=db.get(AdsChange,identifier)
+  if old:
+   if old.kind!='bulk_edit' or old.actor!=actor['username'] or old.before.get('requests')!=requests:raise HTTPException(409,'请求编号已用于其他操作')
+   for item in body.items:
+    profile_checked(db,item.profile_id);bulk_permission(actor,item.kind,'operate')
+   return bulk_result(db,old)
+  entities=set();validated=[]
+  for item in body.items:
+   if item.create or item.kind not in ['keyword','target'] or not item.entity_id:raise HTTPException(422,'此操作仅支持已有投放项竞价')
+   changes=clean_changes(item)
+   if (item.percentage and item.percentage.field!='bid') or (not item.percentage and set(changes)!={'bid'}):raise HTTPException(422,'此操作仅支持调整竞价')
+   profile_checked(db,item.profile_id);bulk_permission(actor,item.kind,'operate')
+   entity=(item.profile_id,item.kind,item.entity_id)
+   if entity in entities:raise HTTPException(422,'同一项目不能重复调整')
+   entities.add(entity)
+   e=db.get(AdsEntity,entity)
+   if not e:raise HTTPException(404,'投放项不存在，请刷新')
+   if e.state=='ARCHIVED':raise HTTPException(409,'所选投放项已归档，请刷新')
+   validated.append((item,changes,e))
+  for pid,kind,eid in sorted(entities):
+   db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':f'ads-edit:{pid}:{kind}:{eid}'})
+   if db.scalar(select(AdsChange.id).where(AdsChange.profile_id==pid,AdsChange.kind==kind,AdsChange.entity_id==eid,AdsChange.status.in_(['queued','sending'])).limit(1)):raise HTTPException(409,'所选项目正在处理，请等待任务完成')
+  ids=[]
+  for item,changes,e in validated:
+   child=str(uuid.uuid4());ids.append(child)
+   db.add(AdsChange(id=child,profile_id=item.profile_id,kind=item.kind,entity_id=item.entity_id,campaign_id=e.campaign_id,adgroup_id=e.adgroup_id,actor=actor['username'],status='queued',before={'_name':title(e.data) or e.name,'_direct_bid':item.model_dump(mode='json')},changes=changes))
+  job=AdsChange(id=identifier,profile_id=body.items[0].profile_id,kind='bulk_edit',entity_id='',actor=actor['username'],status='sending',before={'ids':ids,'requests':requests},changes={'操作':'批量调整竞价','条数':len(ids)})
+  db.add(job);db.flush();result=bulk_result(db,job)
+ tasks.add_task(run_bulk,identifier,dict(actor))
  return result
 
 @router.get('/edit/bulk-status/{identifier}')
