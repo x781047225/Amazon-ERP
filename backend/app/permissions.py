@@ -122,8 +122,10 @@ def route_keys(path,query,body,method):
  if path.startswith('/api/finance/jobs'):return ['finance.jobs']
  if path.startswith('/api/finance'):return ['finance.records']
  if path.startswith('/api/advertising'):
+  if '/edit/bulk-' in path:return ['advertising','advertising.ad','advertising.target','advertising.negative']
   if path.endswith('/entity-logs'):return ['advertising.logs']
-  if path.endswith('/create/options'):return ['advertising','advertising.search']
+  if path.endswith('/create/options'):return ['advertising','advertising.search','advertising.target']
+  if any(path.endswith('/search-actions/'+action) for action in ['context','suggestions','submit']) or '/search-actions/status/' in path:return ['advertising.search','advertising.target']
   if '/search-actions/' in path:return ['advertising.search','advertising.negative'] if path.endswith('/product-image') else ['advertising.search']
   kind=query.get('level') or body.get('level') or body.get('kind')
   if path.endswith('/edit/confirm') or path.endswith('/create/confirm'):

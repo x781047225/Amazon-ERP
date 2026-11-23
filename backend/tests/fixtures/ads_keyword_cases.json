@@ -1,0 +1,82 @@
+[
+  {
+    "text": "baby elf",
+    "valid": true
+  },
+  {
+    "text": "children’s toys",
+    "valid": true
+  },
+  {
+    "text": "kid's toy",
+    "valid": true
+  },
+  {
+    "text": "fête für kinder",
+    "valid": true
+  },
+  {
+    "text": "café ribbon",
+    "valid": true
+  },
+  {
+    "text": "圣诞礼物",
+    "valid": true
+  },
+  {
+    "text": "  baby   elf  ",
+    "valid": true
+  },
+  {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "valid": true
+  },
+  {
+    "text": "word word word word word word word word word word",
+    "valid": true
+  },
+  {
+    "text": "stocking fillers kids under £5",
+    "valid": false
+  },
+  {
+    "text": "gifts $5",
+    "valid": false
+  },
+  {
+    "text": "cadeau €5",
+    "valid": false
+  },
+  {
+    "text": "问号?",
+    "valid": false
+  },
+  {
+    "text": "toy & gift",
+    "valid": false
+  },
+  {
+    "text": "ribbon/blue",
+    "valid": false
+  },
+  {
+    "text": "toys🎁",
+    "valid": false
+  },
+  {
+    "text": "elf​toy",
+    "valid": false
+  },
+  {
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "valid": false
+  },
+  {
+    "text": "word word word word word word word word word word word",
+    "valid": false
+  },
+  {
+    "text": "",
+    "valid": false
+  }
+]

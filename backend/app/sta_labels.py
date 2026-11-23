@@ -24,3 +24,19 @@ def a4_two_up(raw, expected_count):
   y=(height/2 if index%2==0 else 0)+margin+(slot_height-h*scale)/2
   target.merge_transformed_page(page,transform.scale(scale).translate(x,y))
  out=BytesIO();writer.write(out);return out.getvalue()
+
+
+def carrier_label_type(page_type, delivery):
+ """Never request box-only thermal labels for a partnered parcel shipment."""
+ if delivery.get('shippingSolution')!='AMAZON_PARTNERED_CARRIER' or 'SMALL_PARCEL' not in delivery.get('shippingMode',''):
+  return page_type
+ if page_type in ('PackageLabel_A4_4','PackageLabel_Letter_4'):
+  return 'PackageLabel_A4_2'
+ if not page_type.startswith('PackageLabel_Thermal'):
+  return page_type
+ carrier=delivery.get('carrier') or {}
+ name=(carrier.get('name','')+' '+carrier.get('alphaCode','')).upper()
+ if 'DHL' in name:return 'PackageLabel_Thermal_No_Carrier_Rotation'
+ if 'UPS' in name or 'UNITED PARCEL' in name:return 'PackageLabel_Thermal'
+ if 'ATS' in name or 'AMAZON' in name:return 'PackageLabel_Thermal_Unified'
+ raise StaError('该合作承运人的热敏格式暂不支持，请选择 A4 箱唛和快递面单')

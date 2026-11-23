@@ -284,7 +284,7 @@ def confirm_dispatch(id:str,b:ConfirmDispatch):
   db.flush();return public(t)
 
 @router.get('/{id}/shipments/{shipment_id}/labels')
-def labels(id:str,shipment_id:str,page_type:Literal['PackageLabel_A4_2','PackageLabel_A4_4','PackageLabel_Letter_4','PackageLabel_Thermal_NonPCP','PackageLabel_Thermal','PackageLabel_Thermal_Unified']='PackageLabel_A4_2'):
+def labels(id:str,shipment_id:str,page_type:Literal['PackageLabel_A4_2','PackageLabel_A4_4','PackageLabel_Letter_4','PackageLabel_Thermal_NonPCP','PackageLabel_Thermal','PackageLabel_Thermal_Unified','PackageLabel_Thermal_No_Carrier_Rotation']='PackageLabel_A4_2'):
  from .sta_amazon import call,pages,download_pdf,BASE,StaError
  from .shipping import attachment
  from io import BytesIO
@@ -297,9 +297,12 @@ def labels(id:str,shipment_id:str,page_type:Literal['PackageLabel_A4_2','Package
   store=t.store;plan_id=t.inbound_plan_id;fba=shipment['shipmentConfirmationId'];shipping_id=t.shipping_id
   from .shipping import heading,stock_state
   plan_title=heading(db.get(ShippingTask,t.shipping_id))
-  two_up=page_type=='PackageLabel_A4_2' and t.result.get('deliveryDetails',{}).get(shipment_id,{}).get('shippingSolution')=='USE_YOUR_OWN_CARRIER'
+  delivery=t.result.get('deliveryDetails',{}).get(shipment_id,{})
+  two_up=page_type=='PackageLabel_A4_2' and delivery.get('shippingSolution')=='USE_YOUR_OWN_CARRIER'
   amazon_page_type='PackageLabel_Thermal_NonPCP' if two_up else page_type
  try:
+  from .sta_labels import carrier_label_type
+  amazon_page_type=carrier_label_type(amazon_page_type,delivery)
   boxes=pages(store,BASE+'/inboundPlans/'+plan_id+'/shipments/'+shipment_id+'/boxes','boxes')
   ids=[b['boxId'] for b in boxes if b.get('boxId')]
   if not ids:raise StaError('亚马逊箱号尚未生成，请稍后同步状态')
@@ -318,7 +321,7 @@ def labels(id:str,shipment_id:str,page_type:Literal['PackageLabel_A4_2','Package
   from .products import audit
   with Session.begin() as db:
    get(db,id)
-   audit(db,'shipping_box_labels',shipping_id,{'sta_id':id,'filename':filename,'boxes':len(ids),'shipments':[fba]})
+   audit(db,'shipping_box_labels',shipping_id,{'sta_id':id,'filename':filename,'boxes':len(ids),'shipments':[fba],'requested_page_type':page_type,'amazon_page_type':amazon_page_type,'pages':len(writer.pages)})
   return attachment(data,filename,'application/pdf')
  except StaError as e:raise HTTPException(502,str(e)) from None
  except Exception:raise HTTPException(502,'箱子标签读取失败，请稍后重试') from None

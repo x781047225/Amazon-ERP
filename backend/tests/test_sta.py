@@ -517,3 +517,34 @@ def test_preview_unavailable_before_box_information():
  with Session.begin() as db:
   t=db.get(StaTask,id);t.stage='placement';t.mode='placement_first'
  assert action(id,'placement_transport_options',{'readyDate':delivery_payload()['readyDate']}).status_code==422
+
+@pytest.mark.parametrize('carrier,requested,expected',[
+ ({'name':'DHL','alphaCode':'DHLEX'},'PackageLabel_Thermal_NonPCP','PackageLabel_Thermal_No_Carrier_Rotation'),
+ ({'name':'DHL'},'PackageLabel_Thermal_No_Carrier_Rotation','PackageLabel_Thermal_No_Carrier_Rotation'),
+ ({'name':'UPS'},'PackageLabel_Thermal_NonPCP','PackageLabel_Thermal'),
+ ({'name':'Amazon Transportation Services','alphaCode':'ATS'},'PackageLabel_Thermal_NonPCP','PackageLabel_Thermal_Unified'),
+ ({'name':'DHL'},'PackageLabel_A4_4','PackageLabel_A4_2'),
+ ({'name':'DHL'},'PackageLabel_A4_2','PackageLabel_A4_2'),
+])
+def test_partnered_labels_include_all_carrier_pages(monkeypatch,carrier,requested,expected):
+ id=rename_task();calls=[]
+ with Session.begin() as db:
+  t=db.get(StaTask,id);t.result={**t.result,'deliveryDetails':{'sh-test':{'shippingSolution':'AMAZON_PARTNERED_CARRIER','shippingMode':'GROUND_SMALL_PARCEL','carrier':carrier}}}
+ monkeypatch.setattr(transport,'pages',lambda *a,**k:[{'boxId':f'BOX-{i}'} for i in range(4)])
+ def call(*a,**kw):calls.append(kw['params']);return {'payload':{'DownloadURL':'https://s3.amazonaws.com/test'}}
+ monkeypatch.setattr(transport,'call',call)
+ from reportlab.pdfgen import canvas
+ buf=BytesIO();c=canvas.Canvas(buf,pagesize=(306,432))
+ for i in range(4):
+  for kind in ['BOX','CARRIER']:c.drawString(20,200,f'{kind}-{i}');c.showPage()
+ c.save();monkeypatch.setattr(transport,'download_pdf',lambda *a:buf.getvalue())
+ r=client.get(f'/api/sta/{id}/shipments/sh-test/labels',params={'page_type':requested});assert r.status_code==200,r.text
+ pdf=PdfReader(BytesIO(r.content));assert len(pdf.pages)==8
+ assert calls[0]['PageType']==expected
+ assert [p.extract_text().strip() for p in pdf.pages]==[f'{kind}-{i}' for i in range(4) for kind in ['BOX','CARRIER']]
+
+def test_carrier_label_type_preserves_nonpartnered_and_rejects_unknown_thermal():
+ from app.sta_labels import carrier_label_type
+ assert carrier_label_type('PackageLabel_Thermal_NonPCP',{'shippingSolution':'USE_YOUR_OWN_CARRIER'})=='PackageLabel_Thermal_NonPCP'
+ with pytest.raises(transport.StaError,match='A4'):
+  carrier_label_type('PackageLabel_Thermal_NonPCP',{'shippingSolution':'AMAZON_PARTNERED_CARRIER','shippingMode':'GROUND_SMALL_PARCEL','carrier':{'name':'Unknown'}})

@@ -40,15 +40,17 @@ def test_refresh_dedup_success_and_budget_status(setup,monkeypatch):
   def __init__(self,p):assert p==PID
   def list(self,kind):
    calls.append(kind)
+   if kind=='adgroup':return [{'campaignId':'1','adGroupId':'3','name':'当前广告组','state':'PAUSED','defaultBid':.35}]
    return [{'campaignId':'1','name':'新名称','state':'ENABLED','budget':{'budget':12,'budgetType':'DAILY'},'extendedData':{'servingStatus':'OUT_OF_BUDGET'}}]
   def close(self):pass
  monkeypatch.setattr(live,'Client',Fake);live.run(*queued[0])
  state=client.get('/api/advertising/campaign-refresh',params={'profile_id':PID}).json()
- assert state['status']=='succeeded' and state['updated_at'] and calls==['campaign']
+ assert state['status']=='succeeded' and state['updated_at'] and calls==['campaign','adgroup'] and state['includes_adgroups']
  assert start().json()['status']=='succeeded' and len(queued)==1
  with Session() as db:
   c=db.get(AdsEntity,(PID,'campaign','1'))
   assert c.data['budget']['budget']==12 and c.data['extendedData']['servingStatus']=='OUT_OF_BUDGET'
+  g=db.get(AdsEntity,(PID,'adgroup','3'));assert g.state=='PAUSED' and g.data['defaultBid']==.35 and g.campaign_id=='1'
   assert db.get(AdsEntity,(PID,'ad','4')) is not None
   assert db.get(AdsEntity,(PID,'campaign','2')) is not None
 
@@ -102,3 +104,23 @@ def test_view_permission_can_refresh_but_cannot_edit(setup,monkeypatch):
  assert start().status_code==200
  assert client.get('/api/advertising/campaign-refresh',params={'profile_id':PID}).status_code==200
  assert client.post('/api/advertising/edit/preview',json={'profile_id':PID,'kind':'campaign','entity_id':'1','changes':{'dailyBudget':20}},headers=HEAD).status_code==403
+
+
+def test_group_refresh_preserves_newer_changes_and_other_groups(setup):
+ started=now()-timedelta(minutes=1)
+ live.save_current(PID,'adgroup',[{'campaignId':'1','adGroupId':'3','state':'PAUSED','defaultBid':99},{'campaignId':'1','adGroupId':'new','state':'ENABLED','defaultBid':.25}],started)
+ with Session() as db:
+  assert db.get(AdsEntity,(PID,'adgroup','3')).state=='ENABLED'
+  assert db.get(AdsEntity,(PID,'adgroup','new')).campaign_id=='1'
+
+def test_group_read_failure_does_not_publish_success(setup,monkeypatch):
+ cache,queued=setup;start()
+ class Fake:
+  def __init__(self,p):pass
+  def list(self,kind):
+   if kind=='adgroup':raise live.AdsError('广告组读取失败')
+   return [{'campaignId':'1','state':'ENABLED','budget':{'budget':99}}]
+  def close(self):pass
+ monkeypatch.setattr(live,'Client',Fake);live.run(*queued[0])
+ assert live.status(PID)['status']=='failed'
+ with Session() as db:assert db.get(AdsEntity,(PID,'campaign','1')).data['budget']['budget']==5

@@ -5,9 +5,9 @@ from zoneinfo import ZoneInfo
 from decimal import Decimal,ROUND_HALF_UP
 from typing import Literal
 from collections import defaultdict
-from fastapi import HTTPException,Query,Depends
+from fastapi import HTTPException,Query,Depends,BackgroundTasks
 from pydantic import BaseModel,Field
-from sqlalchemy import select,or_,and_,func
+from sqlalchemy import select,or_,and_,func,text
 from .advertising import router,IDS,REPORTS,defaults,valid_dates,profile_checked,save_entities,patch_job,num,ratios,empty_metrics
 from .ads_client import Client,AdsError,AdsUnknown
 from .models import AdsDay,AdsChange,AdsEntity,AdsSync,AdsProfile,Listing,LocalProduct,ProductLink,now
@@ -326,7 +326,8 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
   trend=[]
   if ready and not summary_source:
    for day in covered:trend.append({'date':day,**add_metrics([r for r in selected if r.get('date')==day])})
-  return {'raw_columns':sorted(raw_catalog),'report_columns':REPORT_COLUMNS.get(level,[]),'rows':rows[(page-1)*page_size:page*page_size],'total':len(rows),'summary':add_metrics(selected) if ready else None,'metrics_ready':ready,'coverage':{'days':len(covered),'expected':(end-start).days+1,'start':covered[0] if covered else None,'end':covered[-1] if covered else None,'complete':full},'trend':trend,'report_at':fetched,'report_oldest_at':min((d.fetched_at for d in days),default=fetched) if level!='logs' else None,'report_provisional':end>=datetime.now(ZoneInfo(profile.timezone)).date()-timedelta(days=14),'currency':profile.currency,'timezone':profile.timezone,'start':start,'end':end,'product_mapping_available':bool(any(x.get('fnsku') or x.get('product_name') for x in extra.values()))}
+  scope_campaign=bykind['campaign'].get(campaign_id);scope_group=bykind['adgroup'].get(adgroup_id)
+  return {'campaign_targeting':scope_campaign.data.get('targetingType') if scope_campaign else None,'campaign_state':scope_campaign.state if scope_campaign else None,'adgroup_state':scope_group.state if scope_group else None,'raw_columns':sorted(raw_catalog),'report_columns':REPORT_COLUMNS.get(level,[]),'rows':rows[(page-1)*page_size:page*page_size],'total':len(rows),'summary':add_metrics(selected) if ready else None,'metrics_ready':ready,'coverage':{'days':len(covered),'expected':(end-start).days+1,'start':covered[0] if covered else None,'end':covered[-1] if covered else None,'complete':full},'trend':trend,'report_at':fetched,'report_oldest_at':min((d.fetched_at for d in days),default=fetched) if level!='logs' else None,'report_provisional':end>=datetime.now(ZoneInfo(profile.timezone)).date()-timedelta(days=14),'currency':profile.currency,'timezone':profile.timezone,'start':start,'end':end,'product_mapping_available':bool(any(x.get('fnsku') or x.get('product_name') for x in extra.values()))}
 
 
 def combine_metrics(items):
@@ -395,7 +396,7 @@ def clean_changes(body):
  if body.kind=='campaign':validate_campaign(changes)
  if body.kind not in allowed or not changes or not set(changes)<=allowed[body.kind]:raise HTTPException(422,'修改字段不支持')
  for k,v in changes.items():
-  if k=='state' and (v not in ['ENABLED','PAUSED','ARCHIVED'] or (v=='ARCHIVED' and body.kind not in ['campaign','keyword','target'])):raise HTTPException(422,'当前对象不支持此状态')
+  if k=='state' and (v not in ['ENABLED','PAUSED','ARCHIVED'] or (v=='ARCHIVED' and body.kind not in ['campaign','keyword','target','negative_keyword','negative_target'])):raise HTTPException(422,'当前对象不支持此状态')
   if k in ['bid','defaultBid']:
    if isinstance(v,bool) or not isinstance(v,(int,float)) or not Decimal(str(v)).is_finite() or not 0<float(v)<=10000:raise HTTPException(422,'竞价须大于0且不超过10000')
   if k in ['name','keywordText'] and (not isinstance(v,str) or not v.strip() or len(v)>250):raise HTTPException(422,'名称或关键词须为1至250个字符')
@@ -405,7 +406,8 @@ def clean_changes(body):
  return {k:v.strip() if isinstance(v,str) else v for k,v in changes.items()}
 def remote_one(c,kind,eid):
  field=IDS[kind]
- rows=c.list(kind,{field+'Filter':{'include':[eid]}})
+ filter_key={'negative_keyword':'negativeKeywordIdFilter','negative_target':'negativeTargetIdFilter'}.get(kind,field+'Filter')
+ rows=c.list(kind,{filter_key:{'include':[eid]}})
  return next((x for x in rows if str(x.get(field))==eid),None)
 
 @router.post('/edit/preview')
@@ -452,13 +454,19 @@ class ConfirmBody(BaseModel):
  acknowledge_archive:bool=False
 @router.post('/edit/confirm')
 def confirm(body:ConfirmBody,actor=Depends(require_admin)):
+ return execute_confirm(body,actor)
+
+def execute_confirm(body,actor,queued=False):
  with Session.begin() as db:
   a=db.scalar(select(AdsChange).where(AdsChange.id==body.id).with_for_update())
   if not a or a.actor!=actor['username'] or a.kind not in IDS:raise HTTPException(404,'预览不存在')
   profile_checked(db,a.profile_id)
-  if a.status!='preview':raise HTTPException(409,'该请求已处理，请在操作日志查看结果，勿重复提交')
+  if not queued:
+   db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':f'ads-edit:{a.profile_id}:{a.kind}:{a.entity_id}'})
+   if db.scalar(select(AdsChange.id).where(AdsChange.id!=a.id,AdsChange.profile_id==a.profile_id,AdsChange.kind==a.kind,AdsChange.entity_id==a.entity_id,AdsChange.status.in_(['queued','sending'])).limit(1)):raise HTTPException(409,'此项目正在后台处理，请稍后操作')
+  if a.status!=('queued' if queued else 'preview'):raise HTTPException(409,'该请求已处理，请在操作日志查看结果，勿重复提交')
   if a.changes.get('state')=='ARCHIVED' and not body.acknowledge_archive:raise HTTPException(422,'归档后无法撤回，请二次确认归档')
-  if now()-a.created_at>timedelta(minutes=15):raise HTTPException(409,'预览已过期，请重新预览')
+  if not queued and now()-a.created_at>timedelta(minutes=15):raise HTTPException(409,'预览已过期，请重新预览')
   a.status='sending';a.updated_at=now()
  c=Client(a.profile_id);status='unknown';error=None
  try:
@@ -500,3 +508,88 @@ def confirm(body:ConfirmBody,actor=Depends(require_admin)):
   with Session.begin() as db:
    saved=db.get(AdsChange,a.id);saved.status=status;saved.error=error;saved.updated_at=now()
  return {'status':status,'message':error or '已成功提交亚马逊'}
+
+
+class BulkConfirmBody(BaseModel):
+ request_id:uuid.UUID
+ ids:list[str]=Field(min_length=1,max_length=1000)
+ acknowledge_archive:bool=False
+
+def bulk_permission(actor,kind,action):
+ from .permissions import can
+ key={'keyword':'target','negative_keyword':'negative','negative_target':'negative'}.get(kind,kind)
+ key='advertising.'+key if key in ['ad','target','negative'] else 'advertising'
+ if not can(actor,key,action):raise HTTPException(403,'没有此类广告项目的操作或查看权限')
+
+def bulk_result(db,job):
+ items=[]
+ for identifier in job.before['ids']:
+  a=db.get(AdsChange,identifier)
+  if not a:continue
+  items.append({'id':a.id,'profile_id':a.profile_id,'kind':a.kind,'entity_id':a.entity_id,'text':a.before.get('_name',''),'status':a.status,'message':a.error,'before':{k:a.before.get(k) for k in a.changes},'changes':a.changes})
+ return {'id':job.id,'status':job.status,'message':job.error,'items':items}
+
+@router.post('/edit/bulk-submit')
+def submit_bulk(body:BulkConfirmBody,tasks:BackgroundTasks,actor=Depends(require_admin)):
+ identifier=str(body.request_id);ids=sorted(set(body.ids))
+ with Session.begin() as db:
+  db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':'ads-bulk:'+identifier})
+  old=db.get(AdsChange,identifier)
+  if old:
+   if old.kind!='bulk_edit' or old.actor!=actor['username'] or old.before.get('ids')!=ids:raise HTTPException(409,'请求编号已用于其他操作')
+   return bulk_result(db,old)
+  rows=list(db.scalars(select(AdsChange).where(AdsChange.id.in_(ids)).order_by(AdsChange.id).with_for_update()))
+  if len(rows)!=len(ids) or any(a.actor!=actor['username'] or a.kind not in IDS for a in rows):raise HTTPException(404,'预览不存在')
+  entities=set()
+  for a in rows:
+   profile_checked(db,a.profile_id)
+   bulk_permission(actor,a.kind,'operate')
+   if a.status!='preview' or now()-a.created_at>timedelta(minutes=15):raise HTTPException(409,'预览已处理或过期，请重新预览')
+   if not a.entity_id:raise HTTPException(422,'批量调整仅支持已有投放项')
+   if a.changes.get('state')=='ARCHIVED' and not body.acknowledge_archive:raise HTTPException(422,'归档后无法撤回，请二次确认归档')
+   entity=(a.profile_id,a.kind,a.entity_id)
+   if entity in entities:raise HTTPException(422,'同一项目不能重复调整')
+   entities.add(entity)
+  for pid,kind,eid in sorted(entities):
+   db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':f'ads-edit:{pid}:{kind}:{eid}'})
+   if db.scalar(select(AdsChange.id).where(AdsChange.profile_id==pid,AdsChange.kind==kind,AdsChange.entity_id==eid,AdsChange.status.in_(['queued','sending'])).limit(1)):raise HTTPException(409,'所选项目正在处理，请等待任务完成')
+  for a in rows:a.status='queued';a.updated_at=now()
+  job=AdsChange(id=identifier,profile_id=rows[0].profile_id,kind='bulk_edit',entity_id='',actor=actor['username'],status='sending',before={'ids':ids},changes={'操作':'批量调整','条数':len(ids)})
+  db.add(job);db.flush();result=bulk_result(db,job)
+ tasks.add_task(run_bulk,identifier,dict(actor),body.acknowledge_archive)
+ return result
+
+@router.get('/edit/bulk-status/{identifier}')
+def bulk_status(identifier:str,actor=Depends(require_admin)):
+ with Session() as db:
+  job=db.get(AdsChange,identifier)
+  if not job or job.kind!='bulk_edit' or job.actor!=actor['username']:raise HTTPException(404,'任务不存在')
+  profile_checked(db,job.profile_id)
+  for child in job.before['ids']:
+   a=db.get(AdsChange,child)
+   if not a:raise HTTPException(404,'任务项目不存在或无权访问')
+   bulk_permission(actor,a.kind,'view')
+  return bulk_result(db,job)
+
+def run_bulk(identifier,actor,acknowledge_archive=False):
+ from .auth import principal
+ token=principal.set(actor)
+ try:
+  with Session.begin() as db:
+   job=db.scalar(select(AdsChange).where(AdsChange.id==identifier).with_for_update())
+   if not job or job.status!='sending' or job.before.get('started'):return
+   job.before={**job.before,'started':True};ids=job.before['ids']
+  for child in ids:
+   try:execute_confirm(ConfirmBody(id=child,acknowledge_archive=acknowledge_archive),actor,queued=True)
+   except Exception as exc:
+    with Session.begin() as db:
+     a=db.get(AdsChange,child)
+     if a and a.status in ['queued','sending']:
+      a.error=str(exc.detail) if isinstance(exc,HTTPException) else '处理结果待核对，请查看操作日志，勿重复提交'
+      a.status='failed' if a.status=='queued' else 'unknown';a.updated_at=now()
+  with Session.begin() as db:
+   job=db.get(AdsChange,identifier);states=[db.get(AdsChange,i).status for i in ids]
+   job.status='succeeded' if all(s=='succeeded' for s in states) else 'unknown' if 'unknown' in states else 'failed'
+   job.error=None if job.status=='succeeded' else '部分项目未成功，请查看逐项结果；已成功项目不会重复提交'
+   job.updated_at=now()
+ finally:principal.reset(token)

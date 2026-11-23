@@ -9,6 +9,7 @@ from sqlalchemy import select,text,func
 from .advertising import router,profile_checked,IDS
 from .ads_client import Client,AdsError,AdsUnknown
 from .ads_workspace import remote_one
+from .ads_keyword_validation import validate_keyword
 from .ads_suggestions import parse_recommendations,expression_key
 from .auth import require_admin
 from .db import Session
@@ -46,6 +47,7 @@ class Batch(Strict):
 
 @router.post('/search-actions/suggestions')
 def suggestions(body:Batch):
+    for item in body.items:validate_keyword(item.text)
     if body.mode!='keyword' or any(i.match not in ['EXACT','PHRASE','BROAD'] for i in body.items):raise HTTPException(422,'请选择关键词匹配类型')
     with Session() as db:p,c,g=group_checked(db,body.profile_id,body.adgroup_id)
     if c.data.get('targetingType')!='MANUAL':raise HTTPException(422,'请选择手动投放广告组')
@@ -67,6 +69,7 @@ def plan_items(body,default_bid):
         value=' '.join(item.text.split())
         if not value:raise HTTPException(422,'关键词不能为空')
         if body.mode=='keyword':
+            validate_keyword(value)
             if item.match not in ['EXACT','PHRASE','BROAD']:raise HTTPException(422,'请选择精准、词组或广泛匹配')
             bid=item.bid if item.bid is not None else default_bid
             if bid is None or not 0<float(bid)<=10000:raise HTTPException(422,'广告组默认竞价未同步，请填写竞价')
@@ -100,6 +103,8 @@ def result(a):return {'id':a.id,'status':a.status,'message':a.error,'items':a.be
 
 @router.post('/search-actions/preview')
 def preview(body:Batch,actor=Depends(require_admin)):
+    if body.mode=='keyword':
+        for item in body.items:validate_keyword(item.text)
     with Session() as db:p,c,g=group_checked(db,body.profile_id,body.adgroup_id)
     client=Client(body.profile_id)
     try:
@@ -156,7 +161,11 @@ def status(identifier:str,actor=Depends(require_admin)):
     with Session() as db:
         a=db.get(AdsChange,identifier)
         if not a or a.actor!=actor['username'] or a.kind not in ['search_keyword','search_negative']:raise HTTPException(404,'操作记录不存在')
-        profile_checked(db,a.profile_id);return result(a)
+        profile_checked(db,a.profile_id)
+        if a.kind=='search_negative':
+            from .permissions import can
+            if not can(actor,'advertising.search'):raise HTTPException(403,'没有查看此操作的权限')
+        return result(a)
 
 @router.post('/search-actions/confirm')
 def confirm(body:Confirm,tasks:BackgroundTasks,actor=Depends(require_admin)):

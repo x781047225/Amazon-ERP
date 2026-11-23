@@ -9,6 +9,7 @@ from sqlalchemy import select, text
 from .advertising import router, profile_checked, IDS
 from .ads_client import Client, AdsError, AdsUnknown
 from .ads_controls import PLACEMENTS, campaign_payload, validate_campaign, save_note
+from .ads_keyword_validation import validate_keyword
 from .ads_workspace import remote_one, enrich
 from .ads_suggestions import AUTO, expression_key, parse_recommendations
 from .auth import require_admin
@@ -171,6 +172,7 @@ def normalized(body,p,c):
 
 @router.post('/create/preview')
 def preview_creation(body:Creation,actor=Depends(require_admin)):
+    for item in body.keywords:validate_keyword(item.text)
     with Session() as db:p=profile_checked(db,body.profile_id)
     c=Client(body.profile_id)
     try:plan,parent=normalized(body,p,c)
@@ -296,6 +298,7 @@ class Suggested(Strict):
     keywords:list[SuggestedKeyword]=Field(default_factory=list,max_length=100)
 @router.post('/create/suggestions')
 def suggestions(body:Suggested):
+    for item in body.keywords:validate_keyword(item.text)
     with Session() as db:profile_checked(db,body.profile_id)
     if any(not re.fullmatch('[A-Z0-9]{10}',x) for x in body.asins):raise HTTPException(422,'ASIN无效')
     c=Client(body.profile_id)
@@ -303,7 +306,7 @@ def suggestions(body:Suggested):
         keywords={}
         for k in body.keywords:
             value=' '.join(k.text.split())
-            if not value:raise HTTPException(422,'关键词不能为空')
+            validate_keyword(value)
             keywords.setdefault((value.casefold(),k.match),{'text':value,'match':k.match})
         expressions=[{'type':'KEYWORD_'+k['match']+'_MATCH','value':k['text']} for k in keywords.values()] if keywords else [{'type':x} for x in AUTO.values()]
         raw=c.request('POST','/sp/targets/bid/recommendations',{'recommendationType':'BIDS_FOR_NEW_AD_GROUP','asins':list(dict.fromkeys(body.asins)),'bidding':{'strategy':body.strategy},'targetingExpressions':expressions},'application/vnd.spthemebasedbidrecommendation.v3+json')

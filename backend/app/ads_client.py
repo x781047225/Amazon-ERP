@@ -84,8 +84,15 @@ class Client:
         if kind not in allowed or not payload or not set(payload)<=allowed[kind]:raise AdsError('不支持的广告修改字段')
         if not create and not payload.get({'campaign':'campaignId','adgroup':'adGroupId','ad':'adId','keyword':'keywordId','target':'targetId','negative_keyword':'keywordId','negative_target':'targetId'}[kind]):raise AdsError('缺少广告对象编号')
         resource,typ,key=RESOURCES[kind];media='application/vnd.'+typ+'.v3+json'
+        method='POST' if create else 'PUT';path='/sp/'+resource;body={key:[payload]}
+        if not create and payload.get('state')=='ARCHIVED':
+            archive_fields={'campaign':('campaignId','campaignIdFilter'),'keyword':('keywordId','keywordIdFilter'),'target':('targetId','targetIdFilter'),'negative_keyword':('keywordId','negativeKeywordIdFilter'),'negative_target':('targetId','negativeTargetIdFilter')}
+            if kind not in archive_fields:raise AdsError('当前对象不支持归档')
+            id_field,filter_key=archive_fields[kind]
+            if set(payload)!={id_field,'state'}:raise AdsError('归档请单独提交，不能同时修改其他字段')
+            method='POST';path+='/delete';body={filter_key:{'include':[str(payload[id_field])]}}
         headers={'Authorization':'Bearer '+self.token(),'Amazon-Advertising-API-ClientId':self.credentials['client_id'],'Amazon-Advertising-API-Scope':self.profile,'Content-Type':media,'Accept':media,'Prefer':'return=representation'}
-        try:r=self.session.request('POST' if create else 'PUT',self.endpoint+'/sp/'+resource,json={key:[payload]},headers=headers,timeout=(20,60),allow_redirects=False)
+        try:r=self.session.request(method,self.endpoint+path,json=body,headers=headers,timeout=(20,60),allow_redirects=False)
         except requests.RequestException:raise AdsUnknown('连接中断，提交结果待核对；请同步核对后再操作，系统不会自动重试') from None
         try:d=r.json()
         except Exception:raise AdsUnknown('亚马逊返回内容无法确认，请同步核对') from None
