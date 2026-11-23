@@ -276,9 +276,11 @@ def queue_promotion(pk:int,body:QueuedPromotion):
 
 @router.get('/{pk}/price/jobs/{sid}')
 def price_job(pk:int,sid:UUID):
-    from .listing_submit import context,result
+    from .listing_submit import result
     from .models import ListingSubmission
-    row,_=context(pk)
+    with Session() as db:
+        row=db.get(Listing,pk)
+        if not row:raise HTTPException(404,'Listing 不存在')
     from .listing_price_state import state,latest_submissions
     with Session.begin() as db:
         s=db.get(ListingSubmission,str(sid))

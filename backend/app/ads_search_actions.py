@@ -80,6 +80,7 @@ def plan_items(body,default_bid):
             if not re.fullmatch('[A-Z0-9]{10}',value.upper()):raise HTTPException(422,'否定商品须为10位ASIN')
             kind='negative_target';payload={'expression':[{'type':'ASIN_SAME_AS','value':value.upper()}]}
         else:
+            validate_keyword(value)
             if item.match not in ['NEGATIVE_EXACT','NEGATIVE_PHRASE']:raise HTTPException(422,'请选择否定精准或否定词组')
             kind='negative_keyword';payload={'keywordText':value,'matchType':item.match}
         key=identity(kind,payload)
@@ -128,11 +129,14 @@ def preview(body:Batch,actor=Depends(require_admin)):
 
 class SubmitKeywords(Batch):
     request_id:uuid.UUID
-    mode:Literal['keyword']='keyword'
+    mode:Literal['keyword','negative']='keyword'
 
 @router.post('/search-actions/submit')
 def submit_keywords(body:SubmitKeywords,tasks:BackgroundTasks,actor=Depends(require_admin)):
     """Persist intent first; all Amazon checks and writes run after the response."""
+    from .permissions import can
+    keys=['advertising.search','advertising.negative'] if body.mode=='negative' else ['advertising.search','advertising.target']
+    if not any(can(actor,k,'operate') for k in keys):raise HTTPException(403,'没有添加此类投放的权限')
     identifier=str(body.request_id)
     digest=hashlib.sha256(json.dumps(body.model_dump(mode='json',exclude={'request_id'}),sort_keys=True).encode()).hexdigest()
     with Session.begin() as db:
@@ -142,15 +146,15 @@ def submit_keywords(body:SubmitKeywords,tasks:BackgroundTasks,actor=Depends(requ
         if old:
             if old.actor!=actor['username'] or old.before.get('request_digest')!=digest:raise HTTPException(409,'请求编号已用于其他操作，请核对提交记录')
             return result(old)
-        if c.data.get('targetingType')!='MANUAL':raise HTTPException(422,'请选择手动投放广告组')
-        recent=db.scalars(select(AdsChange).where(AdsChange.profile_id==body.profile_id,AdsChange.adgroup_id==body.adgroup_id,AdsChange.kind=='search_keyword',AdsChange.actor==actor['username'],AdsChange.created_at>now()-timedelta(minutes=15)))
+        if body.mode=='keyword' and c.data.get('targetingType')!='MANUAL':raise HTTPException(422,'请选择手动投放广告组')
+        recent=db.scalars(select(AdsChange).where(AdsChange.profile_id==body.profile_id,AdsChange.adgroup_id==body.adgroup_id,AdsChange.kind=='search_'+body.mode,AdsChange.actor==actor['username'],AdsChange.created_at>now()-timedelta(minutes=15)))
         for old in recent:
             if old.before.get('request_digest')==digest:return result(old)
         if db.scalar(select(AdsChange.id).where(AdsChange.profile_id==body.profile_id,AdsChange.adgroup_id==body.adgroup_id,AdsChange.kind.in_(['search_keyword','search_negative']),AdsChange.status=='sending').limit(1)):
             raise HTTPException(409,'此广告组有正在提交的操作，请等待任务结束后再添加')
         plan=plan_items(body,g.data.get('defaultBid'))
         for item in plan:item['status']='ready'
-        a=AdsChange(id=identifier,profile_id=p.id,kind='search_keyword',entity_id='',campaign_id=c.entity_id,adgroup_id=g.entity_id,actor=actor['username'],status='sending',before={'_name':g.name,'items':plan,'request_digest':digest,'mode':'keyword'},changes={'操作':'添加关键词','条数':len(plan)})
+        a=AdsChange(id=identifier,profile_id=p.id,kind='search_'+body.mode,entity_id='',campaign_id=c.entity_id,adgroup_id=g.entity_id,actor=actor['username'],status='sending',before={'_name':g.name,'items':plan,'request_digest':digest,'mode':body.mode},changes={'操作':'添加关键词' if body.mode=='keyword' else '添加否定投放','条数':len(plan)})
         db.add(a)
     tasks.add_task(run,a.id)
     return result(a)
@@ -164,7 +168,7 @@ def status(identifier:str,actor=Depends(require_admin)):
         profile_checked(db,a.profile_id)
         if a.kind=='search_negative':
             from .permissions import can
-            if not can(actor,'advertising.search'):raise HTTPException(403,'没有查看此操作的权限')
+            if not any(can(actor,k) for k in ['advertising.search','advertising.negative']):raise HTTPException(403,'没有查看此操作的权限')
         return result(a)
 
 @router.post('/search-actions/confirm')

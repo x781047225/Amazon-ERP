@@ -74,13 +74,14 @@ async function syncStock(){stockBusy.value=true;try{const d=await api('/inventor
 let listingRequest=0,inFlight=0,disposed=false,appliedQuery=''
 async function load(silent=false){
  if(disposed)return
- if(silent&&(inFlight>0||loading.value||selected.value||document.hidden)){pollArrivals();return}
+ if(silent&&(inFlight>0||loading.value||selected.value||checked.value.length>0||document.hidden)){pollArrivals();return}
  if(arrivalPoll)clearTimeout(arrivalPoll)
  const request=++listingRequest
  if(!silent){listingTable.value?.clearSelection();checked.value=[];filters.q=filters.q.replace(/^[\s\u200B\uFEFF]+|[\s\u200B\uFEFF]+$/g,'');appliedQuery=new URLSearchParams(Object.fromEntries(Object.entries(filters).map(([k,v])=>[k,String(v??'')]))).toString();loading.value=true}
  inFlight++
  try{
   const data=await api('?'+appliedQuery);if(disposed||request!==listingRequest)return
+  if(silent&&checked.value.length>0)return
   const old=new Map(rows.value.map(r=>[r.id,r]))
   const next=data.listings.map((r:Listing)=>{const previous=old.get(r.id);return previous&&JSON.stringify(previous)===JSON.stringify(r)?previous:r})
   if(next.length!==rows.value.length||next.some((r:Listing,i:number)=>r!==rows.value[i]))rows.value=next

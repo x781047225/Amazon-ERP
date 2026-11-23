@@ -9,10 +9,9 @@ import AdsProductImage from './AdsProductImage.vue'
 const props=defineProps<{rows:any[],profiles:any[],mode:'keyword'|'negative',manualDestination?:{profileId:string,campaignId?:string,adgroupId?:string}}>()
 const emit=defineEmits(['close','done'])
 const pid=ref(props.manualDestination?.profileId||props.rows[0]?.profile_id||''),cid=ref(''),gid=ref(''),options=ref<any>({campaigns:[],groups:[]}),context=ref<any>({}),matches=ref(['EXACT']),negativeMatches=ref<string[]>(['NEGATIVE_EXACT'])
-const entries=ref<any[]>([]),selected=ref<any[]>([]),busy=ref(false),reading=ref(false),suggesting=ref(false),error=ref(''),warning=ref(''),stage=ref('form'),batches=ref<any[]>([])
+const entries=ref<any[]>([]),selected=ref<any[]>([]),busy=ref(false),reading=ref(false),suggesting=ref(false),error=ref(''),warning=ref('')
 const basis=ref('default'),custom=ref<number>(.25),adjust=ref(0),direction=ref(1)
 const names:Record<string,string>={EXACT:'精准匹配',PHRASE:'词组匹配',BROAD:'广泛匹配',NEGATIVE_EXACT:'否定精准',NEGATIVE_PHRASE:'否定词组',ASIN:'否定商品'}
-const states:Record<string,string>={ready:'待提交',exists:'已存在，跳过',sending:'提交中',succeeded:'成功',failed:'失败',unknown:'结果待核对'}
 const campaigns=computed(()=>options.value.campaigns.filter((c:any)=>c.targeting==='MANUAL'))
 const groups=computed(()=>options.value.groups.filter((g:any)=>g.campaign_id===cid.value))
 const currency=computed(()=>props.profiles.find(p=>p.id===pid.value)?.currency||'')
@@ -33,7 +32,7 @@ function removeManualKeyword(text:string){manualTerms.value=manualTerms.value.fi
 const invalidKeywords=computed(()=>[...new Map(entries.value.filter(e=>!e.exists&&keywordError(e.text)).map(e=>[norm(e.text),{text:e.text,error:keywordError(e.text)}])).values()])
 function removeInvalidKeywords(){excludedTerms.value.push(...invalidKeywords.value.map(e=>norm(e.text)));rebuild();error.value=''}
 const hasNegativeKeywords=computed(()=>props.rows.some(r=>!isAsin(r.name)))
-const canPreview=computed(()=>!reading.value&&!busy.value&&(props.mode==='negative'?(props.rows.length>0&&(!hasNegativeKeywords.value||negativeMatches.value.length>0)):(gid.value&&matches.value.length&&!invalidKeywords.value.length&&(!props.manualDestination||!manualText.value.trim())&&entries.value.some(e=>!e.exists))))
+const canSubmit=computed(()=>!reading.value&&!busy.value&&(props.mode==='negative'?(props.rows.length>0&&(!hasNegativeKeywords.value||negativeMatches.value.length>0)):(gid.value&&matches.value.length&&!invalidKeywords.value.length&&(!props.manualDestination||!manualText.value.trim())&&entries.value.some(e=>!e.exists))))
 let request=0,suggestionRequest=0
 function rebuild(){
  const old=new Map(entries.value.map(e=>[key(e),e]));const terms=props.manualDestination?manualTerms.value:[...new Map(props.rows.map(r=>[norm(r.name),r.name.trim().replace(/\s+/g,' ')])).values()];const existing=new Set((context.value.existing||[]).map((e:any)=>key(e)))
@@ -67,7 +66,7 @@ function apply(){const targets=(selected.value.length?selected.value:entries.val
 function negativeBatches(){const grouped=new Map<string,any>();for(const r of props.rows){const k=r.profile_id+'|'+r.adgroup_id;if(!grouped.has(k))grouped.set(k,{profile_id:r.profile_id,adgroup_id:r.adgroup_id,mode:'negative',label:r.store+' / '+r.country+' · '+r.adgroup_name,items:[]});for(const match of isAsin(r.name)?['ASIN']:negativeMatches.value){const item={text:r.name,match};if(!grouped.get(k).items.some((i:any)=>key(i)===key(item)))grouped.get(k).items.push(item)}}return [...grouped.values()]}
 function submitKeywords(){
  if(invalidKeywords.value.length){error.value='请先移除或修改无效关键词';return}
- if(!canPreview.value)return
+ if(!canSubmit.value)return
  error.value=''
  const items=entries.value.filter(e=>!e.exists).map(e=>({text:e.text,match:e.match,bid:e.bid}))
  if(!items.length){error.value='没有需要新增的关键词';return}
@@ -78,26 +77,25 @@ function submitKeywords(){
  submitSearchKeywords({profile_id:pid.value,adgroup_id:gid.value,mode:'keyword',items},`${profile?.account} / ${profile?.country} · ${groups.value.find((g:any)=>g.id===gid.value)?.name}`)
  emit('close')
 }
-async function preview(){if(!canPreview.value)return;busy.value=true;error.value='';batches.value=[]
- try{const plans=props.mode==='negative'?negativeBatches():[{profile_id:pid.value,adgroup_id:gid.value,mode:'keyword',label:props.profiles.find(p=>p.id===pid.value)?.account+' / '+props.profiles.find(p=>p.id===pid.value)?.country+' · '+groups.value.find((g:any)=>g.id===gid.value)?.name,items:entries.value.map(e=>({text:e.text,match:e.match,bid:e.bid}))}]
- if(props.mode==='keyword'&&plans[0].items.some((e:any)=>e.bid==null||!Number.isFinite(e.bid)||e.bid<=0))throw Error('请给每个关键词填写有效竞价')
- if(plans.some(p=>p.items.length>300))throw Error('每个广告组单次最多添加300项搜索词与匹配类型组合，请减少选择')
- for(const plan of plans){const {label,...body}=plan;try{const result=await api('/advertising/search-actions/preview',body);batches.value.push({...result,label})}catch(e){batches.value.push({label,status:'failed',message:(e as Error).message,items:[]})}}
- stage.value='preview'
- }catch(e){error.value=(e as Error).message}finally{busy.value=false}
-}
-async function confirm(){busy.value=true;error.value='';stage.value='result'
- try{for(const batch of batches.value.filter(b=>b.id&&b.items.some((i:any)=>i.status==='ready'))){
- try{Object.assign(batch,await api('/advertising/search-actions/confirm',{id:batch.id}));while(batch.status==='sending'){await new Promise(resolve=>setTimeout(resolve,1500));Object.assign(batch,await api('/advertising/search-actions/status/'+batch.id))}}
- catch(e){batch.status='unknown';batch.message='请求结果待核对，请查看操作日志，勿重复提交。'+(e as Error).message}
- }}finally{busy.value=false;emit('done')}
+function submitNegatives(){
+ if(!canSubmit.value)return
+ error.value=''
+ const plans=negativeBatches()
+ for(const plan of plans){
+  if(!plan.profile_id||!plan.adgroup_id){error.value='搜索词缺少所属广告组，请刷新后重试';return}
+  if(plan.items.length>300){error.value='每个广告组单次最多添加300项否定词与匹配类型组合';return}
+  const invalid=plan.items.find((i:any)=>i.match!=='ASIN'&&keywordError(i.text))
+  if(invalid){error.value=invalid.text+'：'+keywordError(invalid.text);return}
+ }
+ busy.value=true
+ for(const {label,...body} of plans)submitSearchKeywords(body,label)
+ emit('close')
 }
 onMounted(()=>{if(props.mode==='keyword')void loadOptions()})
 </script>
 <template>
 <el-dialog :model-value="true" :title="manualDestination?'新增投放':mode==='keyword'?'添加关键词':'批量添加否定'" width="min(1200px,96vw)" top="4vh" :close-on-click-modal="false" :close-on-press-escape="!busy" :show-close="!busy" @close="emit('close')">
 <el-alert v-if="error" :title="error" type="error" :closable="false"/>
-<template v-if="stage==='form'">
 <template v-if="mode==='keyword'">
 <el-alert v-if="invalidKeywords.length" type="error" :closable="false" class="keyword-validation" title="有无效关键词，请先处理后再提交"><div v-for="item in invalidKeywords" :key="item.text">{{item.text}}：{{item.error}}</div><el-button type="danger" plain size="small" @click="removeInvalidKeywords">移除无效关键词</el-button></el-alert>
 <div class="destination"><el-select v-model="pid" aria-label="投放店铺站点" filterable :disabled="busy||!!manualDestination?.campaignId" @change="loadOptions"><el-option v-for="p in profiles" :key="p.id" :value="p.id" :label="p.account+' / '+p.country+' · '+p.currency"/></el-select><el-select v-model="cid" placeholder="选择手动广告活动" aria-label="目标广告活动" filterable :disabled="reading||!!manualDestination?.campaignId" @change="changeCampaign"><el-option v-for="c in campaigns" :key="c.id" :value="c.id" :label="c.name"/></el-select><el-select v-model="gid" placeholder="选择广告组" aria-label="目标广告组" filterable :disabled="reading||!cid||!!manualDestination?.adgroupId" @change="loadContext"><el-option v-for="g in groups" :key="g.id" :value="g.id" :label="g.name"/></el-select></div>
@@ -109,9 +107,7 @@ onMounted(()=>{if(props.mode==='keyword')void loadOptions()})
 <p v-if="!manualDestination" class="muted">实际 CPC 按列表所选时段的花费 ÷ 点击量计算；同词按点击量加权。无有效点击或币种不同不套用，保留原竞价。</p><el-table :data="entries" border max-height="420" v-loading="reading" @selection-change="(v:any[])=>selected=v"><el-table-column type="selection" width="45" :selectable="(r:any)=>!r.exists"/><el-table-column label="关键词" min-width="180"><template #default="{row}"><span>{{row.text}}</span><div v-if="!row.exists&&keywordError(row.text)" class="keyword-error">{{keywordError(row.text)}}</div></template></el-table-column><el-table-column label="匹配类型" width="140"><template #default="{row}">{{names[row.match]}}<el-tag v-if="row.exists" type="info" size="small">已存在</el-tag></template></el-table-column><el-table-column v-if="!manualDestination" :label="'实际 CPC（'+currency+'）'" width="165" align="center"><template #default="{row}"><el-button v-if="row.cpc!=null" size="small" :disabled="row.exists||Math.round(row.cpc*100)<1" :title="'所选日期范围内的花费 ÷ 点击量；点击采用该竞价'" @click="row.bid=Math.round(row.cpc*100)/100">{{row.cpc.toFixed(2)}}</el-button><span v-else class="muted" title="无有效点击数据或来源与目标币种不同">不可用</span></template></el-table-column><el-table-column label="亚马逊建议竞价（低 / 中 / 高）" min-width="320" align="center"><template #default="{row}"><div class="tiers"><el-button v-for="(label,tier) in {low:'低',mid:'中',high:'高'}" :key="tier" size="small" :disabled="row.exists||!row.suggestion?.[tier]" @click="row.bid=row.suggestion[tier]">{{label}} {{row.suggestion?.[tier]?.toFixed(2)??'—'}}</el-button></div></template></el-table-column><el-table-column :label="'竞价（'+currency+'）'" width="190" align="center"><template #default="{row}"><el-input-number v-model="row.bid" :min=".01" :max="10000" :precision="2" :step=".01" controls-position="right" :disabled="row.exists" :aria-label="row.text+' '+row.match+'竞价'"/></template></el-table-column><el-table-column v-if="manualDestination" label="操作" width="100"><template #default="{row}"><el-button link type="danger" @click="removeManualKeyword(row.text)">移除此词</el-button></template></el-table-column></el-table>
 </template>
 <template v-else><p>已选 {{rows.length}} 条搜索词，按各自所属店铺和广告组添加否定；ASIN 自动识别为否定商品。</p><el-checkbox-group v-model="negativeMatches" :disabled="!hasNegativeKeywords" aria-label="否定匹配方式"><el-checkbox value="NEGATIVE_EXACT">否定精准</el-checkbox><el-checkbox value="NEGATIVE_PHRASE">否定词组</el-checkbox></el-checkbox-group><p v-if="hasNegativeKeywords" class="muted">可同时勾选两种方式，每个关键词分别添加；至少选择一种。</p><el-table :data="rows" border max-height="420"><el-table-column label="搜索词 / 商品" min-width="260"><template #default="{row}"><div class="negative-item"><AdsProductImage v-if="isAsin(row.name)" :profile-id="row.profile_id" :asin="row.name"/><span>{{row.name}}</span></div></template></el-table-column><el-table-column prop="store" label="店铺"/><el-table-column prop="country" label="站点"/><el-table-column prop="adgroup_name" label="广告组"/><el-table-column label="类型"><template #default="{row}">{{isAsin(row.name)?'否定商品':negativeMatches.map(m=>names[m]).join('、')||'请选择匹配方式'}}</template></el-table-column></el-table></template>
-</template>
-<template v-else><div v-for="(batch,i) in batches" :key="i" class="batch"><b>{{batch.label}}</b><el-alert v-if="batch.message" :title="batch.message" type="warning" :closable="false"/><el-table :data="batch.items" border max-height="350"><el-table-column prop="text" label="关键词 / 商品" min-width="190"/><el-table-column label="匹配类型" width="120"><template #default="{row}">{{names[row.match]}}</template></el-table-column><el-table-column label="竞价" width="100" align="center"><template #default="{row}">{{row.payload.bid??'—'}}</template></el-table-column><el-table-column label="结果" min-width="180"><template #default="{row}">{{states[row.status]||row.status}}<div>{{row.message}}</div></template></el-table-column></el-table></div></template>
-<template #footer><el-button :disabled="busy" @click="emit('close')">关闭</el-button><el-button v-if="stage==='preview'" :disabled="busy" @click="stage='form'">返回编辑</el-button><el-button v-if="stage==='form'" type="primary" :loading="busy" :disabled="!canPreview" @click="mode==='keyword'?submitKeywords():preview()">{{mode==='keyword'?'添加并提交':'预览添加'}}</el-button><el-button v-if="stage==='preview'" type="primary" :loading="busy" :disabled="!batches.some(b=>b.items.some((i:any)=>i.status==='ready'))" @click="confirm">确认提交亚马逊</el-button><span v-if="stage==='result'&&busy">正在提交，请勿重复操作…</span></template>
+<template #footer><el-button :disabled="busy" @click="emit('close')">关闭</el-button><el-button type="primary" :loading="busy" :disabled="!canSubmit" @click="mode==='keyword'?submitKeywords():submitNegatives()">添加并提交</el-button></template>
 </el-dialog>
 </template>
 <style scoped>.manual-keyword-entry{margin:12px 0}.manual-keyword-entry>div:last-child{display:flex;gap:12px;align-items:center;margin-top:8px}.keyword-validation{margin-bottom:12px}.keyword-validation .el-button{margin-top:8px}.keyword-error{color:#c45656;font-size:12px;line-height:1.5;margin-top:4px}

@@ -134,7 +134,9 @@ def route_keys(path,query,body,method):
     row=db.get(AdsChange,path.rsplit('/',1)[-1])
     if row and row.kind=='create_ad':return ['advertising.ad']
   if path.endswith('/create/products') or path.endswith('/create/options'):return ['advertising','advertising.ad','advertising.search','advertising.target']
-  if any(path.endswith('/search-actions/'+action) for action in ['context','suggestions','submit']) or '/search-actions/status/' in path:return ['advertising.search','advertising.target']
+  if path.endswith('/search-actions/submit'):return ['advertising.search','advertising.negative'] if body.get('mode')=='negative' else ['advertising.search','advertising.target']
+  if '/search-actions/status/' in path:return ['advertising.search','advertising.target','advertising.negative']
+  if any(path.endswith('/search-actions/'+action) for action in ['context','suggestions']):return ['advertising.search','advertising.target']
   if '/search-actions/' in path:return ['advertising.search','advertising.negative'] if path.endswith('/product-image') else ['advertising.search']
   kind=query.get('level') or body.get('level') or body.get('kind')
   if path.endswith('/edit/confirm') or path.endswith('/create/confirm'):
@@ -170,7 +172,8 @@ def token_route(method,path):
  from .integration_planning import TOKEN_ROUTES as PLANNING_ROUTES
  from .integration_documents import TOKEN_ROUTES as DOCUMENT_ROUTES
  from .integration_advertising import TOKEN_ROUTES as ADVERTISING_ROUTES
- TOKEN_ROUTES=TOKEN_ROUTES|PLANNING_ROUTES|DOCUMENT_ROUTES|ADVERTISING_ROUTES
+ from .integration_pricing import TOKEN_ROUTES as PRICING_ROUTES
+ TOKEN_ROUTES=TOKEN_ROUTES|PLANNING_ROUTES|DOCUMENT_ROUTES|ADVERTISING_ROUTES|PRICING_ROUTES
  if any(method==verb and re.fullmatch(pattern,path) for verb,pattern in TOKEN_ROUTES):return True
  if method=='GET':return bool(re.fullmatch(r'/api/(integration/capabilities|listings(?:/\d+)?|fba/shipments(?:/\d+)?|orders(?:/\d+)?|warehouse/stock)',path))
  return method=='POST' and bool(re.fullmatch(r'/api/listings/\d+/(preview|submit|submissions/[0-9a-f-]+/verify)',path))

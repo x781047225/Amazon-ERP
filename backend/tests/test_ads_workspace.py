@@ -65,7 +65,8 @@ def test_remote_conflict_and_unknown_do_not_retry(monkeypatch):
 
 def test_validation_permissions_expiration(monkeypatch):
  seed();calls=fake(monkeypatch)
- for changes in [{'budget':5},{'state':'ARCHIVED'},{'state':True}]:assert preview(changes=changes).status_code==422
+ for changes in [{'budget':5},{'state':True}]:assert preview(changes=changes).status_code==422
+ assert preview(changes={'state':'ARCHIVED'}).status_code==200
  assert preview(kind='target',changes={'bid':-2}).status_code==422
  assert preview(kind='adgroup',entity_id='3',changes={'defaultBid':0}).status_code==422
  id=preview().json()['id']

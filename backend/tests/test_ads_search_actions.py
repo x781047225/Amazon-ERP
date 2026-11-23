@@ -189,3 +189,43 @@ def test_direct_submit_validation_scope_and_permission(monkeypatch):
  assert submit(items=[{'text':'test','match':'EXACT','bid':0}]).status_code==422
  monkeypatch.setattr(auth,'resolve_session',lambda r:{'id':4,'username':'reader','is_admin':False,'stores':['DemoStoreD'],'permissions':['advertising.view','advertising.search.view']})
  assert submit().status_code==403
+
+
+def test_direct_negatives_auto_group_dedup_and_existing(monkeypatch):
+ setup()
+ with Session.begin() as db:
+  c=db.get(AdsEntity,(PID,'campaign','1'));c.data={**c.data,'targetingType':'AUTO'}
+ calls=fake(monkeypatch,automatic=True,existing=[('negative_keyword',{'adGroupId':'3','keywordText':'free ribbon','matchType':'NEGATIVE_EXACT','state':'ENABLED'})])
+ items=[{'text':'free ribbon','match':'NEGATIVE_EXACT'},{'text':'free ribbon','match':'NEGATIVE_PHRASE'},{'text':' FREE  ribbon ','match':'NEGATIVE_PHRASE'},{'text':'B012345678','match':'ASIN'}]
+ r=submit(mode='negative',items=items);assert r.status_code==200,r.text
+ final=status(r.json()['id']);assert final['status']=='succeeded'
+ assert len(final['items'])==3 and final['items'][0]['status']=='exists'
+ assert [k for k,p in calls]==['negative_keyword','negative_target']
+ assert all('bid' not in p for k,p in calls)
+ assert submit(request_id=r.json()['id'],mode='negative',items=items).status_code==200
+ assert len(calls)==2
+
+
+def test_direct_negative_validation_and_negative_permission(monkeypatch):
+ setup();scheduled=[]
+ monkeypatch.setattr(a,'run',lambda identifier:scheduled.append(identifier))
+ monkeypatch.setattr(a,'Client',lambda *args:pytest.fail('No Amazon access during acceptance'))
+ assert submit(mode='negative',items=[{'text':'under £5','match':'NEGATIVE_EXACT'}]).status_code==422
+ monkeypatch.setattr(auth,'resolve_session',lambda r:{'id':4,'username':'negative-editor','is_admin':False,'stores':['DemoStoreD'],'permissions':['advertising.view','advertising.negative.view','advertising.negative.operate']})
+ r=submit(mode='negative',items=[{'text':'free ribbon','match':'NEGATIVE_EXACT'}]);assert r.status_code==200,r.text
+ assert status(r.json()['id'])['status']=='sending' and scheduled==[r.json()['id']]
+ assert submit().status_code==403
+
+
+def test_negative_markers_scope_state_and_phrase_boundaries():
+ setup()
+ with Session.begin() as db:
+  for eid,word,match,gid,state,cid in [('n1','ivory ribbon','NEGATIVE_EXACT','3','ENABLED','1'),('n2','ribbon','NEGATIVE_PHRASE',None,'ENABLED','1'),('n3','ivory ribbon','NEGATIVE_EXACT','other','ENABLED','1'),('n4','ivory ribbon','NEGATIVE_PHRASE','3','PAUSED','1'),('n5','ivory ribbon','NEGATIVE_EXACT',None,'ENABLED','other')]:
+   db.add(AdsEntity(profile_id=PID,kind='negative_keyword',entity_id=eid,campaign_id=cid,adgroup_id=gid,state=state,name=word,data={'keywordText':word,'matchType':match}))
+  db.add(AdsEntity(profile_id=PID,kind='keyword',entity_id='k-test',campaign_id='1',adgroup_id='3',state='ENABLED',name='IVORY ribbon',data={'keywordText':'IVORY ribbon','matchType':'EXACT'}))
+ persist_days(PID,'search',date(2026,10,24),date(2026,10,24),[{'date':'2026-10-24','campaignId':'1','adGroupId':g,'keywordId':'k-test','searchTerm':term,'matchType':'EXACT','cost':1} for g,term in [('3','IVORY  ribbon'),('4','ivory ribbon'),('3','ribbons')]])
+ targets=query(level='target',campaign_id='1',adgroup_id='3').json()['rows'];assert next(r for r in targets if r['id']=='k-test')['negative_matches']==['NEGATIVE_EXACT','NEGATIVE_PHRASE']
+ rows=query(level='search').json()['rows']
+ assert next(r for r in rows if r['name']=='IVORY  ribbon')['negative_matches']==['NEGATIVE_EXACT','NEGATIVE_PHRASE']
+ assert next(r for r in rows if r['adgroup_id']=='4')['negative_matches']==['NEGATIVE_PHRASE']
+ assert next(r for r in rows if r['name']=='ribbons')['negative_matches']==[]

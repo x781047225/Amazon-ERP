@@ -103,6 +103,22 @@ Listing 的调价、编辑、关联等操作记录在 Listing 业务日志中；
 
 ## MCP 接入
 
+Listing 价格提供 5 个 MCP 工具（广告竞价仍为只读查询）：
+
+| 工具 | 功能 |
+| --- | --- |
+| `listing_price_get` | 查询 ERP 已同步售价、促销价、起止时间、币种及价格 fingerprint |
+| `listing_price_refresh` | 从亚马逊回读价格并刷新 ERP 缓存，不修改亚马逊 |
+| `listing_price_submit` | 只改售价，保留现有促销计划、企业价及其他属性 |
+| `listing_promotion_submit` | 设置促销价及起止时间；省略 `price` 保留售价，填写则一起修改 |
+| `listing_price_job` | 按 Listing id 和任务 submission_id 查询处理结果 |
+
+写入前必须获得用户对具体店铺、站点、商品及价格/时间的授权。先查询或回读价格，再将返回的 `currency`、`fingerprint` 作为 `expected_currency`、`expected_fingerprint`；金额使用字符串，促销起止时间必须包含时区，促销价必须低于售价。`listing_promotion_submit` 设置促销售价，不创建优惠券或秒杀。
+
+提交直接进入 ERP 后台队列，不需要预览接口。`request_id` 使用 UUID，同一次操作重试复用原编号；相同编号不能提交不同价格。`queued`/`submitting` 为处理中，`accepted` 仅代表亚马逊受理；回读后 `verified` 才表示价格字段一致（不保证买家前台已更新）。`unknown` 应先回读核对，不要换编号重试；`rejected` 查看返回原因。价格资料发生变化、币种不符或同一商品已有正在处理的调价会拒绝提交。
+
+查询需要 Listing 查看权限，回读及提交需要 Listing 操作权限；复用用户和 Token 的有效期、店铺隔离、操作审计。新增工具需更新后端并让客户端重新发现工具；后台价格任务依赖现有 worker 和定时调度正常运行，无数据库迁移。
+
 广告提供 10 个只读 MCP 工具：
 
 | 内容 | 工具 |

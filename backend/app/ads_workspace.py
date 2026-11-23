@@ -193,12 +193,16 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
   needed={'campaign','adgroup',*KINDS.get(level,[])}
   if level=='logs':needed.update(IDS)
   if level=='search':needed.add('keyword')
+  if level in ('target','search'):needed.add('negative_keyword')
   if needle and search_type!='name':needed.add('ad')
   scopes=[]
   for kind in needed:
    terms=[AdsEntity.kind==kind]
    if campaign_id:terms.append((AdsEntity.entity_id if kind=='campaign' else AdsEntity.campaign_id)==campaign_id)
-   if adgroup_id and kind!='campaign':terms.append((AdsEntity.entity_id if kind=='adgroup' else AdsEntity.adgroup_id)==adgroup_id)
+   if adgroup_id and kind!='campaign':
+    group_scope=(AdsEntity.entity_id if kind=='adgroup' else AdsEntity.adgroup_id)==adgroup_id
+    if kind=='negative_keyword' and level in ('target','search'):group_scope=or_(group_scope,AdsEntity.adgroup_id.is_(None),AdsEntity.adgroup_id=='')
+    terms.append(group_scope)
    scopes.append(and_(*terms))
   all_entities=list(db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,or_(*scopes))))
   bykind={k:{} for k in IDS}
@@ -246,6 +250,19 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
   if level=='search':
    for e in bykind['keyword'].values():
     if e.state!='ARCHIVED' and e.data.get('matchType') in ('EXACT','PHRASE','BROAD'):existing_matches[(e.adgroup_id,normalized_term(e.data.get('keywordText')))].add(e.data['matchType'])
+  negative_rules=defaultdict(lambda:defaultdict(set))
+  if level in ('target','search'):
+   for e in bykind['negative_keyword'].values():
+    match=e.data.get('matchType');word=normalized_term(e.data.get('keywordText'))
+    if e.state=='ENABLED' and word and match in ('NEGATIVE_EXACT','NEGATIVE_PHRASE'):
+     negative_rules[(e.campaign_id,e.adgroup_id or None)][match].add(word)
+  def negative_matches(cid,gid,value):
+   word=normalized_term(value);found=set()
+   for scope in {(cid,None),(cid,gid)}:
+    rules=negative_rules.get(scope,{})
+    if word in rules.get('NEGATIVE_EXACT',()):found.add('NEGATIVE_EXACT')
+    if any((' '+phrase+' ') in (' '+word+' ') for phrase in rules.get('NEGATIVE_PHRASE',())):found.add('NEGATIVE_PHRASE')
+   return sorted(found)
   negative_terms=defaultdict(lambda:defaultdict(list))
   if level=='negative':
    for r in raw:
@@ -264,6 +281,7 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
      d=e.data;parent=bykind['campaign'].get(e.campaign_id);group=bykind['adgroup'].get(e.adgroup_id)
      row={'id':e.entity_id,'key':kind+':'+e.entity_id,'kind':kind,'name':title(d) if level in ['target','negative'] else e.name,'state':e.state,'campaign_id':e.entity_id if level=='campaign' else e.campaign_id,'adgroup_id':e.entity_id if level=='adgroup' else e.adgroup_id,'campaign_name':parent.name if parent else '', 'adgroup_name':group.name if group else '', 'sku':d.get('sku'),'asin':d.get('asin'),'budget':d.get('budget',{}).get('budget'),'default_bid':d.get('defaultBid'),'bid':d.get('bid'),'match_type':d.get('matchType') or d.get('expressionType'),'targeting_type':d.get('targetingType') or (parent.data.get('targetingType') if parent else None),'top_adjustment':next((x.get('percentage') for x in d.get('dynamicBidding',{}).get('placementBidding',[]) if x.get('placement')=='PLACEMENT_TOP'),0),'running':e.state=='ENABLED' and (not parent or parent.state=='ENABLED') and (not group or group.state=='ENABLED'),**(extra.get(e.entity_id,{}) if kind=='ad' else {})}
      row['match_type']='NEGATIVE_PRODUCT' if kind=='negative_target' else match_code(row.get('match_type'))
+     if kind=='keyword':row['negative_matches']=negative_matches(e.campaign_id,e.adgroup_id,row['name'])
      if level!='negative':row.update(delivery(e,parent,group))
      if level=='target':
       row['suggestion']=for_entity(suggestions_cache,e)
@@ -292,6 +310,7 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
     p=bykind['campaign'].get(cid);g=bykind['adgroup'].get(gid)
     row={'id':key,'key':key,'kind':'search','name':r.get('searchTerm'),'campaign_id':cid,'adgroup_id':gid,'campaign_name':p.name if p else '活动信息待同步','adgroup_name':g.name if g else '广告组信息待同步','target':r.get('targeting') or r.get('keyword'),'match_type':r.get('matchType'),'metrics':add_metrics(rr)}
     row['match_type']=match_code(r.get('matchType'),row['target']);row['targeting_type']=p.data.get('targetingType') if p else None
+    row['negative_matches']=negative_matches(cid,gid,row['name'])
     row['default_bid']=g.data.get('defaultBid') if g else None
     row['existing_matches']=sorted(existing_matches[(gid,normalized_term(row['name']))]) if row['targeting_type']=='MANUAL' else []
     if matches(row):rows.append(row);selected+=rr
