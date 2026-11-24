@@ -14,7 +14,7 @@ import {ElMessage} from 'element-plus'
 import {Search,Refresh,Download} from '@element-plus/icons-vue'
 type Item={product_name:string,difference:number,sku:string,fnsku:string,shipped:number,received:number,remaining:number,over_received:number,received_change:number}
 type Snapshot={id:number,observed_at:string,status:string,shipped:number,received:number,remaining:number,over_received:number,decreased:number,items?:Item[]}
-type Shipment={amazon_reference_id:string|null,arrival_source:string|null,tracking_codes:string[],tracking_missing_boxes:number,tracking_unvalidated:number,tracking_read:boolean,tracking_synced_at:string|null,tracking_error:string|null,tracking_review:string,import_review:string,item_query:string,item_exact:boolean,destination_country:string|null,dispatched_on:string|null,expected_on:string|null,arrival_start:string|null,arrival_end:string|null,arrival_error:string|null,preview_items:Item[],all_items?:Item[],items_expanded?:boolean,id:number,store:string,shipment_id:string,name:string,status:string,destination:string,shipped:number|null,received:number|null,remaining:number|null,over_received:number|null,item_count:number|null,decreased:number,markets:string[],synced_at:string,details_synced_at:string|null,sync_error:string|null,items?:Item[],history?:Snapshot[]}
+type Shipment={amazon_reference_id:string|null,arrival_source:string|null,tracking_codes:string[],tracking_missing_boxes:number,tracking_unvalidated:number,tracking_read:boolean,tracking_synced_at:string|null,tracking_error:string|null,tracking_review:string,import_review:string,item_query:string,item_exact:boolean,destination_country:string|null,dispatched_on:string|null,expected_on:string|null,arrival_start:string|null,arrival_end:string|null,arrival_error:string|null,preview_items:Item[],all_items?:Item[],items_expanded?:boolean,items_loading?:boolean,items_error?:string,items_synced_at?:string|null,id:number,store:string,shipment_id:string,name:string,status:string,destination:string,shipped:number|null,received:number|null,remaining:number|null,over_received:number|null,item_count:number|null,decreased:number,markets:string[],synced_at:string,details_synced_at:string|null,sync_error:string|null,items?:Item[],history?:Snapshot[]}
 type Job={id:string,store:string,status:string,phase:string,discovered:number,processed:number,failed:number,pages:number,error:string|null,created_at:string,failures:{shipment_id:string,error:string}[]}
 const statuses:Record<string,string>={WORKING:'准备中',READY_TO_SHIP:'待发货',SHIPPED:'已发货',IN_TRANSIT:'运输中',DELIVERED:'已送达',CHECKED_IN:'已登记',RECEIVING:'接收中',CLOSED:'已关闭',CANCELLED:'已取消',DELETED:'已删除',ERROR:'异常'}
 const jobNames:Record<string,string>={queued:'排队中',running:'同步中',succeeded:'已完成',partial:'部分完成',failed:'失败'}
@@ -28,7 +28,23 @@ const countries:Record<string,string>={GB:'英国',CZ:'捷克',AT:'奥地利',DK
 const day=(s:string|null)=>s?s.slice(0,10):'待补充'
 function editLogistics(row:Shipment){logisticsRow.value=row;Object.assign(logisticsForm,{destination_country:row.destination_country||'',dispatched_on:row.dispatched_on||'',expected_on:row.expected_on||'',tracking_review:row.tracking_review,import_review:row.import_review});logisticsOpen.value=true}
 async function saveLogistics(){if(!logisticsRow.value)return;logisticsBusy.value=true;try{await api('/fba/shipments/'+logisticsRow.value.id+'/logistics',Object.fromEntries(Object.entries(logisticsForm).map(([k,v])=>[k,v||null])));logisticsOpen.value=false;ElMessage.success('物流资料已保存在本地');await load()}catch(e){ElMessage.error((e as Error).message)}finally{logisticsBusy.value=false}}
-async function moreItems(row:Shipment){try{if(!row.all_items)row.all_items=(await api('/fba/shipments/'+row.id+'?'+new URLSearchParams({q:row.item_query,exact:String(row.item_exact)}))).items;row.items_expanded=!row.items_expanded}catch(e){ElMessage.error((e as Error).message)}}
+async function loadItems(row:Shipment){
+ if(row.items_loading)return false
+ row.items_loading=true
+ const snapshot=row.details_synced_at
+ try{const data=await api('/fba/shipments/'+row.id+'?'+new URLSearchParams({q:row.item_query||'',exact:String(row.item_exact)}));if(!rows.value.includes(row))return false;row.all_items=data.items;row.items_synced_at=data.details_synced_at??snapshot;row.items_error='';return true}
+ catch(e){if(rows.value.includes(row))row.items_error=(e as Error).message;return false}
+ finally{row.items_loading=false}
+}
+async function moreItems(row:Shipment){
+ if(row.items_expanded){row.items_expanded=false;return}
+ if(row.all_items&&row.items_synced_at===row.details_synced_at){row.items_expanded=true;return}
+ if(await loadItems(row))row.items_expanded=true
+}
+function expansionChanged(row:Shipment,expanded:Shipment[]){
+ expandedKeys.value=expanded.map(x=>x.id)
+ if(expandedKeys.value.includes(row.id)&&row.items_expanded&&row.items_synced_at!==row.details_synced_at)void loadItems(row)
+}
 const expandedKeys=ref<number[]>([])
 const summary=ref({shipped:0,received:0,remaining:0,over_received:0,difference:0,unknown:0})
 const form=reactive({stores:[] as string[],markets:[] as string[],mode:'all',days:90,ids:''})
@@ -36,11 +52,28 @@ const active=computed(()=>jobs.value.filter(j=>['running','queued'].includes(j.s
 const fmt=(n:number|null|undefined)=>n==null?'—':n.toLocaleString('zh-CN')
 const time=(s:string|null)=>s?new Date(s).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'尚未获取'
 async function api(path:string,body?:unknown){const r=await fetch('/api'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-ERP-Client':'web'},body:body===undefined?undefined:JSON.stringify(body)});const data=await r.json();if(r.status===401)window.dispatchEvent(new Event('erp:unauthorized'));if(!r.ok)throw new Error(typeof data.detail==='string'?data.detail:'请求失败，请检查输入');return data}
-let req=0
-async function load(){if(!can('fba.list'))return;const id=++req;loading.value=true;try{const p=new URLSearchParams(Object.fromEntries(Object.entries({...filters,page:page.value,page_size:pageSize.value}).map(([k,v])=>[k,String(v)])));if(dispatchDates.value?.length===2){p.set('dispatch_start',dispatchDates.value[0]!);p.set('dispatch_end',dispatchDates.value[1]!)}const r=await api('/fba/shipments?'+p);if(id===req){rows.value=r.shipments;expandedKeys.value=filters.q.trim()?r.shipments.map((x:Shipment)=>x.id):expandedKeys.value.filter(k=>r.shipments.some((x:Shipment)=>x.id===k));total.value=r.total;summary.value=r.summary;error.value=''}}catch(e){error.value=(e as Error).message}finally{if(id===req)loading.value=false}}
+let req=0,loadedQuery=''
+async function load(background=false,autoExpand=false){
+ if(!can('fba.list')||(background&&loading.value))return
+ const id=++req
+ if(!background)loading.value=true
+ try{
+  const p=new URLSearchParams(Object.fromEntries(Object.entries({...filters,page:page.value,page_size:pageSize.value}).map(([k,v])=>[k,String(v??'')])))
+  if(dispatchDates.value?.length===2){p.set('dispatch_start',dispatchDates.value[0]!);p.set('dispatch_end',dispatchDates.value[1]!)}
+  const query=p.toString(),r=await api('/fba/shipments?'+query)
+  if(id!==req)return
+  // Keep the same row objects: expansion and an in-flight item lookup belong to the user's view.
+  const previous=new Map(loadedQuery===query&&!autoExpand?rows.value.map(row=>[row.id,row]):[])
+  rows.value=r.shipments.map((row:Shipment)=>{const existing=previous.get(row.id);return existing?Object.assign(existing,row):row})
+  expandedKeys.value=autoExpand&&filters.q.trim()?r.shipments.map((row:Shipment)=>row.id):expandedKeys.value.filter(key=>r.shipments.some((row:Shipment)=>row.id===key))
+  loadedQuery=query;total.value=r.total;summary.value=r.summary;error.value=''
+  for(const row of rows.value)if(expandedKeys.value.includes(row.id)&&row.items_expanded&&row.items_synced_at!==row.details_synced_at)void loadItems(row)
+ }catch(e){if(id===req)error.value=(e as Error).message}
+ finally{if(id===req)loading.value=false}
+}
 async function loadJobs(){if(!can('fba.list'))return;try{jobs.value=await api('/fba/jobs')}catch(e){error.value=(e as Error).message}}
 async function refresh(){await loadLogistics();await Promise.all([load(),loadJobs()])}
-function search(){expandedKeys.value=[];page.value=1;load()}
+function search(){expandedKeys.value=[];page.value=1;void load(false,true)}
 function reset(){dispatchDates.value=[];Object.assign(filters,{store:props.initialStore||'',marketplace:'',status:'',q:'',remaining_only:false,anomaly_only:false,logistics_pending:false});search()}
 function openSync(){form.stores=filters.store?[filters.store]:[...options.stores];form.markets=filters.marketplace?[filters.marketplace]:[...options.markets];dialog.value=true}
 async function submit(){if(!form.stores.length||!form.markets.length){ElMessage.warning('请选择店铺和查询站点');return}submitting.value=true;try{const r=await api('/fba/sync',{...form,shipment_ids:form.mode==='ids'?form.ids.toUpperCase().split(/[\s,，;；]+/).filter(Boolean):[]});dialog.value=false;ElMessage.success(r.jobs.some((j:{created:boolean})=>j.created)?'货件同步已加入后台队列':'店铺已有同步任务');await loadJobs()}catch(e){ElMessage.error((e as Error).message)}finally{submitting.value=false}}
@@ -48,7 +81,7 @@ async function detail(row:Shipment){try{selected.value=await api('/fba/shipments
 async function showHistory(s:Snapshot){try{snapshot.value=await api('/fba/snapshots/'+s.id);historyDialog.value=true}catch(e){ElMessage.error((e as Error).message)}}
 async function retry(j:Job,reset_scan=false){try{await api('/fba/jobs/'+j.id+'/retry',{reset_scan});await loadJobs();ElMessage.success('已安排重试')}catch(e){ElMessage.error((e as Error).message)}}
 let timer:ReturnType<typeof setInterval>
-onMounted(async()=>{try{Object.assign(options,await api('/options'))}catch(e){error.value=(e as Error).message}await refresh();timer=setInterval(async()=>{const had=active.value.length;await loadJobs();if(had||active.value.length)load()},8000)})
+onMounted(async()=>{try{Object.assign(options,await api('/options'))}catch(e){error.value=(e as Error).message}await refresh();timer=setInterval(async()=>{const had=active.value.length;await loadJobs();if(had||active.value.length)void load(true)},8000)})
 onUnmounted(()=>{clearInterval(timer);req++})
 
 const documentTarget=ref<any>(null),logisticsStatus=ref<any>({documents:[],settlements:[]})
@@ -60,7 +93,7 @@ async function refreshInvoices(){view.value='invoice';await nextTick();invoiceLi
 defineExpose({refreshInvoices})
 watch(()=>props.target,async t=>{if(t){try{const c=await api('/logistics/shipment?'+new URLSearchParams({store:t.store,shipment_id:t.shipment_id}));await detail({id:c.shipment_pk} as Shipment)}catch(e){ElMessage.error((e as Error).message)}}},{immediate:true})
 onMounted(loadLogistics)
-watch(()=>props.active,v=>{if(v){void load();void loadLogistics()}})
+watch(()=>props.active,v=>{if(v){void load(true);void loadLogistics()}})
 </script>
 <template>
  <div class="fba-toolbar"><el-radio-group v-model="view"><el-radio-button v-if="can('fba.list')" value="list">货件列表</el-radio-button><el-radio-button v-if="can('fba.sta')" value="sta">STA 任务列表</el-radio-button><el-radio-button v-if="can('fba.invoice')" value="invoice">清关发票</el-radio-button><el-radio-button v-if="can('fba.declaration')" value="declaration">报关单</el-radio-button></el-radio-group></div>
@@ -69,13 +102,14 @@ watch(()=>props.active,v=>{if(v){void load();void loadLogistics()}})
  <template v-if="view==='list'">
  <section class="panel">
  <div class="panel-head"><h2>全部货件 <span class="count-badge">{{fmt(total)}}</span></h2><span class="muted">{{summary.unknown?`${summary.unknown} 票接收数据待同步`:'数量来自最近一次成功获取的完整明细'}}</span></div>
- <form class="filters" @submit.prevent="search"><el-input v-model="filters.q" class="keyword" placeholder="搜索 FBA 号 / 名称 / SKU / FNSKU" :prefix-icon="Search" clearable @clear="search"/><el-select v-model="filters.store" placeholder="全部店铺" clearable><el-option v-for="s in options.stores" :key="s" :value="s" :label="s"/></el-select><el-select v-model="filters.marketplace" placeholder="查询站点" clearable><el-option v-for="m in options.markets" :key="m" :value="m" :label="m==='IE'?'爱尔兰 IE':m"/></el-select><el-select v-model="filters.status" placeholder="全部状态" clearable><el-option v-for="(label,key) in statuses" :key="key" :value="key" :label="label"/></el-select><el-date-picker v-model="dispatchDates" type="daterange" value-format="YYYY-MM-DD" start-placeholder="发货开始日期" end-placeholder="发货结束日期" range-separator="至" class="date-range"/><el-checkbox v-model="filters.remaining_only">有未接收</el-checkbox><el-checkbox v-model="filters.anomaly_only">有异常</el-checkbox><el-checkbox v-model="filters.logistics_pending">物流待补填</el-checkbox><el-button type="primary" native-type="submit">查询</el-button><el-button @click="reset">重置</el-button><TableReset table-key="FbaPanel/table-1"/></form>
- <template v-if="true"><el-table border data-width-key="FbaPanel/table-1" @header-dragend="(width: number, _old: number, column: any) => tableWidths.resize('table-1', width, column)" @header-contextmenu="(column: any, event: MouseEvent) => tableWidths.resetColumn('table-1', column, event)" :data="rows" v-loading="loading" row-key="id" :expand-row-keys="expandedKeys" @expand-change="(_row:any,expanded:Shipment[])=>expandedKeys=expanded.map(x=>x.id)" @row-dblclick="detail">
+ <form class="filters" @submit.prevent="search"><el-input v-model="filters.q" class="keyword" placeholder="搜索 FBA 号 / 名称 / SKU / FNSKU" :prefix-icon="Search" clearable @clear="search"/><el-select v-model="filters.store" :value-on-clear="''" aria-label="货件店铺" placeholder="全部店铺" clearable><el-option v-for="s in options.stores" :key="s" :value="s" :label="s"/></el-select><el-select v-model="filters.marketplace" :value-on-clear="''" aria-label="货件站点" placeholder="查询站点" clearable><el-option v-for="m in options.markets" :key="m" :value="m" :label="m==='IE'?'爱尔兰 IE':m"/></el-select><el-select v-model="filters.status" :value-on-clear="''" aria-label="货件状态" placeholder="全部状态" clearable><el-option v-for="(label,key) in statuses" :key="key" :value="key" :label="label"/></el-select><el-date-picker v-model="dispatchDates" type="daterange" value-format="YYYY-MM-DD" start-placeholder="发货开始日期" end-placeholder="发货结束日期" range-separator="至" class="date-range"/><el-checkbox v-model="filters.remaining_only">有未接收</el-checkbox><el-checkbox v-model="filters.anomaly_only">有异常</el-checkbox><el-checkbox v-model="filters.logistics_pending">物流待补填</el-checkbox><el-button type="primary" native-type="submit">查询</el-button><el-button @click="reset">重置</el-button><TableReset table-key="FbaPanel/table-1"/></form>
+ <template v-if="true"><el-table border data-width-key="FbaPanel/table-1" @header-dragend="(width: number, _old: number, column: any) => tableWidths.resize('table-1', width, column)" @header-contextmenu="(column: any, event: MouseEvent) => tableWidths.resetColumn('table-1', column, event)" :data="rows" v-loading="loading" row-key="id" :expand-row-keys="expandedKeys" @expand-change="expansionChanged" @row-dblclick="detail">
  <el-table-column :column-key="'column-1'" type="expand" :width="tableWidths.width('table-1', 'column-1', '40')"><template #default="{row}"><div class="shipment-lines">
  <div v-for="item in (row.items_expanded?row.all_items:row.preview_items)" :key="item.sku+'|'+item.fnsku" class="shipment-line">
  <span class="item-sku" :title="item.sku">{{item.sku}}</span><span :title="item.product_name">{{item.product_name||'—'}}</span><span class="item-fnsku">{{item.fnsku}}</span><span><small>申报</small> {{fmt(item.shipped)}}</span><span><small>已接收</small> {{row.details_synced_at?fmt(item.received):'—'}}</span><span :class="{amber:item.difference>0,danger:item.difference<0}"><small>差异</small> {{row.details_synced_at?fmt(item.difference):'—'}}</span>
  </div><p v-if="!row.preview_items.length" class="muted">商品明细尚未同步</p>
- <el-button v-if="row.item_count>5" link type="primary" @click="moreItems(row)">{{row.items_expanded?'收起商品':'展开剩余 '+(row.item_count-5)+' 个商品'}}</el-button>
+ <el-button v-if="row.item_count>5" link type="primary" :loading="row.items_loading&&!row.items_expanded" @click="moreItems(row)">{{row.items_expanded?'收起商品':'展开剩余 '+(row.item_count-5)+' 个商品'}}</el-button>
+ <p v-if="row.items_error" class="danger">明细更新失败，保留已展开内容：{{row.items_error}} <el-button link type="primary" @click="loadItems(row)">重试</el-button></p>
  </div></template></el-table-column>
  <el-table-column :column-key="'column-2'" :width="tableWidths.width('table-1', 'column-2', undefined)" label="货件 / 名称" min-width="255"><template #default="{row}"><button class="order-link" @click="detail(row)">{{row.shipment_id}}</button><div class="cell-sub fba-name" :title="row.name">{{row.name||'—'}}</div></template></el-table-column>
  <el-table-column column-key="reference-id" label="Reference ID" :width="tableWidths.width('table-1','reference-id','150')" min-width="150" show-overflow-tooltip><template #default="{row}">{{row.amazon_reference_id||'待返回'}}</template></el-table-column>
@@ -84,7 +118,7 @@ watch(()=>props.active,v=>{if(v){void load();void loadLogistics()}})
  <el-table-column :column-key="'column-8'" label="申报" :width="tableWidths.width('table-1', 'column-8', '90')" align="center"><template #default="{row}">{{fmt(row.shipped)}}</template></el-table-column><el-table-column :column-key="'column-9'" label="已接收" :width="tableWidths.width('table-1', 'column-9', '90')" align="center"><template #default="{row}">{{fmt(row.received)}}</template></el-table-column><el-table-column :column-key="'column-10'" label="未接收" :width="tableWidths.width('table-1', 'column-10', '90')" align="center"><template #default="{row}"><b :class="{amber:row.remaining>0}">{{fmt(row.remaining)}}</b></template></el-table-column><el-table-column :column-key="'column-11'" label="超收" :width="tableWidths.width('table-1', 'column-11', '80')" align="center"><template #default="{row}"><span :class="{danger:row.over_received>0}">{{fmt(row.over_received)}}</span></template></el-table-column>
  <el-table-column column-key="tracking" label="追踪编码" min-width="220" show-overflow-tooltip><template #default="{row}"><span style="white-space:nowrap">{{row.tracking_codes?.join(' / ')||'—'}}</span></template></el-table-column><el-table-column column-key="operations" label="操作" width="330" fixed="right"><template #default="{row}"><el-button link type="primary" @click="detail(row)">详情</el-button><el-button link type="primary" :disabled="exists(row,'invoice')||!can('fba.invoice','operate')" @click="generateDocument(row,'invoice')">生成发票</el-button><el-button link type="primary" :disabled="exists(row,'declaration')" @click="generateDocument(row,'declaration')">生成报关单</el-button><el-button link type="primary" :disabled="exists(row,'settlement')" @click="emit('settlement',row)">结算</el-button></template></el-table-column>
  <template #empty><el-empty description="暂无匹配货件；可同步亚马逊数据或调整筛选"/></template>
- </el-table></template><div class="shipment-totals"><strong>筛选结果合计（全部 {{total}} 票）</strong><span>申报 <b>{{fmt(summary.shipped)}}</b></span><span>已接收 <b>{{fmt(summary.received)}}</b></span><span>差异 <b>{{fmt(summary.difference)}}</b></span><small>差异 = 申报 − 已接收；负数为超收</small></div><div class="table-footer"><span>国家按亚马逊收货仓地址确定；发货日期采用亚马逊入库计划创建日期（目的地当地日期）。缺失日期不匹配区间。</span><AppPagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" @change="load"/></div>
+ </el-table></template><div class="shipment-totals"><strong>筛选结果合计（全部 {{total}} 票）</strong><span>申报 <b>{{fmt(summary.shipped)}}</b></span><span>已接收 <b>{{fmt(summary.received)}}</b></span><span>差异 <b>{{fmt(summary.difference)}}</b></span><small>差异 = 申报 − 已接收；负数为超收</small></div><div class="table-footer"><span>国家按亚马逊收货仓地址确定；发货日期采用亚马逊入库计划创建日期（目的地当地日期）。缺失日期不匹配区间。</span><AppPagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" @change="load()"/></div>
  </section></template>
  <ClearanceInvoices v-if="view==='invoice'" ref="invoiceList" @edit="row=>emit('open-invoice',{...row,invoiceId:row.id})" @changed="loadLogistics"/><ShipmentDocuments v-if="view==='declaration'" :kind="view"/>
  <ShipmentDocumentDialog :target="documentTarget" @close="documentTarget=null" @saved="loadLogistics"/>

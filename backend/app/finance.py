@@ -131,7 +131,7 @@ def retry(jid:str):
         j.status='queued';j.error=None;j.finished_at=None
     return {'ok':True}
 @router.get('/transactions')
-def transactions(store:str,days:int|None=Query(None,ge=1,le=365),q:str='',status:str='',marketplace:str='',start:date|None=None,end:date|None=None,currency:str='EUR',page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):
+def transactions(store:str,transaction_type:str='',category:Literal['','sales','refund','advertising','reimbursement','storage','service','other']='',date_basis:Literal['order','posted']|None=None,days:int|None=Query(None,ge=1,le=365),q:str='',status:str='',marketplace:str='',start:date|None=None,end:date|None=None,currency:str='EUR',page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):
     from sqlalchemy import and_,exists
     from .listing_business import ZONES
     from . import exchange_rates
@@ -139,14 +139,25 @@ def transactions(store:str,days:int|None=Query(None,ge=1,le=365),q:str='',status
     if days is not None and days not in [1,3,7,14,30,90,180,365]:raise HTTPException(422,"日期范围无效")
     if currency not in ['GBP','EUR','CNY']:raise HTTPException(422,'币种无效')
     if start and end and start>end:raise HTTPException(422,'开始日期不能晚于结束日期')
+    from .finance_records import category_expression,enrich,CATEGORIES,transaction_type_option
+    category_sql=category_expression()
     conditions=[Transaction.store==store]
+    if category:conditions.append(category_sql==category)
+    if transaction_type:conditions.append(Transaction.transaction_type==transaction_type)
     if q:conditions.append(Transaction.order_id==q.strip())
     if status:conditions.append(Transaction.status==status)
     if marketplace:conditions.append(Transaction.marketplace==marketplace)
-    if days is not None:conditions.append(Transaction.posted_at>=now()-timedelta(days=days))
+    if days is not None and (start or end):raise HTTPException(422,'最近天数与指定日期不能同时使用')
+    date_basis=date_basis or ('posted' if days is not None else 'order')
+    if days is not None and date_basis=='posted':conditions.append(Transaction.posted_at>=now()-timedelta(days=days))
     identity=and_(Order.store==Transaction.store,Order.order_id==Transaction.order_id)
+    if days is not None and date_basis=='order':conditions.append(exists(select(Order.id).where(identity,Order.purchased_at>=now()-timedelta(days=days))))
     localday=func.date(func.timezone(case(ZONES,value=Order.marketplace,else_='Europe/Berlin'),Order.purchased_at))
-    if start or end:
+    if (start or end) and date_basis=='posted':
+        postedday=func.date(func.timezone(case(ZONES,value=Transaction.marketplace,else_='Europe/Berlin'),Transaction.posted_at))
+        if start:conditions.append(postedday>=start)
+        if end:conditions.append(postedday<=end)
+    if (start or end) and date_basis=='order':
         match=select(Order.id).where(identity)
         if start:match=match.where(localday>=start)
         if end:match=match.where(localday<=end)
@@ -154,7 +165,9 @@ def transactions(store:str,days:int|None=Query(None,ge=1,le=365),q:str='',status
     with Session() as db:
         fx=exchange_rates.snapshot(db,currency)
         total=db.scalar(select(func.count()).select_from(Transaction).where(*conditions))
-        rows=list(db.scalars(select(Transaction).where(*conditions).order_by(Transaction.posted_at.desc(),Transaction.id.desc()).offset((page-1)*page_size).limit(page_size)))
+        records=db.execute(select(Transaction,category_sql).where(*conditions).order_by(Transaction.posted_at.desc(),Transaction.id.desc()).offset((page-1)*page_size).limit(page_size)).all()
+        rows=[r for r,c in records];categories={r.id:c for r,c in records}
+        enriched=enrich(db,rows,categories,fx)
         totals=[{'currency':c,'status':s,'amount':a,'count':n,'known':known} for c,s,a,n,known in db.execute(select(Transaction.currency,Transaction.status,func.sum(Transaction.amount),func.count(),func.count(Transaction.amount)).where(*conditions).group_by(Transaction.currency,Transaction.status))]
         display=[]
         for state in ['RELEASED','DEFERRED','DEFERRED_RELEASED']:
@@ -163,15 +176,13 @@ def transactions(store:str,days:int|None=Query(None,ge=1,le=365),q:str='',status
             converted=exchange_rates.convert([{'currency':r['currency'],'amount':str(r['amount'])} for r in group if r['amount'] is not None],fx)
             if not group or unknown:converted['amount']=None
             display.append(dict(converted,status=state,count=sum(r['count'] for r in group),unknown=unknown))
-        ids=[r.order_id for r in rows if r.order_id]
-        order_dates=dict(db.execute(select(Order.order_id,Order.purchased_at).where(Order.store==store,Order.order_id.in_(ids))).all()) if ids else {}
-        from .finance_labels import order_products,fallback_products,label
-        products=order_products(db,store,ids)
+        from .finance_labels import label
         data=[]
         for r in rows:
             value=exchange_rates.convert([{'currency':r.currency,'amount':str(r.amount)}],fx) if r.amount is not None else {'amount':None}
-            data.append(dict({k:getattr(r,k) for k in ['id','store','transaction_id','order_id','marketplace','transaction_type','status','posted_at','amount','currency','synced_at']},order_date=order_dates.get(r.order_id),converted=value,order_items=products.get(r.order_id) or fallback_products(r.data),transaction_type_cn=label(r.transaction_type)))
-        return {'total':total,'summary':totals,'display_summary':display,'fx':{k:v for k,v in fx.items() if k!='rates'},'rows':data}
+            data.append(dict({k:getattr(r,k) for k in ['id','store','transaction_id','order_id','marketplace','transaction_type','status','posted_at','amount','currency','synced_at']},converted=value,transaction_type_cn=label(r.transaction_type),**enriched[r.id]))
+        types=list(db.scalars(select(Transaction.transaction_type).where(Transaction.store==store,Transaction.transaction_type.is_not(None),Transaction.transaction_type!='').distinct().order_by(Transaction.transaction_type)))
+        return {'transaction_types':[transaction_type_option(t) for t in types],'categories':[{'value':k,'label':v[0],'help':v[1]} for k,v in CATEGORIES.items()],'total':total,'summary':totals,'display_summary':display,'fx':{k:v for k,v in fx.items() if k!='rates'},'rows':data}
 @router.get('/transactions/{pk}')
 def detail(pk:int):
     with Session() as db:

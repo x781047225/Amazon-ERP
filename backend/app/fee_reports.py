@@ -15,6 +15,7 @@ from . import storage_estimates
 TYPES={'fees':'GET_FBA_ESTIMATED_FBA_FEES_TXT_DATA','storage':'GET_FBA_STORAGE_FEE_CHARGES_DATA','aged':'GET_FBA_FULFILLMENT_LONGTERM_STORAGE_FEE_CHARGES_DATA'}
 TYPES.update(ledger='GET_LEDGER_SUMMARY_VIEW_DATA')
 TYPES.update({f'planning-{m}':'GET_FBA_INVENTORY_PLANNING_DATA' for m in storage_estimates.PLANNING_MARKETS})
+TYPES['returns']='GET_FBA_FULFILLMENT_CUSTOMER_RETURNS_DATA'
 class FeeReport(Base):
  __tablename__='fee_reports'
  store=Column(String(40),primary_key=True)
@@ -40,6 +41,9 @@ def number(v):
  return str(d)
 
 def parse(raw,kind):
+ if kind=='returns':
+  from .finance_returns import parse_report
+  return parse_report(raw)
  if kind=='ledger' or kind.startswith('planning-'):return storage_estimates.parse(raw,'ledger' if kind=='ledger' else 'planning',kind.split('-')[1] if kind.startswith('planning-') else None)
  reader=csv.DictReader(io.StringIO(raw),delimiter='\t')
  headers={str(k).strip().lower().replace('_','-') for k in reader.fieldnames or []}
@@ -105,13 +109,14 @@ def advance(run):
     recent=transport.request(run.store,'GET','/reports/2021-06-30/reports?'+params).get('reports',[])
     from datetime import datetime
     fresh=[r for r in recent if r.get('createdTime') and datetime.fromisoformat(r['createdTime'].replace('Z','+00:00'))>=at-timedelta(hours=24) and r.get('reportDocumentId')]
-    if kind=='ledger':fresh=[] # Other producers may request monthly/FC aggregation.
+    if kind in ('ledger','returns'):fresh=[] # Other producers may request monthly/FC aggregation.
     if fresh:
      remote=max(fresh,key=lambda r:r['createdTime']);report_id=remote['reportId']
      with Session.begin() as db:s=db.get(FeeReport,(run.store,kind));s.report_id=report_id;s.status='waiting';s.requested_at=at
     else:
      end=at if kind=='fees' or market else at.replace(day=1,hour=0,minute=0,second=0,microsecond=0)
      start=end-timedelta(hours=96) if kind=='fees' or market else (end-timedelta(days=1)).replace(day=1)
+     if kind=='returns':end=at;start=at-timedelta(days=180)
      if kind=='ledger':
       end=at.replace(hour=0,minute=0,second=0,microsecond=0)-timedelta(seconds=1);start=end.replace(day=1,hour=0,minute=0,second=0,microsecond=0)
      with Session.begin() as db:s=db.get(FeeReport,(run.store,kind));s.status='requesting';s.requested_at=at;s.report_id=None
@@ -127,6 +132,9 @@ def advance(run):
     with Session.begin() as db:db.get(FeeReport,(run.store,kind)).report_id=None
    if status!='DONE' or not remote.get('reportDocumentId'):raise AmazonError('费用报告未生成有效文件（'+str(status)+'），保留旧快照')
    parsed=parse(transport.download(run.store,remote['reportDocumentId']),kind)
+   if kind=='returns':
+    if not remote.get('dataStartTime') or not remote.get('dataEndTime'):raise AmazonError('FBA退货报告缺少覆盖时间，保留旧快照')
+    parsed=[{'schema':'fba-returns-v1','start':remote['dataStartTime'],'end':remote['dataEndTime'],'items':parsed}]
    with Session.begin() as db:s=db.get(FeeReport,(run.store,kind));s.rows=parsed;s.synced_at=now();s.status='succeeded';s.error=None
    p.update(status='succeeded',error=None);save();return
   except AmazonError as e:

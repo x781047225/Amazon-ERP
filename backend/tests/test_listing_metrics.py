@@ -28,6 +28,8 @@ def test_asin_fee_range_month_scope_and_daily_ads_complete_zero(monkeypatch):
  monkeypatch.setattr(metrics,'now',lambda:AT);pk=seed(payload())
  with Session.begin() as db:
   for kind,raw in [('fees',FEES),('storage',STORAGE),('aged',AGED)]:db.add(reports.FeeReport(store='DemoStoreA',kind=kind,status='succeeded',rows=reports.parse(raw,kind),synced_at=AT))
+  # Returns use a different snapshot schema and must not enter ASIN fee metrics.
+  db.add(reports.FeeReport(store='DemoStoreA',kind='returns',status='succeeded',synced_at=AT,rows=[{'schema':'fba-returns-v1','items':[{'sku':'a','quantity':1}]}]))
   for pid,store,country in [('de','DemoStoreA','DE'),('uk','DemoStoreA','UK'),('other','DemoStoreB','DE')]:db.add(AdsProfile(id=pid,account=store,country=country,currency='EUR',timezone='Europe/Berlin',data={}))
   db.flush()
   for i in range(30):
@@ -58,10 +60,10 @@ def test_report_async_poll_atomic_snapshot_and_daily_reuse(monkeypatch):
   reports.advance(r)
  tick();tick();assert len(calls)==2
  with Session() as db:assert db.get(reports.FeeReport,('DemoStoreA','fees')).rows==[]
- monkeypatch.setattr(reports.transport,'status',lambda *a:{'processingStatus':'DONE','reportDocumentId':'doc'})
+ monkeypatch.setattr(reports.transport,'status',lambda *a:{'processingStatus':'DONE','reportDocumentId':'doc','dataStartTime':(AT-timedelta(days=180)).isoformat(),'dataEndTime':AT.isoformat()})
  def download(*a):
   with Session() as db:r=db.get(DataSyncRun,'fees-run');kind=next(p['kind'] for p in r.plans if p.get('status')!='succeeded')
-  return {'fees':FEES,'storage':STORAGE,'aged':AGED,'ledger':'Date\tASIN\tLocation\tEnding Warehouse Balance\n'}.get(kind,'asin\tsnapshot-date\tcurrency\testimated-aged-surcharge\n')
+  return {'returns':'return-date\torder-id\tsku\tquantity\tdetailed-disposition\tstatus\n','fees':FEES,'storage':STORAGE,'aged':AGED,'ledger':'Date\tASIN\tLocation\tEnding Warehouse Balance\n'}.get(kind,'asin\tsnapshot-date\tcurrency\testimated-aged-surcharge\n')
  monkeypatch.setattr(reports.transport,'download',download)
  for _ in range(2*(len(reports.TYPES)-1)):tick()
  with Session() as db:assert db.get(DataSyncRun,'fees-run').status=='succeeded'

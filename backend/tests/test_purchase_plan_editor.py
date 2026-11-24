@@ -104,3 +104,21 @@ def test_people_migration_recovers_evidenced_creator():
   with Operations.context(MigrationContext.configure(db.connection())):migration.upgrade()
  with Session() as db:
   row=db.get(PurchasePlan,a['id']);assert row.created_by=='test-admin' and row.buyer==''
+
+
+def test_buyer_options_for_plan_operator_and_read_only_scope(monkeypatch):
+ w,p,batch=fixture()
+ with Session.begin() as db:
+  db.add_all([User(username='buyer-other',password_hash='unused',default_store='DemoStoreA',stores=['DemoStoreB']),User(username='buyer-disabled',password_hash='unused',default_store='DemoStoreA',stores=['DemoStoreA'],active=0),User(username='buyer-shared',password_hash='unused',default_store='DemoStoreA',stores=['DemoStoreA','DemoStoreB'])])
+ member={'permissions':['procurement.view','procurement.plans.view','procurement.plans.operate'],'id':99,'username':'operator','is_admin':False,'stores':['DemoStoreA'],'warehouse_ids':[w],'default_store':'DemoStoreA','current_store':'DemoStoreA'}
+ monkeypatch.setattr(auth,'resolve_session',lambda r:member)
+ response=client.get('/api/procurement/options');assert response.status_code==200
+ buyers={u['username']:u for u in response.json()['buyers']}
+ assert 'buyer-a' in buyers and 'buyer-shared' in buyers
+ assert 'buyer-other' not in buyers and 'buyer-disabled' not in buyers
+ assert buyers['buyer-shared']['stores']==['DemoStoreA']
+ assert set(buyers['buyer-a'])=={'username','stores','is_admin'}
+ assert client.get('/api/users').status_code==403
+ assert post(path(batch,'update'),body(batch)).status_code==200
+ member['permissions']=business_reader([])['permissions']
+ assert client.get('/api/procurement/options').json()['buyers']==[]

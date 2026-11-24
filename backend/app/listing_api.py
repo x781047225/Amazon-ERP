@@ -14,7 +14,7 @@ from .amazon import AmazonError
 from .listing_editor import FIELDS
 router=APIRouter(prefix='/api/listings')
 @router.get('')
-def listings(q:str='',store:str='',marketplace:str='',sort_period:Literal['today','yesterday','7','14','30','fba_available']='today',sort_order:Literal['asc','desc']='desc',page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100),product_type:str='',draft_only:bool=False):
+def listings(q:str='',store:str='',marketplace:str='',sort_period:Literal['today','yesterday','7','14','30','fba_available']='today',sort_order:Literal['asc','desc']='desc',page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100),product_type:str='',draft_only:bool=False,unlinked_only:bool=False):
     from .listing_query import sort_totals
     from .settings import STORES,MARKETS
     from .models import ListingPriceDraft,ProductLink,LocalProduct,ListingInventory
@@ -28,6 +28,7 @@ def listings(q:str='',store:str='',marketplace:str='',sort_period:Literal['today
         if store:filters.append(Listing.store==store)
         if marketplace:filters.append(Listing.marketplace==marketplace)
         if product_type:filters.append(Listing.product_type==product_type)
+        if unlinked_only:filters.append(~exists(select(ProductLink.listing_pk).where(ProductLink.listing_pk==Listing.id)))
         if draft_only:filters.append(or_(exists(select(ListingDraft.listing_pk).where(ListingDraft.listing_pk==Listing.id,ListingDraft.changes!={})),exists(select(ListingPriceDraft.listing_pk).where(ListingPriceDraft.listing_pk==Listing.id,ListingPriceDraft.changes!={}))))
         total=db.scalar(select(func.count()).select_from(Listing).where(*filters));count=db.scalar(select(func.count()).select_from(Listing))
         if sort_period=='fba_available':

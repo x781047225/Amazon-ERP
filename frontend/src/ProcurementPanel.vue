@@ -8,6 +8,7 @@ import {ElMessage,ElMessageBox} from 'element-plus'
 import {api,session} from './session'
 import {groupPurchaseOrders} from './purchaseOrderGroups'
 import PurchasePlanImport from './PurchasePlanImport.vue'
+import CopyValue from './CopyValue.vue'
 import PurchaseDispatch from './PurchaseDispatch.vue'
 import PurchaseOrderCreate from './PurchaseOrderCreate.vue'
 const dispatchRef=ref<any>(null)
@@ -177,7 +178,7 @@ async function exportExcel(){exportBusy.value=true;try{const params=new URLSearc
    <el-table-column column-key="note" label="备注" :width="tableWidths.width('table-2','note',260)"><template #default="{row:p}"><div class="plan-note">{{[...new Set(p.children.map((i:any)=>i.note).filter(Boolean))].join(' / ')||'—'}}</div></template></el-table-column>
   </el-table></template>
  </div></template></el-table-column>
- <el-table-column :column-key="'column-3'" :width="tableWidths.width('table-1', 'column-3', undefined)" label="采购批次编号" min-width="180"><template #default="{row}"><el-button link type="primary" @click="planTable?.toggleRowExpansion(row)">{{row.batch_code}}</el-button><div class="muted">{{row.product_count}} 个标品 · {{row.children.length}} 条渠道计划</div></template></el-table-column>
+ <el-table-column :column-key="'column-3'" :width="tableWidths.width('table-1', 'column-3', undefined)" label="采购批次编号" min-width="180"><template #default="{row}"><div class="purchase-number"><el-button link type="primary" @click="planTable?.toggleRowExpansion(row)">{{row.batch_code}}</el-button><CopyValue label="采购计划编号" :value="row.batch_code"/></div><div class="muted">{{row.product_count}} 个标品 · {{row.children.length}} 条渠道计划</div></template></el-table-column>
  <el-table-column :column-key="'column-4'" :width="tableWidths.width('table-1', 'column-4', undefined)" label="商品" min-width="230"><template #default="{row}"><div class="batch-images"><el-image v-for="p in row.products.slice(0,3)" :key="p.product_id" :src="p.image_url||''" fit="contain" class="product-image"><template #error><span class="muted">无图</span></template></el-image><span v-if="row.product_count>3">+{{row.product_count-3}}</span></div></template></el-table-column>
  <el-table-column :column-key="'quantity'" prop="quantity" label="计划采购量" :width="tableWidths.width('table-1', 'quantity', '125')" align="center"/>
  <el-table-column :column-key="'column-6'" :width="tableWidths.width('table-1', 'column-6', undefined)" label="店铺" min-width="130"><template #default="{row}">{{uniqueText(row,'store')}}</template></el-table-column>
@@ -201,7 +202,7 @@ async function exportExcel(){exportBusy.value=true;try{const params=new URLSearc
 <el-table-column :column-key="'column-13'" label="到货量" :width="tableWidths.width('table-3', 'column-13', '100')" align="center"><template #default="{row}"><span class="receipt-inline">{{row.received}} / {{row.quantity}}</span></template></el-table-column>
 <el-table-column :column-key="'column-14'" label="货值 (¥)" :width="tableWidths.width('table-3', 'column-14', '130')" align="center"><template #default="{row}">{{money(row.goods_value)}}</template></el-table-column>
 </el-table></template></div></template></el-table-column>
-<el-table-column column-key="number" label="采购单号 / 计划批次" min-width="200" :width="tableWidths.width('orders-summary','number',undefined)"><template #default="{row}"><el-button link type="primary" @click="orderTable?.toggleRowExpansion(row)">{{row.number}}</el-button><div class="muted">{{row.plan_batch_codes.join(' / ')||'—'}}</div></template></el-table-column>
+<el-table-column column-key="number" label="采购单号 / 计划批次" min-width="200" :width="tableWidths.width('orders-summary','number',undefined)"><template #default="{row}"><div class="purchase-number"><el-button link type="primary" @click="orderTable?.toggleRowExpansion(row)">{{row.number}}</el-button><CopyValue label="采购单编号" :value="row.number"/></div><div class="muted">{{row.plan_batch_codes.join(' / ')||'—'}}</div></template></el-table-column>
 <el-table-column column-key="quantity" prop="quantity" label="计划采购量" align="center" :width="tableWidths.width('orders-summary','quantity',105)"/>
 <el-table-column column-key="suppliers" label="供应商" :width="tableWidths.width('orders-summary','suppliers',130)"><template #default="{row}">{{row.suppliers.join(' / ')||'—'}}</template></el-table-column>
 <el-table-column column-key="warehouses" label="收货仓库" :width="tableWidths.width('orders-summary','warehouses',140)"><template #default="{row}">{{row.warehouses.join(' / ')||'—'}}</template></el-table-column>
@@ -278,6 +279,7 @@ async function exportExcel(){exportBusy.value=true;try{const params=new URLSearc
 </div>
 </template>
 <style scoped>
+.purchase-number{display:flex;align-items:center;gap:2px}
 .batch-images{display:flex;align-items:center;gap:8px}.batch-images .product-image{width:44px;height:44px}
 .plan-note{white-space:pre-wrap;overflow-wrap:anywhere}.plan-details{padding:12px 40px;background:#f7faf8}.plan-detail{display:grid;grid-template-columns:30px 1fr 1fr 1fr 90px 210px 60px;align-items:center;gap:16px;padding:12px;border-bottom:1px solid #e7efea}.plan-detail small{display:block}.batch-explain{color:#6d8479;line-height:1.9}.procurement-toolbar>div:last-child{display:flex;flex-wrap:wrap;gap:8px}.procurement-toolbar .el-button+.el-button{margin-left:0}
 

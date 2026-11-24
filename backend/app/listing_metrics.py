@@ -12,7 +12,7 @@ from . import storage_estimates
 def enrich(db,rows,results):
  if not rows:return
  stores={r.store for r in rows};asins={r.asin for r in rows if r.asin};at=now()
- reports={(s.store,s.kind):s for s in db.scalars(select(FeeReport).where(FeeReport.store.in_(stores)))}
+ reports={(s.store,s.kind):s for s in db.scalars(select(FeeReport).where(FeeReport.store.in_(stores),FeeReport.kind.in_(['fees','storage','aged','ledger',*[f'planning-{m}' for m in storage_estimates.PLANNING_MARKETS]])))}
  report_index=defaultdict(list)
  for (store,kind),s in reports.items():
   for v in s.rows:

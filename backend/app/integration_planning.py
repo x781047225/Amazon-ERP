@@ -1,7 +1,7 @@
 """Purchasing and shipping MCP tools reuse the authenticated local APIs."""
 from .integration_products import obj,args,body_schema,S,ID,PAGE,VERSION
-from .procurement_batches import NewPlanBatch,BatchEdit
-from .procurement import Selection,Generate,UpdateDocument
+from .procurement_batches import NewPlanBatch,BatchEdit,BulkNewPlans
+from .procurement import Selection,Generate,UpdateDocument,BatchReceipt
 from .procurement_flow import NewDocument,DeleteDocument
 from .shipping import TaskBody
 
@@ -21,6 +21,7 @@ tool('purchase_options','查询授权店铺、仓库、渠道和采购员选项�
 tool('purchase_plans_query','查询采购计划，grouped=true 按批次返回，包含备注及明细版本。',PLAN,'view','GET','/api/procurement/plans',obj({**FILTER,'grouped':{'type':'boolean'}}))
 tool('purchase_plan_detail','按批次号查看采购计划的全部明细、备注和 revision。',PLAN,'view','GET','/api/procurement/plan-batches/{code}',batch_args())
 tool('purchase_plan_create','新建一个标品的多渠道采购计划，支持备注。request_id 为唯一 UUID，同请求重试不重复创建。'+LOCAL,PLAN,'operate','POST','/api/procurement/plan-batches',args(body_schema(NewPlanBatch)))
+tool('purchase_plans_bulk_create','批量新增采购计划，items 最多200项，每项包含一个标品及多个渠道，每项单独生成批次号。全部成功或全部回滚；request_id 为唯一 UUID，原请求重试不重复创建。返回 plans 按输入 index 对应批次号及明细 ids。'+LOCAL,PLAN,'operate','POST','/api/procurement/plan-batches/bulk',args(body_schema(BulkNewPlans)))
 tool('purchase_plan_update','整批编辑采购计划。先读详情，plans 提交全部 id/revision，items 为完整保留明细（新增明细不传 id）；缺少的明细会被移除。已生成采购单或发货计划时拒绝。'+LOCAL,PLAN,'operate','POST','/api/procurement/plan-batches/{code}/update',batch_args(BatchEdit))
 tool('purchase_plan_delete','删除整批采购计划；先读详情，plans 须包含全部 id/revision，已处理或已安排发货时拒绝。'+LOCAL,PLAN,'operate','POST','/api/procurement/plan-batches/{code}/delete',batch_args(Selection))
 tool('purchase_plan_logs','查看采购计划操作人、时间和修改日志。',PLAN,'view','GET','/api/procurement/plan-batches/{code}/logs',obj({'code':CODE,**PAGE},['code']))
@@ -29,7 +30,9 @@ tool('purchase_plan_generate_orders','将已预览计划生成采购单；传全
 tool('purchase_orders_query','查询采购单；grouped=true 按整张单据分页，结果 rows 为各商品行，number 相同属于一张单据。',ORDER,'view','GET','/api/procurement/orders',obj({**FILTER,'grouped':{'type':'boolean'}}))
 tool('purchase_order_detail','按任一商品行 id 查看整张采购单，返回所有明细 id、revision、到货量。',ORDER,'view','GET','/api/procurement/orders/{id}/detail',args(identified=True))
 tool('purchase_order_create','新建采购单，按供应商和到货日期合单；设为待到货并记录本地待到货库存。request_id 为唯一 UUID。'+LOCAL,ORDER,'operate','POST','/api/procurement/flow/orders',args(body_schema(NewDocument)))
+tool('purchase_orders_bulk_create','批量新增采购单，rows 最多200条商品明细；相同供应商和预计到货日期合为一张单，不同组合生成多张。全部成功或全部回滚；request_id 为唯一 UUID，原请求重试不重复创建。创建后为待到货并记录待到货库存，返回 orders 含单号和明细 id。'+LOCAL,ORDER,'operate','POST','/api/procurement/flow/orders',args(body_schema(NewDocument)))
 tool('purchase_order_update','整单编辑。先读详情，orders 传全部明细及 revision；增加 received 会登记到货并增加本地库存，保持原值则不入库。已到货量不能减少。'+LOCAL,ORDER,'operate','POST','/api/procurement/orders/{id}/document',args(body_schema(UpdateDocument),True))
+tool('purchase_orders_receive','登记采购单到货，支持单条或批量，orders 最多200条。先查询详情取得明细 id/revision；quantity 是本次新增到货量，不是累计到货量。自动增加本地库存并更新待到货/已到货状态；不可超收。全部成功或全部回滚，request_id 为唯一 UUID，原请求重试不重复入库。'+LOCAL,ORDER,'operate','POST','/api/procurement/orders/batch-receive',args(body_schema(BatchReceipt)))
 tool('purchase_order_delete','删除整张采购单。先读详情，items 须传全部明细 id/revision；已有到货或发货计划则拒绝。删除后撤销待到货库存并恢复来源采购计划。'+LOCAL,ORDER,'operate','POST','/api/procurement/flow/orders/{id}/delete',args(body_schema(DeleteDocument),True))
 tool('purchase_order_logs','查看采购单操作人、时间及业务日志。',ORDER,'view','GET','/api/procurement/orders/{id}/logs',obj({'id':ID,**PAGE},['id']))
 tool('shipping_plan_options','查询授权店铺、仓库、国家和发货渠道。',SHIP,'view','GET','/api/shipping/options',obj({}))

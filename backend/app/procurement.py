@@ -53,7 +53,15 @@ class PlanBody(Body):
  revision:int|None=Field(default=None,ge=1)
 @router.get('/options')
 def options():
- with Session() as db:return {'stores':allowed_stores(),'countries':COUNTRIES,'channels':CHANNELS,'states':STATES,'buyers':[{'username':u.username,'stores':u.stores,'is_admin':bool(u.is_admin)} for u in db.scalars(select(User).where(User.active==1).order_by(User.username))] if admin() else [],'warehouses':[{'id':w.id,'name':w.name} for w in db.scalars(select(Warehouse).order_by(Warehouse.id))]}
+ from .permissions import can
+ stores=allowed_stores();buyers=[]
+ with Session() as db:
+  if can(principal.get(),'procurement.plans','operate'):
+   for u in db.scalars(select(User).where(User.active==1).order_by(User.username)):
+    visible_stores=[s for s in stores if s in (u.stores or [])]
+    if admin() or u.is_admin or visible_stores:
+     buyers.append({'username':u.username,'stores':u.stores if admin() else visible_stores,'is_admin':bool(u.is_admin)})
+  return {'stores':stores,'countries':COUNTRIES,'channels':CHANNELS,'states':STATES,'buyers':buyers,'warehouses':[{'id':w.id,'name':w.name} for w in db.scalars(select(Warehouse).order_by(Warehouse.id))]}
 def validate_plan(db,b):
  require_store(b.store)
  p=db.get(Product,b.product_id)

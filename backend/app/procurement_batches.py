@@ -1,6 +1,6 @@
 """Whole-batch purchasing edits; stock and order mutations remain in procurement.py."""
 from io import BytesIO
-from uuid import UUID
+from uuid import UUID,uuid5
 from typing import Literal
 from .procurement_models import new_plan_batch_code
 from urllib.parse import quote
@@ -131,36 +131,62 @@ class NewPlanRoute(Body):
  country:Literal['UK','DE']
  channel:Literal['air','truck','sea']
  quantity:int=Field(gt=0,le=10000000,strict=True)
-class NewPlanBatch(Body):
+class NewPlanInput(Body):
  note:str=Field(default='',max_length=1000)
- request_id:UUID
  product_id:int=Field(gt=0)
  store:str=Field(min_length=1,max_length=40)
  warehouse_id:int=Field(gt=0)
  buyer:str=Field(default='',max_length=64)
  routes:list[NewPlanRoute]=Field(min_length=1,max_length=6)
 
+class NewPlanBatch(NewPlanInput):
+ request_id:UUID
+class BulkNewPlans(Body):
+ request_id:UUID
+ items:list[NewPlanInput]=Field(min_length=1,max_length=200)
+
 @router.post('/plan-batches')
 def create_plan_batch(b:NewPlanBatch):
  require_admin()
  with Session.begin() as db:
   shipping_lock(db)
-  request=b.model_dump(mode='json')
-  existing=db.scalar(select(AccessAudit).where(AccessAudit.action=='purchase_plan_batch_create',AccessAudit.detail['request']['request_id'].as_string()==str(b.request_id)).limit(1))
+  return create_plan_batch_in_session(db,b)
+
+def create_plan_batch_in_session(db,b):
+ request=b.model_dump(mode='json')
+ existing=db.scalar(select(AccessAudit).where(AccessAudit.action=='purchase_plan_batch_create',AccessAudit.detail['request']['request_id'].as_string()==str(b.request_id)).limit(1))
+ if existing:
+  if existing.actor!=actor() or existing.detail.get('request')!=request:raise HTTPException(409,'请求编号已使用，请重新打开新增采购计划')
+  rows=batch_rows(db,existing.target)
+  return {'batch_code':existing.target,'ids':[p.id for p in rows],'replayed':True}
+ keys=[(r.country,r.channel) for r in b.routes]
+ if len(set(keys))!=len(keys):raise HTTPException(422,'同一渠道不能重复填写')
+ common=b.model_dump(exclude={'request_id','routes'})
+ lines=[PlanBody(**common,**r.model_dump()) for r in b.routes]
+ for line in lines:validate_plan(db,line)
+ validate_buyer(db,b.buyer,[b.store])
+ code=new_plan_batch_code(db.connection());rows=[]
+ for line in lines:
+  p=Plan(batch_code=code,**line.model_dump(exclude={'revision'}));db.add(p);rows.append(p)
+ db.flush()
+ for p,line in zip(rows,lines):audit(db,'purchase_plan_create',p.id,line.model_dump(mode='json'))
+ audit(db,'purchase_plan_batch_create',code,{'request':request,'plan_ids':[p.id for p in rows],'quantity':sum(p.quantity for p in rows),'buyer':b.buyer,'source':'manual'})
+ return {'batch_code':code,'ids':[p.id for p in rows],'replayed':False}
+
+@router.post('/plan-batches/bulk')
+def create_plan_batches(b:BulkNewPlans):
+ require_admin();request=b.model_dump(mode='json')
+ with Session.begin() as db:
+  shipping_lock(db)
+  existing=db.scalar(select(AccessAudit).where(AccessAudit.action=='purchase_plans_bulk_create',AccessAudit.target==str(b.request_id)))
   if existing:
-   if existing.actor!=actor() or existing.detail.get('request')!=request:raise HTTPException(409,'请求编号已使用，请重新打开新增采购计划')
-   rows=batch_rows(db,existing.target)
-   return {'batch_code':existing.target,'ids':[p.id for p in rows],'replayed':True}
-  keys=[(r.country,r.channel) for r in b.routes]
-  if len(set(keys))!=len(keys):raise HTTPException(422,'同一渠道不能重复填写')
-  common=b.model_dump(exclude={'request_id','routes'})
-  lines=[PlanBody(**common,**r.model_dump()) for r in b.routes]
-  for line in lines:validate_plan(db,line)
-  validate_buyer(db,b.buyer,[b.store])
-  code=new_plan_batch_code(db.connection());rows=[]
-  for line in lines:
-   p=Plan(batch_code=code,**line.model_dump(exclude={'revision'}));db.add(p);rows.append(p)
-  db.flush()
-  for p,line in zip(rows,lines):audit(db,'purchase_plan_create',p.id,line.model_dump(mode='json'))
-  audit(db,'purchase_plan_batch_create',code,{'request':request,'plan_ids':[p.id for p in rows],'quantity':sum(p.quantity for p in rows),'buyer':b.buyer,'source':'manual'})
-  return {'batch_code':code,'ids':[p.id for p in rows],'replayed':False}
+   if existing.actor!=actor() or existing.detail['request']!=request:raise HTTPException(409,'请求编号已使用')
+   for plan in existing.detail['response']['plans']:batch_rows(db,plan['batch_code'])
+   return existing.detail['response']|{'replayed':True}
+  plans=[]
+  for index,item in enumerate(b.items):
+   result=create_plan_batch_in_session(db,NewPlanBatch(request_id=uuid5(b.request_id,str(index)),**item.model_dump()))
+   plans.append({'index':index,**result})
+  response={'plans':plans,'created':len(plans),'replayed':False}
+  audit(db,'purchase_plans_bulk_create',str(b.request_id),{'request':request,'response':response})
+  return response
