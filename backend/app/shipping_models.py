@@ -4,6 +4,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from .db import Base
 from .models import now
 class ShippingAddress(Base):
+ address_type=Column(String(20),nullable=False,default='fba',server_default='fba')
  country=Column(String(2),nullable=False,default='',server_default='')
  __tablename__='shipping_addresses'
  id=Column(Integer,primary_key=True)

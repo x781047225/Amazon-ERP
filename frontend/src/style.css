@@ -125,3 +125,13 @@
 .el-table .is-center > .cell .muted,
 .el-table .is-center > .cell small {text-align:center;justify-content:center}
 .el-table .is-center > .cell .arrival-link {text-align:center}
+
+/* The entire expanded shipment/dispatch row shares the subordinate green surface. */
+.content.compact-content .el-table.fba-shipment-table td.el-table__expanded-cell,
+.content.compact-content .el-table.shipping-plan-table td.el-table__expanded-cell{padding:0;background:#f2f6f4}
+.content.compact-content .el-table.fba-shipment-table td.el-table__expanded-cell>.cell,
+.content.compact-content .el-table.shipping-plan-table td.el-table__expanded-cell>.cell{padding:0;background:#f2f6f4}
+
+/* Element Plus forces transparent on expanded-cell hover; keep the full green surface. */
+.content.compact-content .el-table.fba-shipment-table td.el-table__expanded-cell:hover,
+.content.compact-content .el-table.shipping-plan-table td.el-table__expanded-cell:hover{background:#f2f6f4!important}

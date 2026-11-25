@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CopyValue from './CopyValue.vue'
 import {ref,computed,onMounted} from 'vue'
 import {api,can} from './session'
 import {ElMessage,ElMessageBox} from 'element-plus'
@@ -18,9 +19,9 @@ onMounted(load)
  <el-table :data="rows" border v-loading="busy" row-key="id">
   <el-table-column label="商品名称" prop="name" min-width="220"/>
   <el-table-column label="中文报关名" min-width="170"><template #default="{row}">{{row.declaration.name_cn||'—'}}</template></el-table-column>
-  <el-table-column label="报关 HSCODE" min-width="150"><template #default="{row}">{{row.declaration.hs_code||'—'}}</template></el-table-column>
+  <el-table-column label="报关 HSCODE" min-width="150"><template #default="{row}">{{row.declaration.hs_code||'—'}}<CopyValue label="HS编码" :value="row.declaration.hs_code"/></template></el-table-column>
   <el-table-column label="中文清关名" min-width="170"><template #default="{row}">{{row.clearance.name_cn||'—'}}</template></el-table-column>
-  <el-table-column label="清关 HS 编码" min-width="150"><template #default="{row}">{{row.clearance.hs_code||'—'}}</template></el-table-column>
+  <el-table-column label="清关 HS 编码" min-width="150"><template #default="{row}">{{row.clearance.hs_code||'—'}}<CopyValue label="HS编码" :value="row.clearance.hs_code"/></template></el-table-column>
   <el-table-column label="清关税率" width="110" align="center"><template #default="{row}">{{row.clearance.tax_rate==null||row.clearance.tax_rate===''?'—':Number(row.clearance.tax_rate)+'%'}}</template></el-table-column>
   <el-table-column label="中文材质" min-width="150"><template #default="{row}">{{row.clearance.material_cn||row.declaration.material_cn||'—'}}</template></el-table-column>
   <el-table-column label="中文用途" min-width="150"><template #default="{row}">{{row.clearance.usage_cn||row.declaration.usage_cn||'—'}}</template></el-table-column>

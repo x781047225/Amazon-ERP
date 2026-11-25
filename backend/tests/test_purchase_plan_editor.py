@@ -77,8 +77,9 @@ def test_export_complete_batch_formula_safe_and_scope(monkeypatch):
  with Session.begin() as db:db.get(LocalProduct,p).name='=HYPERLINK("https://example.com")'
  r=client.get('/api/procurement/export?view=plans&channel=air');assert r.status_code==200,r.text
  ws=load_workbook(BytesIO(r.content)).active
- assert ws.max_row==3 and ws.cell(2,5).data_type=='s' and ws.cell(2,5).value.startswith('=')
- assert ws.cell(2,2).value=='test-admin' and ws.cell(2,3).value=='buyer-a'
+ assert ws.max_row==2 and ws.cell(2,1).data_type=='s' and ws.cell(2,1).value.startswith('=')
+ values=dict(zip([c.value for c in ws[1]],[c.value for c in ws[2]]))
+ assert values['创建人']=='test-admin' and values['采购员']=='buyer-a' and values['计划采购量']==30
  assert client.get('/api/procurement'+path(batch,'logs')).json()['rows'][0]['title']=='导出采购计划'
  create(body(batch)['plans']);r=client.get('/api/procurement/export?view=orders');assert r.status_code==200,r.text
  assert load_workbook(BytesIO(r.content)).active.max_row==2

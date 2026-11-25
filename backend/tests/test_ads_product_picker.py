@@ -32,3 +32,19 @@ def test_listing_wins_over_ad_duplicates_and_uk_alias():
  save_entities(PID,'ad',[{'adId':str(i),'campaignId':'1','adGroupId':'3','state':'ENABLED','sku':'FX-Test','asin':'B0TEST0003'} for i in range(3)]+[{'adId':'other','campaignId':'1','adGroupId':'3','state':'ENABLED','sku':'orphan','asin':'B0TEST0004'}])
  r=query().json();assert r['total']==2 and r['country']=='UK';assert [x['sku'] for x in r['rows']]==['FX-Test','orphan']
  assert query(profile_id='other').status_code==404
+
+
+def test_existing_group_membership_includes_paused_but_not_other_groups():
+ seed()
+ with Session.begin() as db:
+  db.add_all([listing('DemoStoreD','FR',s) for s in ['existing','paused','elsewhere','archived']])
+ save_entities(PID,'ad',[
+  {'adId':'a','campaignId':'1','adGroupId':'3','state':'ENABLED','sku':'existing'},
+  {'adId':'b','campaignId':'1','adGroupId':'3','state':'PAUSED','sku':'paused'},
+  {'adId':'c','campaignId':'1','adGroupId':'other','state':'ENABLED','sku':'elsewhere'},
+  {'adId':'d','campaignId':'1','adGroupId':'3','state':'ARCHIVED','sku':'archived'}])
+ r=query(adgroup_id='3',q='existing').json()
+ assert r['rows'][0]['existing_in_group'] is True
+ assert 'paused' in r['existing_skus'] and 'elsewhere' not in r['existing_skus'] and 'archived' not in r['existing_skus']
+ assert query(adgroup_id='3',q='elsewhere').json()['rows'][0]['existing_in_group'] is False
+ assert query(adgroup_id='missing').status_code==404

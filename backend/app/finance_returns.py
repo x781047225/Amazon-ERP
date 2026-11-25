@@ -149,7 +149,13 @@ def refund_contexts(db, store, order_ids, fx):
                     loss.append({'sku':item['sku'],'quantity':lost})
                 if lost > 0 and not records:notes.append('截至退货报告覆盖时间未查到退回记录，按未退回暂估；后续退回后自动重算')
                 notes.append(f"{item['sku']}：退款{qty}件，退回可售{recovered}件，计入成本损失{lost}件")
-            results[refund.id] = {'original_sale_net': str(base.quantize(Decimal('.01'))) if items and not any('原销售回款无法' in n for n in notes) else None,
+            estimated = not ready
+            if estimated:
+                statuses = [s for s in statuses if s != '待核实'] + ['暂按已退回可售']
+                notes.append('待核实部分暂按已退回且可售，不扣商品成本及头程；后续数据同步后重新计算')
+                if not items or any('原销售回款无法' in n for n in notes):
+                    notes.append('原销售回款未完整确认，先仅计已确认回款与退款净额，缺失回款暂不加回；补齐后重新计算')
+            results[refund.id] = {'estimated': estimated, 'known_sale_net': str(base.quantize(Decimal('.01'))), 'original_sale_net': str(base.quantize(Decimal('.01'))) if items and not any('原销售回款无法' in n for n in notes) else None,
                 'ready': ready, 'loss_items': loss, 'return_status': ' / '.join(dict.fromkeys(statuses)) or '待核实',
                 'notes': notes, 'return_checked_at': snapshot.synced_at if snapshot else None}
     return results

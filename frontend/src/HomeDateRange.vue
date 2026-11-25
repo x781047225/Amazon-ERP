@@ -1,0 +1,12 @@
+<script setup lang="ts">
+import {ref,watch} from 'vue'
+const props=defineProps<{modelValue:string,start?:string,end?:string,compact?:boolean,includeYesterday?:boolean,includeFortnight?:boolean}>()
+const emit=defineEmits<{ 'update:modelValue':[value:string], change:[value:{period:string,start?:string,end?:string}] }>()
+const dates=ref<string[]>([])
+watch(()=>[props.start,props.end],()=>{if(props.start&&props.end)dates.value=[props.start,props.end]},{immediate:true})
+const options=[['yesterday','昨天'],['7','前7天'],['14','前14天'],['30','前30天'],['month','本月'],['last_month','上月'],['custom','自定义']]
+function choose(value:string){emit('update:modelValue',value);if(value!=='custom')emit('change',{period:value});else if(dates.value?.length===2)changed()}
+function changed(){if(dates.value?.length===2){emit('update:modelValue','custom');emit('change',{period:'custom',start:dates.value[0],end:dates.value[1]})}}
+</script>
+<template><div class="home-range" :class="{compact}"><el-radio-group :model-value="modelValue" size="small" @change="(v: unknown)=>choose(String(v))"><el-radio-button v-for="[v,t] in (compact?options.filter(([v])=>(['7','30','custom'].includes(v!)||(includeYesterday&&v==='yesterday')||(includeFortnight&&v==='14'))):options)" :key="v" :value="v">{{t}}</el-radio-button></el-radio-group><el-date-picker v-model="dates" type="daterange" value-format="YYYY-MM-DD" start-placeholder="开始日期" end-placeholder="结束日期" :clearable="false" size="small" @change="changed"/><slot/></div></template>
+<style scoped>.home-range{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;min-width:0}.home-range :deep(.el-radio-button__inner){padding:6px 8px;font-size:12px}.home-range :deep(.el-date-editor){max-width:100%;width:250px;flex:0 1 250px}.home-range :deep(.el-radio-group){flex-wrap:wrap}.home-range.compact{width:100%;flex-wrap:nowrap;justify-content:flex-start;overflow-x:auto;padding-bottom:2px}.home-range.compact :deep(.el-radio-group){flex-wrap:nowrap;flex-shrink:0}.home-range.compact :deep(.el-radio-button__inner){font-size:11px;padding:6px}.home-range.compact :deep(.el-date-editor){flex:0 0 180px;max-width:180px;min-width:180px;width:180px;padding:0 4px}.home-range.compact :deep(.el-range-input){font-size:11px}.home-range.compact :deep(.el-range-separator){padding:0 2px}.home-range.compact :deep(.el-range__icon){font-size:12px;margin-left:0}.home-range.compact :deep(.el-range__close-icon){display:none}</style>

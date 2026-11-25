@@ -110,7 +110,7 @@ def test_recalculation_updates_order_quote_including_changed_promotion(monkeypat
 def test_terminal_report_can_retry_next_day_without_reusing_bad_id(monkeypatch):
  monkeypatch.setattr(reports,'now',lambda:AT)
  with Session.begin() as db:
-  r=DataSyncRun(id='terminal',store='DemoStoreA',kind='fees',mode='initialize',days=30,status='running',start_at=AT,end_at=AT,actor='test',plans=[]);db.add(r)
+  r=DataSyncRun(id='terminal',store='DemoStoreA',kind='fees',mode='initialize',days=30,status='running',start_at=AT,end_at=AT,actor='test',plans=[{'kind':'fees'}]);db.add(r)
   db.add(reports.FeeReport(store='DemoStoreA',kind='fees',status='waiting',report_id='bad',requested_at=AT,rows=[{'old':True}]))
  monkeypatch.setattr(reports.transport,'status',Mock(return_value={'processingStatus':'FATAL'}))
  reports.advance(r)
@@ -159,3 +159,25 @@ def test_fee_cooldown_preserves_original_failure_and_shows_exact_retry_time(monk
    assert '2026-11-19 20:00:00（北京时间）' in result.error and result.error.count('FATAL')==1
    assert db.get(reports.FeeReport,('DemoStoreA','planning-IE')).error=='费用报告未生成有效文件（FATAL），保留旧快照'
  request.assert_not_called()
+
+
+def test_failed_planning_does_not_block_customer_return_report(monkeypatch):
+ monkeypatch.setattr(reports,'now',lambda:AT)
+ with Session.begin() as db:
+  r=DataSyncRun(id='independent',store='DemoStoreA',kind='fees',mode='initialize',days=30,status='running',start_at=AT,end_at=AT,actor='test',plans=[{'kind':'planning-IE'},{'kind':'returns'}]);db.add(r)
+  db.add(reports.FeeReport(store='DemoStoreA',kind='planning-IE',status='waiting',report_id='bad',requested_at=AT,rows=[]))
+  db.add(reports.FeeReport(store='DemoStoreA',kind='returns',status='waiting',report_id='return-report',requested_at=AT,rows=[]))
+ monkeypatch.setattr(reports.transport,'status',Mock(side_effect=[{'processingStatus':'FATAL'},{'processingStatus':'DONE','reportDocumentId':'return-doc','dataStartTime':(AT-timedelta(days=180)).isoformat(),'dataEndTime':AT.isoformat()}]))
+ monkeypatch.setattr(reports.transport,'download',Mock(return_value='return-file'))
+ monkeypatch.setattr(reports,'parse',lambda raw,kind:[])
+ reports.advance(r)
+ with Session() as db:
+  r=db.get(DataSyncRun,'independent');assert r.status=='running' and r.plans[0]['status']=='failed'
+ reports.advance(r)
+ with Session() as db:
+  r=db.get(DataSyncRun,'independent');assert r.plans[1]['status']=='succeeded'
+  assert db.get(reports.FeeReport,('DemoStoreA','returns')).status=='succeeded'
+ reports.advance(r)
+ with Session() as db:
+  r=db.get(DataSyncRun,'independent');assert r.status=='failed' and 'planning-IE' in r.error
+ assert reports.transport.status.call_count==2

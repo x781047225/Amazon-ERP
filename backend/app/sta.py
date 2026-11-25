@@ -91,32 +91,36 @@ def public(t,full=True):
  d['error_message']=t.error
  d['progress']=progress(t)
  from sqlalchemy.orm import object_session
- from .shipping import heading,stock_state
+ from .shipping import heading,stock_state,number
  db=object_session(t);shipping=db.get(ShippingTask,t.shipping_id) if db else None
- if shipping:d['shipping']={'id':shipping.id,'title':heading(shipping),'revision':shipping.revision,'outbound_at':shipping.outbound_at,'inventory_status':stock_state(shipping)}
+ if shipping:d['shipping']={'id':shipping.id,'number':number(shipping),'title':heading(shipping),'revision':shipping.revision,'outbound_at':shipping.outbound_at,'inventory_status':stock_state(shipping)}
  d['can_confirm_dispatch']=bool(shipping and not t.result.get('dispatchCompleted') and t.stage in ('labels','tracking') and t.status in ('ready','failed','completed') and t.command.get('action')!='cancel' and t.result.get('transportConfirmed'))
  if full:d.update(snapshot=t.snapshot,form=t.form,result=t.result,command=t.command,journal=t.journal)
  return d
 
 class SavedAddress(Strict):
+ address_type:Literal['fba','1688']='fba'
  id:int|None=None
  store:str
  label:str=Field(default='',max_length=100)
  country:str=Field(default='',pattern='^([A-Z]{2})?$')
  detail:Address
 
-def address_data(a):return {'id':a.id,'store':a.store,'label':a.label,'country':a.country,'detail':a.detail}
+def address_data(a):return {'id':a.id,'store':a.store,'label':a.label,'country':a.country,'address_type':a.address_type,'detail':a.detail}
 @router.get('/addresses')
-def saved_addresses(store:str,country:str=''):
+def saved_addresses(store:str,country:str='',address_type:Literal['fba','1688','all']='fba'):
  require_store(store)
- with Session() as db:return [address_data(a) for a in db.scalars(select(ShippingAddress).where(ShippingAddress.store==store).order_by(ShippingAddress.id.desc()))]
+ with Session() as db:
+  query=select(ShippingAddress).where(ShippingAddress.store==store)
+  if address_type!='all':query=query.where(ShippingAddress.address_type==address_type)
+  return [address_data(a) for a in db.scalars(query.order_by(ShippingAddress.id.desc()))]
 @router.post('/addresses')
 def save_address(b:SavedAddress):
  require_admin();require_store(b.store)
  with Session.begin() as db:
   a=db.get(ShippingAddress,b.id) if b.id else ShippingAddress(store=b.store)
   if not a or a.store!=b.store:raise HTTPException(404,'地址不存在')
-  a.label=b.label or (b.detail.city+' · '+b.detail.addressLine1)[:100];a.country='';a.detail=b.detail.model_dump();db.add(a);db.flush()
+  a.label=b.label or (b.detail.city+' · '+b.detail.addressLine1)[:100];a.country='';a.address_type=b.address_type;a.detail=b.detail.model_dump();db.add(a);db.flush()
   return address_data(a)
 @router.post('/addresses/{address_id}/delete')
 def delete_address(address_id:int):
@@ -295,7 +299,7 @@ def labels(id:str,shipment_id:str,page_type:Literal['PackageLabel_A4_2','Package
   shipment=next((s for s in t.result.get('shipments',[]) if s['shipmentId']==shipment_id and s.get('placementOptionId')==t.result.get('placementConfirmed')),None)
   if not shipment or not shipment.get('shipmentConfirmationId'):raise HTTPException(404,'该任务中没有已确认的货件')
   store=t.store;plan_id=t.inbound_plan_id;fba=shipment['shipmentConfirmationId'];shipping_id=t.shipping_id
-  from .shipping import heading,stock_state
+  from .shipping import heading,stock_state,number
   plan_title=heading(db.get(ShippingTask,t.shipping_id))
   delivery=t.result.get('deliveryDetails',{}).get(shipment_id,{})
   two_up=page_type=='PackageLabel_A4_2' and delivery.get('shippingSolution')=='USE_YOUR_OWN_CARRIER'

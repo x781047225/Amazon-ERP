@@ -16,6 +16,7 @@ class ListingSyncJob(Base):
  heartbeat_at=Column(DateTime(timezone=True))
  finished_at=Column(DateTime(timezone=True))
 class LogisticsChannel(Base):
+ revision=Column(Integer,nullable=False,default=1,server_default='1')
  __tablename__='logistics_channels'
  id=Column(Integer,primary_key=True)
  name=Column(String(120),nullable=False)
@@ -54,6 +55,11 @@ class LogisticsSettlement(Base):
  store=Column(String(40),nullable=False,index=True)
  shipment_id=Column(String(80),nullable=False)
  detail=Column(JSONB,nullable=False)
+ status=Column(String(20),nullable=False,default='unsettled',server_default='unsettled')
+ actual_charge_weight=Column(Numeric(16,4))
+ settled_by=Column(String(64))
+ settled_at=Column(DateTime(timezone=True),index=True)
+ revision=Column(Integer,nullable=False,default=1,server_default='1')
  actor=Column(String(64),nullable=False)
  created_at=Column(DateTime(timezone=True),nullable=False,default=now)
  __table_args__=(UniqueConstraint('store','shipment_id'),)

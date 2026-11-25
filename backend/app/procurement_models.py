@@ -44,6 +44,8 @@ def plan_creator():
  return (principal.get() or {}).get('username','')
 class PurchasePlan(Base):
  __tablename__='purchase_plans'
+ processed_at=Column(DateTime(timezone=True))
+ processed_by=Column(String(64),nullable=False,default='',server_default='')
  note=Column(Text,nullable=False,default='',server_default='')
  created_by=Column(String(64),nullable=False,default=plan_creator,server_default='')
  buyer=Column(String(64),nullable=False,default='',server_default='')

@@ -47,11 +47,15 @@ def selected(db,b,lock=False):
 def dispatch_rows(db,b,lock=False):
  lines=selected(db,b,lock);used=plan_usage(db);order_used=usage(db,'order_id');result=[]
  if b.kind=='plans':
-  groups={}
+  groups={};order_remaining={}
   for p in lines:
    require_store(p.store);key=(p.product_id,p.store,p.warehouse_id)
    g=groups.setdefault(key,{'key':f'p:{p.product_id}:{p.store}:{p.warehouse_id}','product_id':p.product_id,'store':p.store,'warehouse_id':p.warehouse_id,'quantity':0,'quantities':{},'sources':[],'numbers':[],'fixed_store':True})
-   n=max(0,p.quantity-used.get(p.id,0));g['quantity']+=n;route=p.country+'_'+p.channel;g['quantities'][route]=g['quantities'].get(route,0)+n
+   n=max(0,p.quantity-used.get(p.id,0))
+   if p.order_id:
+    if p.order_id not in order_remaining:order_remaining[p.order_id]=max(0,db.get(Order,p.order_id).quantity-order_used.get(p.order_id,0))
+    n=min(n,order_remaining[p.order_id]);order_remaining[p.order_id]-=n
+   g['quantity']+=n;route=p.country+'_'+p.channel;g['quantities'][route]=g['quantities'].get(route,0)+n
    g['sources'].append({'plan_id':p.id,'order_id':p.order_id,'remaining':n});g['numbers'].append(p.batch_code)
   result=list(groups.values())
  else:
@@ -59,11 +63,13 @@ def dispatch_rows(db,b,lock=False):
    plans=list(db.scalars(select(Plan).where(Plan.order_id==o.id).order_by(Plan.id)))
    groups={}
    if plans:
+    available=max(0,o.quantity-order_used.get(o.id,0))
     for p in plans:
      require_store(p.store)
      g=groups.setdefault(p.store,{'key':f'o:{o.id}:{p.store}','product_id':o.product_id,'store':p.store,'warehouse_id':o.warehouse_id,'quantity':0,'quantities':{},'sources':[],'numbers':[order_number(o)],'fixed_store':True})
-     n=max(0,p.quantity-used.get(p.id,0));g['quantity']+=n;route=p.country+'_'+p.channel;g['quantities'][route]=g['quantities'].get(route,0)+n;g['sources'].append({'plan_id':p.id,'order_id':o.id,'remaining':n})
+     n=min(available,max(0,p.quantity-used.get(p.id,0)));available-=n;g['quantity']+=n;route=p.country+'_'+p.channel;g['quantities'][route]=g['quantities'].get(route,0)+n;g['sources'].append({'plan_id':p.id,'order_id':o.id,'remaining':n})
     result.extend(groups.values())
+    if available:result.append({'key':f'o:{o.id}:extra','product_id':o.product_id,'store':o.store or (plans[0].store if len(groups)==1 else ''),'warehouse_id':o.warehouse_id,'quantity':available,'quantities':{},'sources':[{'plan_id':None,'order_id':o.id,'remaining':available}],'numbers':[order_number(o)],'fixed_store':False})
    else:
     remaining=max(0,o.quantity-order_used.get(o.id,0))
     # Initial distribution is a suggestion. Subtract confirmed previous dispatches per route.
@@ -87,6 +93,11 @@ def preview_dispatch(b:FlowSelection):
  require_admin()
  with Session() as db:
   rows,_=dispatch_rows(db,b)
+  from .procurement_links import listing_refs
+  from .products import product_images
+  refs=listing_refs(db,[(r['product_id'],r['store']) for r in rows])
+  images=product_images(db,[db.get(Product,r['product_id']) for r in rows])
+  for r in rows:r.update(listings=refs.get((r['product_id'],r['store']),[]),image_url=images.get(r['product_id']))
   return {'rows':[{k:v for k,v in r.items() if k!='sources'} for r in rows]}
 class Distribution(Body):
  key:str

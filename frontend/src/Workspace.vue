@@ -1,38 +1,39 @@
 <script setup lang="ts">
+import {asyncPage} from './asyncPage'
 import {useTableWidths} from './tableWidths'
 const tableWidths=useTableWidths('Workspace')
 
 import {checkPriceJobs} from './priceJobs'
 import {displayCurrency} from './currency'
-const LogisticsPanel=defineAsyncComponent(()=>import('./LogisticsPanel.vue'))
-const SettingsPanel=defineAsyncComponent(()=>import('./SettingsPanel.vue'))
+const LogisticsPanel=asyncPage(()=>import('./LogisticsPanel.vue'))
+const SettingsPanel=asyncPage(()=>import('./SettingsPanel.vue'))
 import DashboardPanel from './DashboardPanel.vue'
 import AdsSearchTaskStatus from './AdsSearchTaskStatus.vue'
 import TodoReminder from './TodoReminder.vue'
-const TodoPanel=defineAsyncComponent(()=>import('./TodoPanel.vue'))
+const TodoPanel=asyncPage(()=>import('./TodoPanel.vue'))
 async function openTodos(){await navigate('todos')}
 import OrderRows from './OrderRows.vue'
 import OrderIncomeDialog from './OrderIncomeDialog.vue'
 const calculatorOrder=ref<any>(null)
 function newAdsTabKey(prefix:string){return prefix+Array.from(crypto.getRandomValues(new Uint32Array(4)),n=>n.toString(16).padStart(8,'0')).join('')}
 function openListingAds(row:any){if(!canAccessAds.value)return;const key=newAdsTabKey('ads-listing-');insertTab({key,title:'广告 · '+row.sku,adsFocus:{store:row.store,marketplace:row.marketplace,asin:row.asin,request:Date.now()}});tab.value=key;nextTick(()=>window.scrollTo({top:0}))}
-const UserPanel=defineAsyncComponent(()=>import('./UserPanel.vue'))
-const FinancePanel=defineAsyncComponent(()=>import('./FinancePanel.vue'))
-const ProductPanel=defineAsyncComponent(()=>import('./ProductPanel.vue'))
-const ProductEditor=defineAsyncComponent(()=>import('./ProductEditor.vue'))
-const InvoiceEditor=defineAsyncComponent(()=>import('./InvoiceEditor.vue'))
-const CustomsProfileEditor=defineAsyncComponent(()=>import('./CustomsProfileEditor.vue'))
-const WarehousePanel=defineAsyncComponent(()=>import('./WarehousePanel.vue'))
-const ProcurementPanel=defineAsyncComponent(()=>import('./ProcurementPanel.vue'))
-const ReplenishmentPanel=defineAsyncComponent(()=>import('./ReplenishmentPanel.vue'))
-const ShippingPanel=defineAsyncComponent(()=>import('./ShippingPanel.vue'))
-const StaPanel=defineAsyncComponent(()=>import('./StaPanel.vue'))
-const AdvertisingPanel=defineAsyncComponent(()=>import('./AdvertisingPanel.vue'))
-const AdsCreatePage=defineAsyncComponent(()=>import('./AdsCreatePage.vue'))
+const UserPanel=asyncPage(()=>import('./UserPanel.vue'))
+const FinancePanel=asyncPage(()=>import('./FinancePanel.vue'))
+const ProductPanel=asyncPage(()=>import('./ProductPanel.vue'))
+const ProductEditor=asyncPage(()=>import('./ProductEditor.vue'))
+const InvoiceEditor=asyncPage(()=>import('./InvoiceEditor.vue'))
+const CustomsProfileEditor=asyncPage(()=>import('./CustomsProfileEditor.vue'))
+const WarehousePanel=asyncPage(()=>import('./WarehousePanel.vue'))
+const ProcurementPanel=asyncPage(()=>import('./ProcurementPanel.vue'))
+const ReplenishmentPanel=asyncPage(()=>import('./ReplenishmentPanel.vue'))
+const ShippingPanel=asyncPage(()=>import('./ShippingPanel.vue'))
+const StaPanel=asyncPage(()=>import('./StaPanel.vue'))
+const AdvertisingPanel=asyncPage(()=>import('./AdvertisingPanel.vue'))
+const AdsCreatePage=asyncPage(()=>import('./AdsCreatePage.vue'))
 import {session,can,api as authApi} from './session'
-const FbaPanel=defineAsyncComponent(()=>import('./FbaPanel.vue'))
-const ListingPanel=defineAsyncComponent(()=>import('./ListingPanel.vue'))
-import {ref,reactive,onMounted,onUnmounted,computed,nextTick,watch,defineAsyncComponent} from 'vue'
+const FbaPanel=asyncPage(()=>import('./FbaPanel.vue'))
+const ListingPanel=asyncPage(()=>import('./ListingPanel.vue'))
+import {ref,reactive,onMounted,onUnmounted,computed,nextTick,watch} from 'vue'
 import {ElMessage,ElMessageBox} from 'element-plus'
 import {QuestionFilled,Box,Search,Refresh,Document,ArrowRight,Clock,ShoppingCart,OfficeBuilding,Setting,Download,Check,Warning} from '@element-plus/icons-vue'
 type Item={item_id:string,sku:string,asin:string,title:string,quantity:number,amount:string|null,currency:string|null}
@@ -50,15 +51,19 @@ const mobileMenuOpen=ref(false)
 const tab=ref('home'),loading=ref(false),syncing=ref(false),error=ref(''),drawer=ref(false),syncDialog=ref(false)
 const productPanel=ref<{canLeave:()=>Promise<boolean>,refresh:()=>void}|null>(null)
 const listingPanel=ref<{canLeave:()=>Promise<boolean>}|null>(null)
-type WorkTab={key:string,adsContext?:any,adsFocus?:any,adsCreate?:any,title?:string,shippingId?:number,taskId?:string,productId?:number,customsId?:number,invoiceId?:number,invoiceStore?:string,invoiceShipment?:string}
+type WorkTab={key:string,procurementGenerate?:any,adsContext?:any,adsFocus?:any,adsCreate?:any,title?:string,shippingId?:number,taskId?:string,productId?:number,customsId?:number,invoiceId?:number,invoiceStore?:string,invoiceShipment?:string}
+const ProcurementGenerate=asyncPage(()=>import('./ProcurementGenerate.vue'))
+const procurementPanel=ref<any>(null),procurementGenerators=new Map<string,any>()
+function openProcurementGenerate(context:any){const key='purchase-generate-'+Date.now()+'-'+Math.random().toString(36).slice(2,7);insertTab({key,title:context.mode==='purchase'?'生成采购单':'生成发货计划',procurementGenerate:context});tab.value=key;nextTick(()=>window.scrollTo({top:0}))}
+function procurementGenerated(key:string){removeTab(key);navigate('procurement');nextTick(()=>procurementPanel.value?.refresh())}
 const tabStorageKey='erp:workspace-tabs:'+session.value!.username
 const opened=ref<WorkTab[]>([{key:'home'}])
 const tabStrip=ref<HTMLElement|null>(null)
 function revealActiveTab(){const strip=tabStrip.value,active=strip?.querySelector<HTMLElement>('.active');if(!strip||!active)return;const box=strip.getBoundingClientRect(),item=active.getBoundingClientRect();if(item.left<box.left)strip.scrollLeft-=box.left-item.left;else if(item.right>box.right)strip.scrollLeft+=item.right-box.right}
 watch(tab,()=>nextTick(revealActiveTab),{flush:'post'})
 onMounted(()=>nextTick(revealActiveTab))
-try{const saved=JSON.parse(sessionStorage.getItem(tabStorageKey)||'null');const modules=['home','todos','logistics','settings','orders','fba','listing','finance','products','warehouse','procurement','shipping','replenishment',...(can('users')?['users']:[]),...(canAccessAds.value?['advertising']:[])];if(Array.isArray(saved?.tabs)){const seen=new Set<string>();const restored=saved.tabs.filter((t:any)=>t&&typeof t.key==='string'&&!seen.has(t.key)&&((modules.includes(t.key)&&can(t.key))||(t.key.startsWith('ads-')&&canAccessAds.value&&typeof t.adsContext?.profileId==='string'&&typeof t.adsContext?.store==='string'&&t.adsContext?.campaign?.id)||(t.key.startsWith('ads-create-')&&can('advertising','operate')&&['campaign','adgroup'].includes(t.adsCreate?.mode)&&typeof t.adsCreate?.profileId==='string')||(t.key.startsWith('ads-listing-')&&canAccessAds.value&&typeof t.adsFocus?.store==='string'&&typeof t.adsFocus?.marketplace==='string'&&typeof t.adsFocus?.asin==='string')||(t.key.startsWith('invoice-')&&can('fba.invoice')&&typeof t.invoiceStore==='string'&&typeof t.invoiceShipment==='string')||(t.key.startsWith('customs-')&&(can('products.declaration')||can('products.clearance'))&&(t.customsId===undefined||Number.isInteger(t.customsId)))||(t.key.startsWith('product-')&&can('products.products','operate')&&(t.productId===undefined||Number.isInteger(t.productId)))||(t.key.startsWith('sta-')&&(can('shipping')||can('fba.sta'))&&(typeof t.taskId==='string'||Number.isInteger(t.shippingId))))&&seen.add(t.key));if(restored.length){opened.value=restored;tab.value=restored.some((t:WorkTab)=>t.key===saved.active)?saved.active:restored[0].key}}}catch{}
-if(!can(tab.value)&&!(tab.value.startsWith('ads-')&&canAccessAds.value)&&!tab.value.startsWith('sta-')&&!tab.value.startsWith('product-')&&!tab.value.startsWith('customs-')&&!tab.value.startsWith('invoice-')){const key=['home','todos','products','listing','orders','fba','procurement','shipping','warehouse','finance','users','logistics','settings'].find(k=>can(k));opened.value=key?[{key}]:[];tab.value=key||'no-access'}
+try{const saved=JSON.parse(sessionStorage.getItem(tabStorageKey)||'null');const modules=['home','todos','logistics','settings','orders','fba','listing','finance','products','warehouse','procurement','shipping','replenishment',...(can('users')?['users']:[]),...(canAccessAds.value?['advertising']:[])];if(Array.isArray(saved?.tabs)){const seen=new Set<string>();const restored=saved.tabs.filter((t:any)=>t&&typeof t.key==='string'&&!seen.has(t.key)&&((modules.includes(t.key)&&can(t.key))||(t.key.startsWith('purchase-generate-')&&can('procurement.'+t.procurementGenerate?.kind,'operate')&&Array.isArray(t.procurementGenerate?.items))||(t.key.startsWith('ads-')&&canAccessAds.value&&typeof t.adsContext?.profileId==='string'&&typeof t.adsContext?.store==='string'&&t.adsContext?.campaign?.id)||(t.key.startsWith('ads-create-')&&can('advertising','operate')&&['campaign','adgroup'].includes(t.adsCreate?.mode)&&typeof t.adsCreate?.profileId==='string')||(t.key.startsWith('ads-listing-')&&canAccessAds.value&&typeof t.adsFocus?.store==='string'&&typeof t.adsFocus?.marketplace==='string'&&typeof t.adsFocus?.asin==='string')||(t.key.startsWith('invoice-')&&can('fba.invoice')&&typeof t.invoiceStore==='string'&&typeof t.invoiceShipment==='string')||(t.key.startsWith('customs-')&&(can('products.declaration')||can('products.clearance'))&&(t.customsId===undefined||Number.isInteger(t.customsId)))||(t.key.startsWith('product-')&&can('products.products','operate')&&(t.productId===undefined||Number.isInteger(t.productId)))||(t.key.startsWith('sta-')&&(can('shipping')||can('fba.sta'))&&(typeof t.taskId==='string'||Number.isInteger(t.shippingId))))&&seen.add(t.key));if(restored.length){opened.value=restored;tab.value=restored.some((t:WorkTab)=>t.key===saved.active)?saved.active:restored[0].key}}}catch{}
+if(!can(tab.value)&&!(tab.value.startsWith('ads-')&&canAccessAds.value)&&!tab.value.startsWith('sta-')&&!tab.value.startsWith('product-')&&!tab.value.startsWith('customs-')&&!tab.value.startsWith('invoice-')&&!tab.value.startsWith('purchase-generate-')){const key=['home','todos','products','listing','orders','fba','procurement','shipping','warehouse','finance','users','logistics','settings'].find(k=>can(k));opened.value=key?[{key}]:[];tab.value=key||'no-access'}
 watch([opened,tab],()=>{try{sessionStorage.setItem(tabStorageKey,JSON.stringify({tabs:opened.value,active:tab.value}))}catch{}},{deep:true})
 // Capture before v-show hides the form and the document height changes.
 const adsCreateScroll=new Map<string,{left:number,top:number}>()
@@ -71,7 +76,7 @@ watch(tab,async next=>{
  await nextTick()
  if(tab.value===next)window.scrollTo({...position,behavior:'instant'})
 },{flush:'post'})
-const compactPage=computed(()=>tab.value==='advertising'||tab.value.startsWith('ads-')||tab.value.startsWith('invoice-')||tab.value.startsWith('product-')||tab.value.startsWith('customs-')||['todos','orders','logistics','settings','fba','shipping','listing','finance','users','products','warehouse','procurement'].includes(tab.value))
+const compactPage=computed(()=>tab.value.startsWith('purchase-generate-')||tab.value==='advertising'||tab.value.startsWith('ads-')||tab.value.startsWith('invoice-')||tab.value.startsWith('product-')||tab.value.startsWith('customs-')||['todos','orders','logistics','settings','fba','shipping','listing','finance','users','products','warehouse','procurement'].includes(tab.value))
 const hasTab=(key:string)=>opened.value.some(x=>x.key===key)
 function sameAdsCampaign(a:any,b:any){return !!a?.campaign?.id&&!!b?.campaign?.id&&String(a.profileId)===String(b.profileId)&&String(a.campaign.id)===String(b.campaign.id)}
 function updateAdsDates(context:any,range:any){
@@ -83,6 +88,8 @@ function openAdsCreate(context:any){if(!can('advertising','operate'))return;cons
 function adsCreated(){for(const panel of adsPanels.values())panel?.refresh()}
 function insertTab(entry:WorkTab){const i=opened.value.findIndex(t=>t.key===tab.value);opened.value.splice(i<0?opened.value.length:i+1,0,entry)}
 async function navigate(next:string){if(!can(next))return;mobileMenuOpen.value=false;if(!hasTab(next))insertTab({key:next});tab.value=next;nextTick(()=>window.scrollTo({top:0}));if(next==='orders'&&!orders.value.length)fetchOrders()}
+const shippingTarget=ref<{id:number,request:number}>()
+function openShipping(id:number){if(!can('shipping'))return;shippingTarget.value={id,request:Date.now()};void navigate('shipping')}
 function openSta(data:{shippingId?:number,taskId?:string}){let found=opened.value.find(x=>(data.taskId&&x.taskId===data.taskId)||(data.shippingId&&x.shippingId===data.shippingId));if(!found){found={key:'sta-'+(data.taskId||data.shippingId),title:'STA 入库计划',...data};insertTab(found)}tab.value=found.key}
 function staCreated(entry:WorkTab,data:{id:string,name:string}){entry.taskId=data.id;entry.title='STA · '+data.name}
 const invoiceEditors=new Map<string,any>(),fbaPanel=ref<any>()
@@ -94,7 +101,7 @@ function openCustoms(id?:number){if(!can('products.declaration')&&!can('products
 function customsSaved(entry:WorkTab,_data:{id:number,name:string}){removeTab(entry.key);productPanel.value?.refresh()}
 function openProduct(id?:number){const key=id?'product-'+id:'product-new';let entry=opened.value.find(t=>t.key===key);if(!entry){entry={key,productId:id,title:id?'编辑产品':'新增产品'};insertTab(entry)}tab.value=key}
 function productSaved(entry:WorkTab,_data:{id:number,name:string}){removeTab(entry.key);productPanel.value?.refresh()}
-async function closeTab(key:string){if(key.startsWith('ads-create-')&&adsCreators.get(key)&&!(await adsCreators.get(key).canLeave()))return;if(key.startsWith('invoice-')&&invoiceEditors.get(key)&&!(await invoiceEditors.get(key).canLeave()))return;if(key.startsWith('customs-')&&customsEditors.get(key)&&!(await customsEditors.get(key).canLeave()))return;if(key.startsWith('product-')&&productEditors.get(key)&&!(await productEditors.get(key).canLeave()))return;if(key==='products'&&productPanel.value&&!(await productPanel.value.canLeave()))return;if(key==='listing'&&listingPanel.value&&!(await listingPanel.value.canLeave()))return;removeTab(key)}
+async function closeTab(key:string){if(procurementGenerators.has(key)&&!await procurementGenerators.get(key).canLeave())return;if(key.startsWith('ads-create-')&&adsCreators.get(key)&&!(await adsCreators.get(key).canLeave()))return;if(key.startsWith('invoice-')&&invoiceEditors.get(key)&&!(await invoiceEditors.get(key).canLeave()))return;if(key.startsWith('customs-')&&customsEditors.get(key)&&!(await customsEditors.get(key).canLeave()))return;if(key.startsWith('product-')&&productEditors.get(key)&&!(await productEditors.get(key).canLeave()))return;if(key==='products'&&productPanel.value&&!(await productPanel.value.canLeave()))return;if(key==='listing'&&listingPanel.value&&!(await listingPanel.value.canLeave()))return;removeTab(key)}
 function removeTab(key:string){const i=opened.value.findIndex(x=>x.key===key);if(i<0)return;adsCreateScroll.delete(key);opened.value.splice(i,1);if(!opened.value.length){const fallback=['home','todos','products','listing','orders','fba','procurement','shipping','warehouse','finance','users','logistics','settings','advertising','replenishment'].find(k=>can(k));if(fallback)opened.value.push({key:fallback})};if(tab.value===key)tab.value=opened.value[Math.max(0,i-1)]?.key||'no-access'}
 const dragging=ref(''),dragOver=ref('')
 function startTabDrag(event:DragEvent,key:string){dragging.value=key;tabMenu.value=null;if(event.dataTransfer){event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('text/plain',key)}}
@@ -234,13 +241,14 @@ async function logout(){try{await ElMessageBox.confirm('退出会清除本次会
      <div class="table-footer"><span>下单时间按北京时间显示</span><AppPagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" @change="fetchOrders"/></div>
     </section>
    </template>
-   <div v-if="hasTab('home')" v-show="tab==='home'"><DashboardPanel :key="currentStore" :store="currentStore" :visible="tab==='home'" @navigate="navigate"/></div><div v-if="hasTab('todos') && can('todos')" v-show="tab==='todos'"><TodoPanel :active="tab==='todos'"/></div><div v-if="hasTab('users') && can('users')" v-show="tab==='users'"><UserPanel/></div><div v-if="hasTab('finance')" v-show="tab==='finance'"><FinancePanel :key="currentStore" :store="currentStore"/></div><div v-if="hasTab('fba')" v-show="tab==='fba'"><FbaPanel ref="fbaPanel" @open-invoice="openInvoice" :active="tab==='fba'" :target="fbaTarget" @settlement="openSettlement" @open-sta="openSta" :key="currentStore" :initial-store="currentStore"/></div>
+   <div v-if="hasTab('home')" v-show="tab==='home'"><DashboardPanel :key="currentStore" :store="currentStore" :visible="tab==='home'" @navigate="navigate"/></div><div v-if="hasTab('todos') && can('todos')" v-show="tab==='todos'"><TodoPanel :active="tab==='todos'"/></div><div v-if="hasTab('users') && can('users')" v-show="tab==='users'"><UserPanel/></div><div v-if="hasTab('finance')" v-show="tab==='finance'"><FinancePanel :key="currentStore" :store="currentStore"/></div><div v-if="hasTab('fba')" v-show="tab==='fba'"><FbaPanel ref="fbaPanel" @open-shipping="openShipping" @open-invoice="openInvoice" :active="tab==='fba'" :target="fbaTarget" @settlement="openSettlement" @open-sta="openSta" :key="currentStore" :initial-store="currentStore"/></div>
    <div v-for="entry in opened.filter(t=>t.adsContext||t.adsFocus)" :key="entry.key" v-show="tab===entry.key"><AdvertisingPanel :active="tab===entry.key" :context="entry.adsContext" :focus="entry.adsFocus" @date-range="range=>updateAdsDates(entry.adsContext,range)" :ref="el=>el?adsPanels.set(entry.key,el):adsPanels.delete(entry.key)" @open-create="openAdsCreate" @open-entity="openAdsEntity" @home="navigate('advertising')"/></div>
+   <div v-for="entry in opened.filter(t=>t.procurementGenerate)" :key="entry.key" v-show="tab===entry.key"><ProcurementGenerate :context="entry.procurementGenerate" :ref="el=>el?procurementGenerators.set(entry.key,el):procurementGenerators.delete(entry.key)" @completed="procurementGenerated(entry.key)" @close="closeTab(entry.key)"/></div>
    <div v-for="entry in opened.filter(t=>t.adsCreate)" :key="entry.key" v-show="tab===entry.key"><AdsCreatePage :mode="entry.adsCreate.mode" :profile-id="entry.adsCreate.profileId" :campaign="entry.adsCreate.campaign" :draft-key="entry.key" :ref="el=>el?adsCreators.set(entry.key,el):adsCreators.delete(entry.key)" @created="adsCreated" @close="removeTab(entry.key)"/></div>
    <div v-for="entry in opened.filter(t=>t.key.startsWith('invoice-'))" :key="entry.key" v-show="tab===entry.key"><InvoiceEditor :store="entry.invoiceStore!" :shipment-id="entry.invoiceShipment!" :invoice-id="entry.invoiceId" :ref="el=>el?invoiceEditors.set(entry.key,el):invoiceEditors.delete(entry.key)" @saved="invoiceSaved(entry)" @close="closeTab(entry.key)"/></div>
    <div v-for="entry in opened.filter(t=>t.key.startsWith('customs-'))" :key="entry.key" v-show="tab===entry.key"><CustomsProfileEditor :profile-id="entry.customsId" :ref="el=>el?customsEditors.set(entry.key,el):customsEditors.delete(entry.key)" @saved="data=>customsSaved(entry,data)" @close="closeTab(entry.key)"/></div>
    <div v-for="entry in opened.filter(t=>t.key.startsWith('product-'))" :key="entry.key" v-show="tab===entry.key"><ProductEditor :product-id="entry.productId" :ref="el=>el?productEditors.set(entry.key,el):productEditors.delete(entry.key)" @saved="data=>productSaved(entry,data)" @close="closeTab(entry.key)"/></div>
-   <div v-if="hasTab('shipping')" v-show="tab==='shipping'"><ShippingPanel @open-sta="openSta" :initial-store="currentStore" :active="tab==='shipping'"/></div><div v-if="hasTab('replenishment')" v-show="tab==='replenishment'"><ReplenishmentPanel :initial-store="currentStore" @navigate="navigate"/></div><div v-if="hasTab('procurement')" v-show="tab==='procurement'"><ProcurementPanel :initial-store="currentStore"/></div><div v-if="hasTab('warehouse')" v-show="tab==='warehouse'"><WarehousePanel/></div><div v-if="hasTab('advertising') && canAccessAds" v-show="tab==='advertising'"><AdvertisingPanel :active="tab==='advertising'" :ref="el=>el?adsPanels.set('advertising',el):adsPanels.delete('advertising')" @open-create="openAdsCreate" @open-entity="openAdsEntity" @home="navigate('advertising')"/></div><div v-if="hasTab('products')" v-show="tab==='products'"><ProductPanel :initial-store="currentStore" ref="productPanel" @open-product="openProduct" @open-customs="openCustoms"/></div><div v-if="hasTab('listing')" v-show="tab==='listing'"><ListingPanel :key="currentStore" :initial-store="currentStore" ref="listingPanel" @open-ads="openListingAds"/></div>
+   <div v-if="hasTab('shipping')" v-show="tab==='shipping'"><ShippingPanel :target="shippingTarget" @open-sta="openSta" :initial-store="currentStore" :active="tab==='shipping'"/></div><div v-if="hasTab('replenishment')" v-show="tab==='replenishment'"><ReplenishmentPanel :initial-store="currentStore" @navigate="navigate"/></div><div v-if="hasTab('procurement')" v-show="tab==='procurement'"><ProcurementPanel ref="procurementPanel" :initial-store="currentStore" @open-generate="openProcurementGenerate"/></div><div v-if="hasTab('warehouse')" v-show="tab==='warehouse'"><WarehousePanel/></div><div v-if="hasTab('advertising') && canAccessAds" v-show="tab==='advertising'"><AdvertisingPanel :active="tab==='advertising'" :ref="el=>el?adsPanels.set('advertising',el):adsPanels.delete('advertising')" @open-create="openAdsCreate" @open-entity="openAdsEntity" @home="navigate('advertising')"/></div><div v-if="hasTab('products')" v-show="tab==='products'"><ProductPanel :initial-store="currentStore" ref="productPanel" @open-product="openProduct" @open-customs="openCustoms"/></div><div v-if="hasTab('listing')" v-show="tab==='listing'"><ListingPanel :key="currentStore" :initial-store="currentStore" ref="listingPanel" @open-ads="openListingAds"/></div>
    <div v-if="hasTab('logistics')" v-show="tab==='logistics'"><LogisticsPanel :shipment="settlementTarget" @open-shipment="openShipment"/></div><div v-if="hasTab('settings')" v-show="tab==='settings'"><SettingsPanel/></div>
    <StaPanel v-for="t in opened.filter(x=>x.key.startsWith('sta-'))" :key="t.key" v-show="tab===t.key" :shipping-id="t.shippingId" :task-id="t.taskId" :active="tab===t.key" @created="staCreated(t,$event)" @completed="closeTab(t.key)"/>
    <footer v-if="tab!=='advertising'&&!tab.startsWith('ads-')" class="page-footer"><span>Amazon ERP · 本地业务工作台</span><span>本地存储，按需同步</span></footer>

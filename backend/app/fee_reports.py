@@ -78,6 +78,8 @@ def advance(run):
  def save():
   with Session.begin() as db:db.get(Run,run.id).plans=copy.deepcopy(plans)
  for p in plans:
+  # A failure is isolated to this report; resume explicitly requeues it.
+  if p.get('status')=='failed' and p.get('attempted_at') and run.status!='failed':continue
   kind=p['kind'];at=now();market=kind.split('-')[1] if kind.startswith('planning-') else None
   market_ids=[MARKETS[market]] if market else list(MARKETS.values())
   with Session.begin() as db:
@@ -138,17 +140,22 @@ def advance(run):
    with Session.begin() as db:s=db.get(FeeReport,(run.store,kind));s.rows=parsed;s.synced_at=now();s.status='succeeded';s.error=None
    p.update(status='succeeded',error=None);save();return
   except AmazonError as e:
-   message=str(e).replace('订单报表','费用报表');p.update(status='failed',error=message);save()
+   message=str(e).replace('订单报表','费用报表');p.update(status='failed',error=message,attempted_at=at.isoformat());save()
    with Session.begin() as db:
     s=db.get(FeeReport,(run.store,kind));s.status='failed'
     if not cooldown:s.error=message
-    r=db.get(Run,run.id);r.status='failed';r.error=message+'；本轮已停止，旧快照保留';r.finished_at=now()
-    c=db.get(Config,(run.store,run.kind))
-    if c:c.error=r.error
-   return
+   # Permission failures affect the seller as a whole; otherwise let independent
+   # reports (especially customer returns) advance on the next coordinator tick.
+   forbidden=bool(re.search(r'HTTP\s+(?:401|403)\b',message,re.I))
+   pending=any(q is not p and q.get('status') not in ('succeeded','failed') for q in plans)
+   if pending and not forbidden:return
+   break
  save()
+ failures=[p for p in plans if p.get('status')=='failed']
  with Session.begin() as db:
-  r=db.get(Run,run.id);r.status='succeeded';r.finished_at=now();r.error=None
+  r=db.get(Run,run.id);r.status='failed' if failures else 'succeeded';r.finished_at=now()
+  r.error='；'.join(p['kind']+'：'+(p.get('error') or '未完成') for p in failures) if failures else None
   c=db.get(Config,(run.store,run.kind))
   if not c:c=Config(store=run.store,kind=run.kind,enabled=False);db.add(c)
-  c.last_success_at=r.finished_at;c.watermark=run.end_at;c.error=None
+  c.error=r.error
+  if not failures:c.last_success_at=r.finished_at;c.watermark=run.end_at

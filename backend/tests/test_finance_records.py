@@ -103,7 +103,7 @@ def test_refund_negative_sign_fee_zero_sales_and_item_fallback():
   tx(db,'fee','StorageFee',amount=-3)
  rows={r['transaction_id']:r for r in read()['rows']};r=rows['refund']
  assert Decimal(r['sales_amount'])==-100 and r['settlement_margin'] is None
- assert Decimal(r['purchase_cost'])==0 and r['settlement_gross_profit'] is None and r['settlement_gross_margin'] is None
+ assert Decimal(r['purchase_cost'])==0 and r['settlement_gross_profit']=='-80.00' and r['settlement_gross_margin'] is None and r['refund_estimated']
  assert rows['fee']['sales_amount']=='0.00' and rows['fee']['settlement_margin'] is None and rows['fee']['settlement_gross_margin'] is None
  fx={'currency':'EUR','rates':{'EUR':'1','GBP':'.8'}}
  assert Decimal(sales_amount({'items':[{'breakdowns':[node('ProductCharges',8,'GBP')]},{'breakdowns':[node('ProductCharges',5)]}]},'sales',fx))==15

@@ -13,7 +13,8 @@ from .integration_advertising import TOOLS as ADVERTISING_TOOLS, router as adver
 from .integration_documents import TOOLS as DOCUMENT_TOOLS
 from .integration_planning import TOOLS as PLANNING_TOOLS, DESTRUCTIVE as PLANNING_DESTRUCTIVE
 from .integration_pricing import TOOLS as PRICING_TOOLS, DESTRUCTIVE as PRICING_DESTRUCTIVE
-DESTRUCTIVE=DESTRUCTIVE|PLANNING_DESTRUCTIVE|PRICING_DESTRUCTIVE
+from .integration_logistics import TOOLS as LOGISTICS_TOOLS, DESTRUCTIVE as LOGISTICS_DESTRUCTIVE
+DESTRUCTIVE=DESTRUCTIVE|PLANNING_DESTRUCTIVE|PRICING_DESTRUCTIVE|LOGISTICS_DESTRUCTIVE
 router=APIRouter()
 router.include_router(advertising_query_router)
 
@@ -39,6 +40,7 @@ TOOLS.extend(PLANNING_TOOLS)
 TOOLS.extend(DOCUMENT_TOOLS)
 TOOLS.extend(ADVERTISING_TOOLS)
 TOOLS.extend(PRICING_TOOLS)
+TOOLS.extend(LOGISTICS_TOOLS)
 def tool_allowed(p,key,action):
  return any(can(p,k,action) for k in (key if isinstance(key,tuple) else (key,)))
 

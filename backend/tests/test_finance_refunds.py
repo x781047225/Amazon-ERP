@@ -54,10 +54,11 @@ def test_lost_product_deducts_cost_and_freight(options,label):
 
 
 @pytest.mark.parametrize('options',[{'snapshot':False},{'stale':True},{'disposition':'UNKNOWN'}])
-def test_missing_or_stale_evidence_is_not_sellable_or_lost(options):
+def test_missing_or_stale_evidence_defaults_to_sellable_estimate(options):
     with Session.begin() as db:seed(db,**options)
     r=read('&status=RELEASED')['rows'][0]
-    assert r['settlement_gross_profit'] is None and r['return_status']=='待核实'
+    assert r['settlement_gross_profit']=='-1.71' and r['return_status']=='暂按已退回可售'
+    assert r['refund_estimated'] and r['purchase_cost']=='0' and r['freight_cost']=='0'
     assert r['original_sale_net']=='4.61'
 
 
@@ -84,7 +85,9 @@ def test_excess_refund_quantity_does_not_reuse_sale_money():
     with Session.begin() as db:
         seed(db)
         tx(db,'r2','Refund',data=data(net=-6,REFUND_ID='r2'),amount=-6,order_id='order')
-    assert all(r['settlement_gross_profit'] is None for r in read('&transaction_type=Refund&status=RELEASED')['rows'])
+    rows=read('&transaction_type=Refund&status=RELEASED')['rows']
+    assert {r['settlement_gross_profit'] for r in rows}=={'-6.32','-6.00'}
+    assert all(r['refund_estimated'] and r['original_sale_net'] is None for r in rows)
 
 
 def test_other_store_and_market_never_supply_original_sale():
@@ -94,7 +97,8 @@ def test_other_store_and_market_never_supply_original_sale():
         tx(db,'s2',data=data(),amount=4.61,order_id='order',marketplace='UK')
         tx(db,'r','Refund',data=data(net=-6.32),amount=-6.32,order_id='order')
         report(db)
-    assert read('&transaction_type=Refund')['rows'][0]['settlement_gross_profit'] is None
+    r=read('&transaction_type=Refund')['rows'][0]
+    assert r['settlement_gross_profit']=='-6.32' and r['original_sale_net'] is None and r['refund_estimated']
 
 
 def test_returns_parser_is_strict_and_drops_customer_comments():
@@ -127,3 +131,34 @@ def test_partial_refunds_allocate_rounding_remainder_once():
     rows=read('&transaction_type=Refund')['rows']
     assert sum(Decimal(r['original_sale_net']) for r in rows)==Decimal('4.61')
     assert sum(Decimal(r['settlement_gross_profit']) for r in rows)==Decimal('-1.39')
+
+
+def test_sellable_estimate_replaced_by_updated_return_evidence():
+    with Session.begin() as db:seed(db,snapshot=False)
+    r=read('&transaction_type=Refund&status=RELEASED')['rows'][0]
+    assert r['settlement_gross_profit']=='-1.71' and r['refund_estimated']
+    with Session.begin() as db:report(db,disposition='DEFECTIVE')
+    r=read('&transaction_type=Refund&status=RELEASED')['rows'][0]
+    assert r['settlement_gross_profit']=='-7.71' and not r['refund_estimated']
+    assert r['return_status']=='已退回不可售'
+    with Session.begin() as db:
+        snapshot=db.get(FeeReport,('DemoStoreA','returns'))
+        updated=[dict(snapshot.rows[0])]
+        updated[0]['items']=[{**item,'detailed-disposition':'SELLABLE'} for item in updated[0]['items']]
+        snapshot.rows=updated
+    r=read('&transaction_type=Refund&status=RELEASED')['rows'][0]
+    assert r['settlement_gross_profit']=='-1.71' and not r['refund_estimated']
+    assert r['return_status']=='已退回可售'
+
+
+def test_missing_sale_estimate_replaced_when_sale_is_synced():
+    with Session.begin() as db:
+        seed_costs(db)
+        tx(db,'r','Refund',data=data(net=-6.32),amount=-6.32,order_id='order')
+        report(db)
+    r=read('&transaction_type=Refund')['rows'][0]
+    assert r['settlement_gross_profit']=='-6.32' and r['refund_estimated']
+    with Session.begin() as db:
+        tx(db,'sale',data=data(),amount=4.61,order_id='order',posted_at=AT-timedelta(days=7))
+    r=read('&transaction_type=Refund')['rows'][0]
+    assert r['settlement_gross_profit']=='-1.71' and not r['refund_estimated']

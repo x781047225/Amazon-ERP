@@ -235,10 +235,11 @@ def dispatch_purchase_orders(db,orders,lock_inventory=True):
  for entries in db.scalars(select(Task.allocations).where(Task.status!='deleted')):
   for a in entries:
    if a.get('plan_id'):used[a['plan_id']]=used.get(a['plan_id'],0)+a['quantity']
- groups={};touched=set()
+ groups={};touched=set();order_used=planned_by_order(db)
  for o in orders:
+  available=max(0,o.quantity-order_used.get(o.id,0))
   for p in db.scalars(select(PurchasePlan).where(PurchasePlan.order_id==o.id).order_by(PurchasePlan.id)):
-   require_store(p.store);qty=max(0,p.quantity-used.get(p.id,0))
+   require_store(p.store);qty=min(available,max(0,p.quantity-used.get(p.id,0)));available-=qty
    if not qty:continue
    group=groups.setdefault((p.store,p.country,p.channel,p.warehouse_id),{'items':[],'allocations':[]})
    group['items'].append(item_snapshot(db,p.product_id,qty,p.store,p.country,auto=True))

@@ -16,7 +16,7 @@ from .shipping import shipping_lock
 router=APIRouter(prefix='/api/procurement')
 TITLES={'purchase_plan_batch_create':'创建采购计划','purchase_plan_batch_edit':'编辑采购计划',
  'purchase_plan_batch_delete':'删除采购计划','purchase_plan_batch_generate':'生成采购单',
- 'purchase_plan_dispatch':'生成发货计划','purchase_order_deleted':'删除采购单 / 恢复待处理','purchase_plan_batch_merge':'合并采购计划','purchase_plan_batch_export':'导出采购计划'}
+ 'purchase_plan_batch_processed':'标记已处理','purchase_plan_dispatch':'生成发货计划','purchase_order_deleted':'删除采购单 / 恢复待处理','purchase_plan_batch_merge':'合并采购计划','purchase_plan_batch_export':'导出采购计划'}
 
 def batch_rows(db,code,lock=False,allow_deleted=False):
  q=select(Plan).where(Plan.batch_code==code).order_by(Plan.id)
@@ -32,7 +32,7 @@ def snapshot(rows):
 def unchanged(rows,versions):
  expected={v.id:v.revision for v in versions}
  if len(expected)!=len(versions) or expected!={r.id:r.revision for r in rows}:raise HTTPException(409,'采购计划已变更，请重新打开整批计划后重试')
- if any(r.order_id for r in rows):raise HTTPException(409,'该批次已生成采购单，不能修改或删除')
+ if any(r.order_id or r.processed_at for r in rows):raise HTTPException(409,'该批次已处理，不能修改或删除')
 
 class BatchItem(PlanBody):
  id:int|None=Field(default=None,gt=0)
@@ -108,11 +108,21 @@ def export(view:str='plans',q:str='',store:str='',country:str='',channel:str='',
  if data['total']>10000:raise HTTPException(422,'导出超过10000张单据，请缩小筛选范围')
  wb=Workbook();ws=wb.active;ws.title='采购计划' if view=='plans' else '采购单'
  if view=='plans':
-  ws.append(['计划批次','创建人','采购员','标品编码','品名','店铺','收货仓库','国家','渠道','计划采购量','状态','采购单号','创建时间','备注'])
-  for batch in data['rows']:
-   for r in batch['children']:ws.append([r['batch_code'],r['created_by'],r['buyer'],r['code'],r['name'],r['store'],r['warehouse_name'],COUNTRIES[r['country']],CHANNELS[r['channel']],r['quantity'],'已处理' if r['order_id'] else '未处理',r['order_number'] or '',str(r['created_at']),r['note']])
+  from .procurement_links import listing_refs
+  entries=[r for batch in data['rows'] for r in batch['children']]
+  with Session() as db:refs=listing_refs(db,[(r['product_id'],r['store']) for r in entries])
+  groups={}
+  for r in entries:groups.setdefault(r['name'],[]).append(r)
+  ws.append(['品名','标品编码','计划采购量','店铺','SKU','FNSKU','收货仓库','计划批次','创建人','采购员','状态','采购单号','创建时间','备注'])
+  def joined(items,key):return ' / '.join(dict.fromkeys(str(r.get(key) or '') for r in items if r.get(key)))
+  for name,items in groups.items():
+   links=[]
+   for pair in dict.fromkeys((r['product_id'],r['store']) for r in items):links+=refs.get(pair,[])
+   def link_text(key):return '\n'.join(dict.fromkeys(f"{l['store']}: {l[key]}" for l in links if l[key]))
+   states={'已处理' if r['status']=='processed' else '未处理' for r in items}
+   ws.append([name,joined(items,'code'),sum(r['quantity'] for r in items),joined(items,'store'),link_text('sku'),link_text('fnsku'),joined(items,'warehouse_name'),joined(items,'batch_code'),joined(items,'created_by'),joined(items,'buyer'),' / '.join(sorted(states)),joined(items,'order_number'),joined(items,'created_at'),joined(items,'note')])
  else:
-  ws.append(['采购单号','计划批次','标品编码','品名','供应商','收货仓库','预计到货','计划采购量','单价','到货量','货值','其他费用','已计划数量','未计划数量','状态'])
+  ws.append(['采购单号','计划批次','标品编码','品名','供应商','收货仓库','预计到货','计划采购量','单价','到货量','价格','其他费用','已计划数量','未计划数量','状态'])
   for r in data['rows']:ws.append([r['number'],' / '.join(r['plan_batch_codes']),r['code'],r['name'],r['supplier'],r['warehouse_name'],str(r['expected_date']),r['quantity'],r['unit_cost'],r['received'],r['goods_value'],r['extra_cost'],r['planned_quantity'],r['unplanned_quantity'],r['status']])
  for row in ws:
   for cell in row:
@@ -190,3 +200,29 @@ def create_plan_batches(b:BulkNewPlans):
   response={'plans':plans,'created':len(plans),'replayed':False}
   audit(db,'purchase_plans_bulk_create',str(b.request_id),{'request':request,'response':response})
   return response
+
+class MarkProcessed(Selection):
+ request_id:UUID
+@router.post('/plan-batches/mark-processed')
+def mark_processed(b:MarkProcessed):
+ require_admin();payload=b.model_dump(mode='json')
+ with Session.begin() as db:
+  shipping_lock(db)
+  prior=db.scalar(select(AccessAudit).where(AccessAudit.action=='purchase_plans_processed',AccessAudit.target==str(b.request_id)))
+  if prior:
+   if prior.actor!=actor() or prior.detail['request']!=payload:raise HTTPException(409,'请求编号已使用')
+   return prior.detail['response']|{'replayed':True}
+  ids={v.id:v.revision for v in b.plans}
+  chosen=list(db.scalars(select(Plan).where(Plan.id.in_(ids)).with_for_update()))
+  if len(ids)!=len(b.plans) or len(chosen)!=len(ids) or any(p.revision!=ids[p.id] for p in chosen):raise HTTPException(409,'采购计划已变更，请刷新后重试')
+  count=0
+  for code in sorted({p.batch_code for p in chosen}):
+   rows=batch_rows(db,code,True);changed=[]
+   for p in rows:
+    if p.processed_at is None:
+     p.processed_at=now();p.processed_by=actor();p.revision+=1;changed.append(p.id)
+   if changed:
+    count+=1;audit(db,'purchase_plan_batch_processed',code,{'plan_ids':changed,'quantity':sum(p.quantity for p in rows)})
+  result={'updated':count,'replayed':False}
+  audit(db,'purchase_plans_processed',str(b.request_id),{'request':payload,'response':result})
+  return result

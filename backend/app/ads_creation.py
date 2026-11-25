@@ -80,12 +80,19 @@ def product_rows(db,p):
     return list(rows.values())
 
 @router.get('/create/products')
-def products(profile_id:str,q:str='',page:int=Query(1,ge=1),page_size:int=Query(10,ge=1,le=100),compact:bool=False):
+def products(profile_id:str,q:str='',page:int=Query(1,ge=1),page_size:int=Query(10,ge=1,le=100),compact:bool=False,adgroup_id:str=''):
     with Session() as db:
         profile=profile_checked(db,profile_id)
         if compact:
             from .ads_product_picker import products_page
-            return products_page(db,profile,q,page,page_size)
+            result=products_page(db,profile,q,page,page_size)
+            if adgroup_id:
+                group=db.get(AdsEntity,(profile_id,'adgroup',adgroup_id))
+                if not group or group.state=='ARCHIVED':raise HTTPException(404,'广告组不存在或已归档')
+                existing={e.data.get('sku') for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,AdsEntity.kind=='ad',AdsEntity.adgroup_id==adgroup_id,AdsEntity.state!='ARCHIVED'))}
+                result['existing_skus']=sorted(s for s in existing if s)
+                for row in result['rows']:row['existing_in_group']=row['sku'] in existing
+            return result
         rows=product_rows(db,profile)
     needle=q.strip().casefold()
     rows=[r for r in rows if not needle or any(needle in str(r.get(k) or '').casefold() for k in ['sku','asin','fnsku','title','product_name'])]

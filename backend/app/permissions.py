@@ -15,7 +15,7 @@ MENU={
  'advertising':('广告活动',{'ad':'广告','target':'投放','negative':'否定投放','search':'搜索词','logs':'操作记录'}),
  'users':('用户管理',{'users':'用户管理','roles':'角色管理','mcp':'MCP'}),
  'logistics':('物流中心',{'channels':'物流渠道','settlements':'结算中心','invoice':'发票中心','declaration':'报关单'}),
- 'settings':('设置',{'warehouses':'仓库管理','stores':'店铺授权管理','addresses':'FBA发货地址','profiles':'合规信息','clearance':'清关编码','declaration':'报关编码','sync-data':'同步数据','ads-queue':'广告消息队列','mail':'绩效邮件'})}
+ 'settings':('设置',{'warehouses':'仓库管理','stores':'店铺授权管理','addresses':'地址管理','profiles':'合规信息','clearance':'清关编码','declaration':'报关编码','sync-data':'同步数据','ads-queue':'广告消息队列','mail':'绩效邮件'})}
 CATALOG=[{'key':key,'menu':label,'tab':'菜单','parent':None} for key,(label,tabs) in MENU.items()]
 for key,(label,tabs) in MENU.items():CATALOG.extend({'key':key+'.'+t,'menu':label,'tab':name,'parent':key} for t,name in tabs.items())
 # Keep persisted grants/API guards stable while moving code catalogues in the UI.
@@ -70,7 +70,7 @@ def route_keys(path,query,body,method):
  if path.startswith('/api/product-data/'):
   return ['products.'+path.split('/')[-1]]
  if path=='/api/products/links/apply':return ['listing','products.products']
- if read and path.startswith('/api/products/images/'):return ['products.products','products.declaration','products.clearance','listing','shipping','warehouse','procurement.plans','procurement.orders','replenishment','fba.invoice']
+ if read and path.startswith('/api/products/images/'):return ['fba.list','products.products','products.declaration','products.clearance','listing','shipping','warehouse','procurement.plans','procurement.orders','replenishment','fba.invoice']
  if path.startswith('/api/products'):
   if read:return ['products.products','products.declaration','products.clearance','listing','shipping','warehouse','procurement.plans','procurement.orders','replenishment']
   return ['products.products']
@@ -112,7 +112,7 @@ def route_keys(path,query,body,method):
   if path.endswith('/options'):return ['procurement.plans','procurement.orders']
   if '/flow/dispatch' in path:return ['procurement.plans','procurement.orders']
   if '/flow/' in path or '/orders' in path:return ['procurement.orders']
-  if path.endswith('/export'):return ['procurement.'+('orders' if query.get('kind')=='orders' else 'plans')]
+  if path.endswith('/export'):return ['procurement.'+('orders' if query.get('view',query.get('kind'))=='orders' else 'plans')]
   return ['procurement.plans']
  if path.startswith('/api/replenishment'):return ['replenishment']
  if path.startswith('/api/listing'):return ['listing']
@@ -125,6 +125,7 @@ def route_keys(path,query,body,method):
   from .integration_advertising import route_keys as advertising_query_keys
   return advertising_query_keys(path,query)
  if path.startswith('/api/advertising'):
+  if path.endswith('/term-translations'):return ['advertising','advertising.target','advertising.search','advertising.negative']
   if '/edit/bulk-' in path:return ['advertising','advertising.ad','advertising.target','advertising.negative']
   if path.endswith('/entity-logs'):return ['advertising.logs']
   if path.endswith('/create/ad-submit'):return ['advertising.ad']
@@ -157,7 +158,7 @@ def enforce(request,p,body):
  keys=route_keys(path,request.query_params,body,request.method)
  action='view' if request.method in ('GET','HEAD','OPTIONS') else 'operate'
  # Read-only calculations still use POST, but do not modify business records.
- if path.endswith('/income-estimate') or path.endswith('/estimate') or path in ('/api/advertising/column-widths','/api/advertising/column-preferences','/api/advertising/campaign-refresh','/api/advertising/target-suggestions/ensure'):action='view'
+ if path.endswith('/income-estimate') or path.endswith('/estimate') or path in ('/api/advertising/column-widths','/api/advertising/column-preferences','/api/advertising/campaign-refresh','/api/advertising/target-suggestions/ensure','/api/advertising/term-translations'):action='view'
  if path.endswith('/search-actions/suggestions'):action='view'
  if path.startswith('/api/todos/') and path.endswith('/seen'):action='view'
  if keys==[]:return False
@@ -173,7 +174,8 @@ def token_route(method,path):
  from .integration_documents import TOKEN_ROUTES as DOCUMENT_ROUTES
  from .integration_advertising import TOKEN_ROUTES as ADVERTISING_ROUTES
  from .integration_pricing import TOKEN_ROUTES as PRICING_ROUTES
- TOKEN_ROUTES=TOKEN_ROUTES|PLANNING_ROUTES|DOCUMENT_ROUTES|ADVERTISING_ROUTES|PRICING_ROUTES
+ from .integration_logistics import TOKEN_ROUTES as LOGISTICS_ROUTES
+ TOKEN_ROUTES=TOKEN_ROUTES|PLANNING_ROUTES|DOCUMENT_ROUTES|ADVERTISING_ROUTES|PRICING_ROUTES|LOGISTICS_ROUTES
  if any(method==verb and re.fullmatch(pattern,path) for verb,pattern in TOKEN_ROUTES):return True
  if method=='GET':return bool(re.fullmatch(r'/api/(integration/capabilities|listings(?:/\d+)?|fba/shipments(?:/\d+)?|orders(?:/\d+)?|warehouse/stock)',path))
  return method=='POST' and bool(re.fullmatch(r'/api/listings/\d+/(preview|submit|submissions/[0-9a-f-]+/verify)',path))

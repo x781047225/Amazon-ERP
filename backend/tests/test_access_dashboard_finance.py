@@ -28,7 +28,7 @@ def order(store,ident,amount='10',currency='EUR'):
 
 def test_anonymous_and_hash():
  auth.bootstrap();c=TestClient(app)
- for path in ['/api/orders','/api/options','/api/listings','/api/fba/shipments','/api/finance/jobs','/api/dashboard?store=DemoStoreA','/api/users','/api/docs']:assert c.get(path).status_code==401
+ for path in ['/api/orders','/api/options','/api/listings','/api/fba/shipments','/api/finance/jobs','/api/dashboard?store=DemoStoreA','/api/dashboard/financials?store=DemoStoreA','/api/dashboard/shell?store=DemoStoreA','/api/users','/api/docs']:assert c.get(path).status_code==401
  assert c.post('/api/auth/login',json={'username':'admin','password':'wrong'},headers=HEAD).status_code==401
  a=client();assert 'password_hash' not in a.get('/api/users').text
  with Session() as db:
@@ -40,6 +40,7 @@ def test_store_scope_all_routes():
  d=c.get('/api/orders').json();assert d['total']==1 and d['orders'][0]['id']==own
  assert c.get(f'/api/orders/{otherorder}').status_code==404
  assert c.get('/api/orders?store=DemoStoreB').status_code==403
+ for path in ['/api/dashboard/financials?store=DemoStoreB','/api/dashboard/shell?store=DemoStoreB']:assert c.get(path).status_code==403
  d=c.get('/api/listings').json();assert d['total']==d['sample_count']==1 and d['stores']==['DemoStoreA']
  assert c.get(f'/api/listings/{other}').status_code==404
  with patch('app.listing_amazon.get_json') as remote:

@@ -38,7 +38,7 @@ def test_receipt_rejections_leave_entire_batch_unchanged(monkeypatch):
  request=receipt(rows,[2,11]);assert post('/orders/batch-receive',request).status_code==422
  request=receipt(rows,[2,3]);request['orders'][1]['revision']=99
  assert post('/orders/batch-receive',request).status_code==409
- for quantities in [[0,0],[-1,2],[1.5,2]]:assert post('/orders/batch-receive',receipt(rows,quantities)).status_code==422
+ for quantities in [[-1,2],[1.5,2]]:assert post('/orders/batch-receive',receipt(rows,quantities)).status_code==422
  assert post('/orders/batch-receive',receipt([rows[0],rows[0]],[1,1])).status_code==422
  assert all(o['received']==0 for o in orders()) and stock()['total']==0
  monkeypatch.setattr(auth,'resolve_session',lambda r:{'id':1,'username':'member','is_admin':False,'stores':['DemoStoreA']})

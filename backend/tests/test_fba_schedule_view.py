@@ -28,12 +28,27 @@ def test_exact_sku_and_totals_all_pages_and_more():
 def test_local_names_do_not_multiply_totals():
     seed('FBA15FIRST',[('SKU-A','FNA',100,60)])
     with Session.begin() as db:
-        p=LocalProduct(code='GM-A',name='圣诞礼品袋');db.add(p);db.flush()
+        p=LocalProduct(code='GM-A',name='圣诞礼品袋',image_path='/api/products/images/'+'a'*32+'.webp');db.add(p);db.flush()
         for market in ('FR','DE'):
             l=Listing(store='DemoStoreB',marketplace=market,sku='SKU-A',product_type='BAG',attributes={},listing_data={},fingerprint='x');db.add(l);db.flush();db.add(ProductLink(listing_pk=l.id,product_id=p.id,actor='test'))
     d=client.get('/api/fba/shipments?q=SKU-A').json()
     assert d['summary']['shipped']==100
     assert d['shipments'][0]['preview_items'][0]['product_name']=='圣诞礼品袋'
+    row=d['shipments'][0]
+    expected='/api/products/images/'+'a'*32+'.webp'
+    assert row['preview_items'][0]['image_url']==expected
+    assert client.get('/api/fba/shipments/'+str(row['id'])).json()['items'][0]['image_url']==expected
+
+
+def test_listing_image_fallback_stays_with_shipment_store():
+    pk=seed('FBA15IMAGE',[('SKU-A','FNA',10,2),('NO-IMAGE','FN0',5,0)])
+    with Session.begin() as db:
+        for store,url in [('DemoStoreA','wrong-store'),('DemoStoreB','own-store')]:
+            db.add(Listing(store=store,marketplace='FR',sku='SKU-A',image_url=url,product_type='BAG',attributes={},listing_data={},fingerprint='x'))
+    rows=client.get('/api/fba/shipments/'+str(pk)).json()['items']
+    assert {r['sku']:r['image_url'] for r in rows}=={'SKU-A':'own-store','NO-IMAGE':None}
+    assert sum(r['shipped'] for r in rows)==15
+
 
 def test_missing_tracking_and_local_review_filter():
     pk=seed('FBA15FIRST',[('SKU-A','FNA',100,60)])

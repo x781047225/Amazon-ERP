@@ -68,6 +68,7 @@ def convert(amounts,fx):
  total=Decimal(0);missing=[];rates=fx['rates'];target=fx['currency']
  for item in amounts:
   c=item['currency'];value=Decimal(item['amount'])
+  if value == 0:continue  # Zero needs no exchange rate, including empty overseas ad reports.
   if c==target:total+=value
   elif c not in rates or target not in rates:missing.append(c or "币种未返回")
   else:total+=value/Decimal(rates[c])*Decimal(rates[target])

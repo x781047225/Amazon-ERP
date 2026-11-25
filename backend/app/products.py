@@ -116,7 +116,7 @@ def products(q:str='',supplier:str='',archived:bool=False,unlinked:bool=False,re
    eu=func.coalesce(Product.freight_eu_cny,func.round(Product.gross_weight_g/1000*20,4),0)
    conditions.append(or_(uk<=0,eu<=0))
   if no_supplier:conditions.append(and_(func.trim(Product.primary_supplier)=='',Product.suppliers==[]))
-  if supplier:conditions.append(Product.suppliers.contains([supplier]))
+  if supplier:conditions.append(or_(Product.primary_supplier==supplier,Product.suppliers.contains([supplier])))
   links=select(ProductLink.product_id,func.count().label('n')).group_by(ProductLink.product_id).subquery()
   if unlinked:conditions.append(~exists(select(ProductLink.listing_pk).where(ProductLink.product_id==Product.id)))
   total=db.scalar(select(func.count()).select_from(Product).where(*conditions))

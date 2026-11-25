@@ -20,14 +20,20 @@ def item_match(q,exact=False):
     return or_(ShipmentItem.sku.ilike(pattern,escape='\\'),ShipmentItem.fnsku.ilike(pattern,escape='\\'))
 
 def enrich_items(db,items,store_by_pk):
-    # Resolve names separately so multiple marketplace Listings cannot multiply quantities.
-    names={}
+    # Resolve product metadata separately; cross-market Listings must not multiply quantities.
+    names={};product_images={};listing_images={}
     if items:
-        query=select(Listing.store,Listing.sku,LocalProduct.id,LocalProduct.name).join(ProductLink,ProductLink.listing_pk==Listing.id).join(LocalProduct,LocalProduct.id==ProductLink.product_id).where(Listing.store.in_(set(store_by_pk.values())),Listing.sku.in_({x['sku'] for x in items})).distinct()
-        for store,sku,pid,name in db.execute(query):names.setdefault((store,sku),{})[pid]=name
+        query=select(Listing.store,Listing.sku,Listing.image_url,LocalProduct.id,LocalProduct.name,LocalProduct.image_path).outerjoin(ProductLink,ProductLink.listing_pk==Listing.id).outerjoin(LocalProduct,LocalProduct.id==ProductLink.product_id).where(Listing.store.in_(set(store_by_pk.values())),Listing.sku.in_({x['sku'] for x in items})).order_by(Listing.synced_at.desc(),Listing.id)
+        for store,sku,url,pid,name,path in db.execute(query):
+            key=(store,sku)
+            if pid is not None:
+                names.setdefault(key,{})[pid]=name
+                if path:product_images.setdefault(key,{})[pid]=path
+            if url:listing_images.setdefault(key,url)
     for item in items:
-        found=names.get((store_by_pk[item['shipment_pk']],item['sku']),{})
+        key=(store_by_pk[item['shipment_pk']],item['sku']);found=names.get(key,{})
         item['product_name']=next(iter(found.values())) if len(found)==1 else ('关联不一致，待核对' if found else '')
+        item['image_url']=(next(iter(product_images.get(key,{}).values()),None) or listing_images.get(key)) if len(found)<=1 else None
         item['difference']=item['shipped']-item['received']
     return items
 
@@ -72,12 +78,14 @@ def shipments(store:str='',marketplace:str='',status:str='',q:str='',dispatch_st
         for item in enrich_items(db,preview_rows,{r.id:r.store for r in rows}):previews.setdefault(item['shipment_pk'],[]).append(item)
         subtotals={x[0]:dict(zip(['item_count']+keys,x[1:])) for x in db.execute(select(ShipmentItem.shipment_pk,func.count(),*[func.sum(getattr(ShipmentItem,k)) for k in keys]).where(ShipmentItem.shipment_pk.in_(ids),*item_filters).group_by(ShipmentItem.shipment_pk))}
         caches={c.store:c.data for c in db.scalars(select(ArrivalCache).where(ArrivalCache.store.in_({r.store for r in rows})))}
+        from .shipping_links import shipment_plans
+        linked_plans=shipment_plans(db,rows)
         data=[]
         for r in rows:
             arrival=caches.get(r.store,{}).get(r.shipment_id,{})
             local_window=(r.logistics_flags or {}).get('sta_delivery_window') or {}
             window=arrival if arrival.get('start') and arrival.get('end') else local_window
-            d=dict(serialize(r,FIELDS),markets=markets.get(r.id,[]),preview_items=previews.get(r.id,[]),item_query=q if item_search else '',item_exact=exact,arrival_start=window.get('start'),arrival_end=window.get('end'),arrival_source='amazon' if window is arrival else 'sta' if window else None,arrival_error=arrival.get('error'),arrival_synced_at=arrival.get('synced_at'),**logistics_view(r,arrival))
+            d=dict(serialize(r,FIELDS),shipping_plans=linked_plans.get((r.store,r.shipment_id),[]),markets=markets.get(r.id,[]),preview_items=previews.get(r.id,[]),item_query=q if item_search else '',item_exact=exact,arrival_start=window.get('start'),arrival_end=window.get('end'),arrival_source='amazon' if window is arrival else 'sta' if window else None,arrival_error=arrival.get('error'),arrival_synced_at=arrival.get('synced_at'),**logistics_view(r,arrival))
             if item_search:d.update(subtotals.get(r.id,{}))
             data.append(d)
         return {'total':total,'shipments':data,'summary':dict(zip(keys,totals),difference=totals[0]-totals[1],unknown=unknown),'item_search':item_search}

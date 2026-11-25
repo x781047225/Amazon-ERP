@@ -83,7 +83,7 @@ def update_plan(pk:int,b:PlanBody):
   shipping_lock(db)
   p=db.scalar(select(Plan).where(Plan.id==pk,*plan_scope()).with_for_update())
   if not p:raise HTTPException(404,'计划不存在')
-  if db.scalar(select(Plan.id).where(Plan.batch_code==p.batch_code,Plan.order_id.is_not(None)).limit(1)):raise HTTPException(409,'该批次已生成采购单，不能修改')
+  if db.scalar(select(Plan.id).where(Plan.batch_code==p.batch_code,or_(Plan.order_id.is_not(None),Plan.processed_at.is_not(None))).limit(1)):raise HTTPException(409,'该批次已处理，不能修改')
   if p.revision!=b.revision:raise HTTPException(409,'计划已变更，请刷新后重试')
   from .procurement_flow import ensure_plans_unshipped
   ensure_plans_unshipped(db,[p.id])
@@ -106,7 +106,7 @@ def list_plans(grouped:bool=False,q:str='',store:str='',country:str='',channel:s
  if q.strip():cond.append(or_(Product.code.ilike(pattern(q),escape='\\'),Product.name.ilike(pattern(q),escape='\\'),Plan.batch_code.ilike(pattern(q),escape='\\')))
  for key,value in [('store',store),('country',country),('channel',channel),('warehouse_id',warehouse_id)]:
   if value:cond.append(getattr(Plan,key)==value)
- if status:cond.append(Plan.order_id.is_(None) if status=='pending' else Plan.order_id.is_not(None))
+ if status:cond.append(and_(Plan.order_id.is_(None),Plan.processed_at.is_(None)) if status=='pending' else or_(Plan.order_id.is_not(None),Plan.processed_at.is_not(None)))
  with Session() as db:
   query=select(Plan,Product,Warehouse.name.label('warehouse_name'),Order).join(Product,Product.id==Plan.product_id).join(Warehouse,Warehouse.id==Plan.warehouse_id).outerjoin(Order,Order.id==Plan.order_id).where(*cond)
   count=db.scalar(select(func.count()).select_from(query.subquery()))
@@ -121,7 +121,7 @@ def list_plans(grouped:bool=False,q:str='',store:str='',country:str='',channel:s
   images=product_images(db,[p for _,p,_,_ in records])
   from .procurement_flow import plan_usage
   usage=plan_usage(db)
-  result={'total':count,'rows':[{k:getattr(plan,k) for k in ['id','batch_code','product_id','store','country','channel','warehouse_id','quantity','revision','order_id','source','created_at','created_by','buyer','note']}|{'code':p.code,'name':p.name,'image_url':images.get(p.id),'warehouse_name':w,'shipping_quantity':usage.get(plan.id,0),'status':'processed' if plan.order_id else 'pending','order_number':order_number(o) if o else None} for plan,p,w,o in records]}
+  result={'total':count,'rows':[{k:getattr(plan,k) for k in ['id','batch_code','product_id','store','country','channel','warehouse_id','quantity','revision','order_id','source','created_at','created_by','buyer','note']}|{'code':p.code,'name':p.name,'image_url':images.get(p.id),'warehouse_name':w,'shipping_quantity':usage.get(plan.id,0),'status':'processed' if plan.order_id or plan.processed_at else 'pending','processed_at':plan.processed_at,'processed_by':plan.processed_by,'order_number':order_number(o) if o else None} for plan,p,w,o in records]}
   if grouped:
    groups={}
    for row in result['rows']:
@@ -138,7 +138,7 @@ def list_plans(grouped:bool=False,q:str='',store:str='',country:str='',channel:s
     batch['created_by']=' / '.join(dict.fromkeys(r['created_by'] for r in batch['children'] if r['created_by']))
     batch['note']=' / '.join(dict.fromkeys(r['note'] for r in batch['children'] if r['note']))
     batch['buyer']=' / '.join(dict.fromkeys(r['buyer'] for r in batch['children'] if r['buyer']))
-    batch['editable']=all(not r['order_id'] and not r['shipping_quantity'] for r in batch['children'])
+    batch['editable']=all(r['status']=='pending' and not r['shipping_quantity'] for r in batch['children'])
    result['rows']=[groups[key] for key in ids]
   return result
 class PlanVersion(Body):
@@ -152,7 +152,7 @@ def selected_plans(db,b,lock=False):
  rows=list(db.scalars(q.with_for_update() if lock else q))
  if len(rows)!=len(ids):raise HTTPException(404,'部分计划不存在或无权限')
  versions={p.id:p.revision for p in b.plans}
- if any(p.order_id or p.revision!=versions[p.id] for p in rows):raise HTTPException(409,'计划已变更或已生成采购单，请刷新后重新选择')
+ if any(p.order_id or p.processed_at or p.revision!=versions[p.id] for p in rows):raise HTTPException(409,'计划已变更或已处理，请刷新后重新选择')
  return rows
 def group_plans(db,plans):
  from .product_data_models import Supplier
@@ -168,7 +168,21 @@ def group_plans(db,plans):
   if key not in groups:groups[key]={'key':key,'product_id':p.id,'warehouse_id':plan.warehouse_id,'code':p.code,'name':p.name,'image_url':images.get(p.id),'warehouse_name':warehouses[plan.warehouse_id],'unit_cost':p.cost_cny,'supplier':p.primary_supplier,'expected_date':supplier_dates.get(p.primary_supplier,''),'quantity':0,'allocations':[]}
   groups[key]['quantity']+=plan.quantity;groups[key]['allocations']+=allocations([plan])
  if any(g['quantity']>100000000 for g in groups.values()):raise HTTPException(422,'单个标品采购量过大，请分批生成')
+ from .procurement_links import listing_refs
+ refs=listing_refs(db,[(p.product_id,p.store) for p in plans])
+ for g in groups.values():g['listings']=[l for store in dict.fromkeys(a['store'] for a in g['allocations']) for l in refs.get((g['product_id'],store),[])]
  return list(groups.values())
+class ProductReferenceRequest(Body):
+ product_id:int=Field(gt=0)
+ store:str=Field(min_length=1,max_length=80)
+@router.post('/product-references')
+def product_references(b:ProductReferenceRequest):
+ require_admin();product_id=b.product_id;store=b.store;require_store(store)
+ from .procurement_links import listing_refs
+ with Session() as db:
+  product=db.get(Product,product_id)
+  if not product or product.archived:raise HTTPException(404,'商品不存在或已归档')
+  return {'rows':listing_refs(db,[(product_id,store)]).get((product_id,store),[])}
 @router.post('/preview')
 def preview(b:Selection):
  require_admin()
@@ -177,13 +191,18 @@ def preview(b:Selection):
   today=now().astimezone(ZoneInfo('Asia/Shanghai')).date()
   return {'groups':group_plans(db,selected_plans(db,b)),'supplier_dates':{s.name:(today+timedelta(days=s.shipping_days)).isoformat() if s.shipping_days else '' for s in db.scalars(select(Supplier))}}
 class OrderGroup(Body):
+ quantity:int|None=Field(default=None,gt=0,le=100000000,strict=True)
  product_id:int=Field(gt=0)
  warehouse_id:int=Field(gt=0)
  unit_cost:Decimal=Field(ge=0,le=100000000,max_digits=18,decimal_places=4)
  supplier:str=Field(min_length=1,max_length=500)
  expected_date:date
  extra_cost:Decimal=Field(default=0,ge=0,le=100000000,max_digits=18,decimal_places=4)
+class AdditionalOrderGroup(OrderGroup):
+ quantity:int=Field(gt=0,le=100000000,strict=True)
+ store:str=Field(min_length=1,max_length=80)
 class Generate(Selection):
+ additions:list[AdditionalOrderGroup]=Field(default_factory=list,max_length=200)
  request_id:UUID
  groups:list[OrderGroup]=Field(min_length=1,max_length=1000)
 @router.post('/generate')
@@ -199,15 +218,32 @@ def generate(b:Generate):
    return {'orders':[order_data(o) for o in db.scalars(select(Order).where(Order.batch_id==prior.id))],'replayed':True}
   plans=selected_plans(db,b,True);groups=group_plans(db,plans);specs={(g.product_id,g.warehouse_id):g for g in b.groups}
   if len(specs)!=len(b.groups) or set(specs)!={(g['product_id'],g['warehouse_id']) for g in groups}:raise HTTPException(422,'采购单分组与计划不一致，请重新预览')
+  from .procurement_flow import plan_usage
+  used=plan_usage(db)
+  for g in groups:
+   spec=specs[(g['product_id'],g['warehouse_id'])]
+   quantity=spec.quantity if spec.quantity is not None else g['quantity']
+   committed=sum(used.get(p.id,0) for p in plans if (p.product_id,p.warehouse_id)==(g['product_id'],g['warehouse_id']))
+   if quantity<committed:raise HTTPException(409,'采购数量不能少于已安排发货量')
+   g['quantity']=quantity
+  for item in b.additions:
+   key=(item.product_id,item.warehouse_id)
+   if key in specs:raise HTTPException(422,'同一商品和仓库已存在，请直接修改采购数量')
+   require_store(item.store)
+   product=db.get(Product,item.product_id)
+   if not product or product.archived:raise HTTPException(422,'新增商品不存在或已归档')
+   if not db.get(Warehouse,item.warehouse_id):raise HTTPException(422,'请选择有效的本地仓库')
+   specs[key]=item
+   groups.append({'product_id':item.product_id,'warehouse_id':item.warehouse_id,'code':product.code,'name':product.name,'quantity':item.quantity,'store':item.store,'allocations':[]})
   supplier_dates={}
-  for spec in b.groups:
+  for spec in [*b.groups,*b.additions]:
    key=supplier_key(spec.supplier,spec.product_id,spec.warehouse_id)
    if key in supplier_dates and supplier_dates[key]!=spec.expected_date:raise HTTPException(422,'同一供应商的商品须使用相同的预计到货日期')
    supplier_dates[key]=spec.expected_date
   db.add(Batch(id=str(b.request_id),actor=actor(),request=payload));db.flush();orders=[];documents={}
   for g in groups:
    s=specs[(g['product_id'],g['warehouse_id'])]
-   o=Order(batch_id=str(b.request_id),product_id=s.product_id,warehouse_id=s.warehouse_id,product_code=g['code'],product_name=g['name'],quantity=g['quantity'],unit_cost=s.unit_cost,extra_cost=s.extra_cost,supplier=s.supplier,expected_date=s.expected_date)
+   o=Order(batch_id=str(b.request_id),product_id=s.product_id,warehouse_id=s.warehouse_id,product_code=g['code'],product_name=g['name'],store=g.get('store',''),quantity=g['quantity'],unit_cost=s.unit_cost,extra_cost=s.extra_cost,supplier=s.supplier,expected_date=s.expected_date)
    db.add(o);db.flush()
    key=supplier_key(s.supplier,s.product_id,s.warehouse_id)
    if key not in documents:documents[key]=f'PO{o.created_at.astimezone(ZoneInfo("Asia/Shanghai")):%y%m%d}{o.id:04d}'
@@ -263,6 +299,7 @@ def list_orders(grouped:bool=False,q:str='',store:str='',country:str='',channel:
   for p in db.scalars(select(Plan).where(Plan.order_id.in_([o.id for o,_,_ in records])).order_by(Plan.id)):by_order.setdefault(p.order_id,[]).append(p)
   return {'total':total,'rows':[order_data(o)|{'planned_quantity':planned.get(o.id,0),'unplanned_quantity':max(0,o.quantity-planned.get(o.id,0)),'planning_status':'已计划' if planned.get(o.id,0)>=o.quantity else ('部分已计划' if planned.get(o.id,0) else ''),'image_url':image.get(p.id),'warehouse_name':w,'plan_batch_codes':sorted({a.batch_code for a in by_order.get(o.id,[])}),'allocations':allocations(by_order.get(o.id,[]))} for o,p,w in records]}
 class UpdateOrder(Body):
+ quantity:int|None=Field(default=None,gt=0,le=100000000,strict=True)
  request_id:UUID
  revision:int=Field(ge=1)
  status:Literal['pending_purchase','waiting','arrived']
@@ -328,7 +365,6 @@ def batch_receive(b:BatchReceipt):
    return prior.detail['response']|{'replayed':True}
   items={item.id:item for item in b.orders}
   if len(items)!=len(b.orders):raise HTTPException(422,'采购单重复')
-  if not any(item.quantity for item in b.orders):raise HTTPException(422,'请至少填写一张采购单的实际到货数量')
   orders=[get_order(db,pk,True) for pk in sorted(items)]
   for o in orders:
    item=items[o.id]
@@ -347,7 +383,7 @@ def batch_receive(b:BatchReceipt):
 class ReceiveOrder(Body):
  request_id:UUID
  revision:int=Field(ge=1)
- quantity:int=Field(gt=0,le=100000000,strict=True)
+ quantity:int=Field(ge=0,le=100000000,strict=True)
  note:str=Field(default='',max_length=1000)
 @router.post('/orders/{pk}/receive')
 def receive_order(pk:int,b:ReceiveOrder):
@@ -362,7 +398,7 @@ def receive_order(pk:int,b:ReceiveOrder):
    return {'id':pk,'received_delta':prior.detail['received_delta'],'replayed':True}
   o=get_order(db,pk,True)
   received=o.received+b.quantity
-  update=UpdateOrder(request_id=b.request_id,revision=b.revision,status='arrived' if received==o.quantity else 'waiting',received=received,unit_cost=o.unit_cost,extra_cost=o.extra_cost,supplier=o.supplier,expected_date=o.expected_date,note=b.note)
+  update=UpdateOrder(request_id=b.request_id,revision=b.revision,status=o.status if b.quantity==0 else ('arrived' if received==o.quantity else 'waiting'),received=received,unit_cost=o.unit_cost,extra_cost=o.extra_cost,supplier=o.supplier,expected_date=o.expected_date,note=b.note)
   result=apply_order_update(db,pk,update)
   event=db.scalar(select(Event).where(Event.request_id==str(b.request_id)))
   event.detail={**event.detail,'receipt_request':b.model_dump(mode='json')}
@@ -384,13 +420,22 @@ def order_detail(pk:int):
   return {'number':order_number(lines[0]),'items':[order_data(o) for o in lines]}
 
 class DocumentLine(Body):
+ quantity:int|None=Field(default=None,gt=0,le=100000000,strict=True)
  id:int=Field(gt=0)
  revision:int=Field(ge=1)
  status:Literal['pending_purchase','waiting','arrived']
  received:int=Field(ge=0,le=100000000,strict=True)
  unit_cost:Decimal=Field(ge=0,le=100000000,max_digits=18,decimal_places=4)
  extra_cost:Decimal=Field(ge=0,le=100000000,max_digits=18,decimal_places=4)
+class AddedDocumentLine(Body):
+ product_id:int=Field(gt=0)
+ warehouse_id:int=Field(gt=0)
+ store:str=Field(default='',max_length=40)
+ quantity:int=Field(gt=0,le=100000000,strict=True)
+ unit_cost:Decimal=Field(ge=0,le=100000000,max_digits=18,decimal_places=4)
+ extra_cost:Decimal=Field(default=0,ge=0,le=100000000,max_digits=18,decimal_places=4)
 class UpdateDocument(Body):
+ additions:list[AddedDocumentLine]=Field(default_factory=list,max_length=200)
  request_id:UUID
  supplier:str=Field(min_length=1,max_length=500)
  expected_date:date
@@ -414,6 +459,21 @@ def update_document(pk:int,b:UpdateDocument):
    item=items[o.id]
    update=UpdateOrder(request_id=uuid5(b.request_id,str(o.id)),supplier=b.supplier,expected_date=b.expected_date,note=b.note,**item.model_dump(exclude={'id'}))
    result['received_delta']+=apply_order_update(db,o.id,update)['received_delta']
+  if b.additions:
+   if len(lines)+len(b.additions)>200:raise HTTPException(422,'每张采购单最多200条明细')
+   document=lines[0].document_number or order_number(lines[0])
+   for line in lines:line.document_number=document
+   for index,item in enumerate(b.additions):
+    p=db.get(Product,item.product_id)
+    if not p or p.archived or b.supplier not in {p.primary_supplier,*(p.suppliers or [])}:raise HTTPException(422,'只能添加当前供应商的有效商品')
+    if not db.get(Warehouse,item.warehouse_id):raise HTTPException(422,'收货仓库无效')
+    if item.store:require_store(item.store)
+    if not admin() and not item.store:raise HTTPException(422,'请选择店铺')
+    o=Order(batch_id=lines[0].batch_id,document_number=document,product_id=p.id,product_code=p.code,product_name=p.name,warehouse_id=item.warehouse_id,store=item.store,quantity=item.quantity,unit_cost=item.unit_cost,extra_cost=item.extra_cost,supplier=b.supplier,expected_date=b.expected_date)
+    db.add(o);db.flush()
+    db.add(Event(request_id=str(uuid5(b.request_id,'add:'+str(index))),order_id=o.id,actor=actor(),kind='created',detail={'source':'document_edit','quantity':o.quantity,'unit_cost':str(o.unit_cost),'supplier':o.supplier}))
+    apply_order_update(db,o.id,UpdateOrder(request_id=uuid5(b.request_id,'add-state:'+str(index)),revision=o.revision,status='waiting',received=0,unit_cost=o.unit_cost,extra_cost=o.extra_cost,supplier=o.supplier,expected_date=o.expected_date,note=b.note))
+   result['added']=len(b.additions)
   audit(db,'purchase_document_update',str(b.request_id),{'anchor':pk,'request':payload,'response':result})
   return result
 
@@ -444,15 +504,19 @@ def apply_order_update(db,pk,b):
  o=get_order(db,pk,True)
  if o.revision!=b.revision:raise HTTPException(409,'采购单已变更，请关闭编辑框并刷新后重试')
  if b.received<o.received:raise HTTPException(409,'已入库的累计到货量不能减少；需要退货时请登记仓库出库，保留原到货记录')
- if b.received>o.quantity:raise HTTPException(422,'累计到货量不能超过采购量')
- if b.status=='arrived' and b.received!=o.quantity:raise HTTPException(422,'已到货须填写全部实际到货数量；部分到货请保持待到货')
- if b.received==o.quantity and b.status!='arrived':raise HTTPException(422,'全部到货后请选择已到货')
+ quantity=b.quantity if b.quantity is not None else o.quantity
+ if quantity!=o.quantity:
+  from .shipping import planned_by_order
+  if quantity<max(o.received,planned_by_order(db).get(o.id,0)):raise HTTPException(409,'采购量不能小于已到货量或已安排发货量')
+ if b.received>quantity:raise HTTPException(422,'累计到货量不能超过采购量')
+ if b.status=='arrived' and b.received!=quantity:raise HTTPException(422,'已到货须填写全部实际到货数量；部分到货请保持待到货')
+ if b.received==quantity and b.status!='arrived':raise HTTPException(422,'全部到货后请选择已到货')
  if b.status=='pending_purchase' and b.received:raise HTTPException(422,'已有到货记录，不能设为待采购')
  if o.received and b.unit_cost!=o.unit_cost:raise HTTPException(409,'已有入库批次，采购单价已锁定，不能更改历史库存成本')
- before={k:str(getattr(o,k)) for k in ['status','received','unit_cost','extra_cost','supplier','expected_date']}
+ before={k:str(getattr(o,k)) for k in ['quantity','status','received','unit_cost','extra_cost','supplier','expected_date']}
  delta=b.received-o.received
  db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':f'stock:{o.warehouse_id}:{o.product_id}'})
- pending=o.quantity-b.received if b.status=='waiting' else 0
+ pending=quantity-b.received if b.status=='waiting' else 0
  holder=db.get(Lot,o.pending_lot_id) if o.pending_lot_id else None
  if pending and not holder:
   holder=Lot(warehouse_id=o.warehouse_id,product_id=o.product_id,quantity=0,locked=0,pending=0,unit_cost=b.unit_cost,source='purchase_pending',reference=order_number(o));db.add(holder);db.flush();o.pending_lot_id=holder.id
@@ -461,6 +525,7 @@ def apply_order_update(db,pk,b):
  if delta:
   lot=Lot(warehouse_id=o.warehouse_id,product_id=o.product_id,quantity=delta,locked=0,pending=0,unit_cost=b.unit_cost,source='purchase_receipt',reference=order_number(o));db.add(lot);db.flush();lot_id=lot.id
   db.add(Movement(request_id=str(b.request_id),warehouse_id=o.warehouse_id,product_id=o.product_id,kind='in',quantity=delta,cost=delta*b.unit_cost,actor=actor(),note=f'{order_number(o)} 采购到货；'+b.note,detail={'purchase_order_id':o.id,'product_code':o.product_code,'product_name':o.product_name,'allocations':[{'lot_id':lot.id,'quantity':delta,'unit_cost':str(b.unit_cost),'before':0,'after':delta}]}))
+ o.quantity=quantity
  for k in ['status','received','unit_cost','extra_cost','supplier','expected_date']:setattr(o,k,getattr(b,k))
  o.revision+=1;o.updated_at=now()
  event=Event(request_id=str(b.request_id),order_id=o.id,actor=actor(),kind='received' if delta else 'updated',detail={'request':payload,'before':before,'received_delta':delta,'lot_id':lot_id,'pending':pending});db.add(event);db.flush()
@@ -484,7 +549,7 @@ def merge_plan_batches(b:Selection):
   chosen=selected_plans(db,b,True);codes={p.batch_code for p in chosen}
   if len(codes)<2:raise HTTPException(422,'请选择至少两个采购计划批次')
   plans=list(db.scalars(select(Plan).where(Plan.batch_code.in_(codes)).order_by(Plan.id).with_for_update()))
-  if any(p.order_id for p in plans):raise HTTPException(409,'批次包含已处理计划，不能合并')
+  if any(p.order_id or p.processed_at for p in plans):raise HTTPException(409,'批次包含已处理计划，不能合并')
   from .procurement_flow import ensure_plans_unshipped
   ensure_plans_unshipped(db,[p.id for p in plans])
   for p in plans:require_store(p.store)

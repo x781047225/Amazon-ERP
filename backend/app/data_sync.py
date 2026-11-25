@@ -150,7 +150,7 @@ def resume(store:str,kind:Kind,b:Resume):
     if not connection or r.plans[0].get('revision')!=connection.revision:raise HTTPException(409,'邮箱授权已变更，请重新初始化')
    plans=copy.deepcopy(r.plans)
    # Do not queue every child here: the coordinator resumes them one at a time.
-   if kind not in ('sta','mail','fees'):
+   if kind not in ('sta','mail'):
     for p in plans:
      if p.get('status')!='succeeded':p['status']='retry_pending';p['error']=None
    previous_error=r.error

@@ -197,14 +197,14 @@ app.include_router(finance_router)
 from .finance_summary import router as finance_summary_router
 app.include_router(finance_summary_router)
 from .dashboard import router as dashboard_router
-from . import dashboard_ads
+from . import dashboard_ads, dashboard_financials
 app.include_router(dashboard_router)
 from .store_inventory import router as store_inventory_router
 app.include_router(store_inventory_router)
 from .products import router as products_router
 app.include_router(products_router)
 from .advertising import router as advertising_router
-from . import ads_workspace, ads_creation, ads_live, ads_strategies, ads_search_actions
+from . import ads_workspace, ads_creation, ads_live, ads_strategies, ads_search_actions, ads_translations
 app.include_router(advertising_router)
 from .warehouse import router as warehouse_router
 app.include_router(warehouse_router)
@@ -234,7 +234,7 @@ if DIST.exists():
 @app.get('/help',include_in_schema=False)
 def index():
     if not (DIST/'index.html').exists():raise HTTPException(503,'前端尚未构建')
-    return FileResponse(DIST/'index.html')
+    return FileResponse(DIST/'index.html',headers={'Cache-Control':'no-cache'})
 
 from .listing_sync_jobs import router as listing_sync_router
 app.include_router(listing_sync_router)

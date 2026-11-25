@@ -100,7 +100,7 @@ def enrich(db,rows,categories,fx):
   net=convert([{'amount':str(r.amount),'currency':r.currency}],fx)['amount'] if r.amount is not None else None
   purchase=Decimal(0);shipping=Decimal(0);notes=[];cost_missing=False;freight_missing=False;fx_missing=False
   refund=refunds.get(r.id) if cat=='refund' else None
-  if cat=='sales' or (refund and refund['ready']):
+  if cat=='sales' or (refund and r.status=='RELEASED'):
    # Only transaction quantities can reliably allocate costs across split shipments.
    cost_items=refund['loss_items'] if refund else fallback_products(r.data)
    if not cost_items and not refund:
@@ -125,12 +125,15 @@ def enrich(db,rows,categories,fx):
   if fx_missing:notes.append('成本汇率待补齐，毛利暂不计算')
   gross=None if net is None or fx_missing else str((Decimal(net)-purchase-shipping).quantize(Decimal('.01')))
   if cat=='refund':
-   gross=str((Decimal(net)+Decimal(refund['original_sale_net'])-purchase-shipping).quantize(Decimal('.01'))) if refund and refund['ready'] and refund['original_sale_net'] is not None and net is not None and not fx_missing else None
+   base = refund.get('known_sale_net',refund['original_sale_net']) if refund else '0'
+   gross=str((Decimal(net)+Decimal(base or '0')-purchase-shipping).quantize(Decimal('.01'))) if net is not None and not fx_missing else None
+   if not refund and r.status=='RELEASED':
+    notes.append('退款关联资料待补齐，暂按已退回可售且仅计已知退款净额；后续同步后重新计算')
   if r.status!='RELEASED':gross=None
-  result[r.id]={'original_sale_net':refund['original_sale_net'] if refund else None,'return_status':refund['return_status'] if refund else ('暂缓不计算' if cat=='refund' and r.status!='RELEASED' else '待核实' if cat=='refund' else None),'return_checked_at':refund['return_checked_at'] if refund else None,'order_date':o.purchased_at if o else None,'marketplace':market,'order_items':displayed[r.id],
+  result[r.id]={'original_sale_net':refund['original_sale_net'] if refund else None,'return_status':refund['return_status'] if refund else ('暂缓不计算' if cat=='refund' and r.status!='RELEASED' else '暂按已退回可售' if cat=='refund' else None),'return_checked_at':refund['return_checked_at'] if refund else None,'order_date':o.purchased_at if o else None,'marketplace':market,'order_items':displayed[r.id],
    'category':cat,'category_label':CATEGORIES[cat][0],'category_help':CATEGORIES[cat][1],
    **parts,'settlement_margin':ratio(net,sale) if cat!='refund' and r.status=='RELEASED' else None,'purchase_cost':None if fx_missing else str(purchase),'freight_cost':None if fx_missing else str(shipping),
-   'settlement_gross_profit':gross,'settlement_gross_margin':ratio(gross,sale) if cat!='refund' else None,'cost_estimated':cost_missing or freight_missing,'calculation_notes':list(dict.fromkeys(notes))}
+   'settlement_gross_profit':gross,'settlement_gross_margin':ratio(gross,sale) if cat!='refund' else None,'refund_estimated':cat=='refund' and r.status=='RELEASED' and (not refund or refund.get('estimated',False)),'cost_estimated':cost_missing or freight_missing,'calculation_notes':list(dict.fromkeys(notes))}
  return result
 
 

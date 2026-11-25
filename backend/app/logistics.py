@@ -54,6 +54,7 @@ def box_metrics(box):
 def channel_options():return {'countries':{c:COUNTRY_NAMES.get(c,c) for c in ORDER_MARKETS},'channels':CHANNELS,'tax_modes':TAX_MODES,'last_mile_modes':LAST_MILE}
 class Body(BaseModel):model_config=ConfigDict(extra='forbid',str_strip_whitespace=True)
 class ChannelBody(Body):
+ revision:int|None=Field(default=None,ge=1)
  name:str=Field(min_length=1,max_length=120)
  country:str=Field(min_length=1,max_length=40)
  channel:str=Field(min_length=1,max_length=80)
@@ -76,27 +77,45 @@ class ChannelBody(Body):
   choices={'channel':CHANNELS,'tax_mode':TAX_MODES,'last_mile':LAST_MILE}[info.field_name]
   if v not in choices and not (v=='' and info.field_name!='channel'):raise ValueError('请选择有效选项')
   return v
-def channel_json(c):return {'id':c.id,'name':c.name,'country':c.country,'channel':c.channel,**c.detail}
+def channel_json(c):return {'id':c.id,'name':c.name,'country':c.country,'channel':c.channel,**c.detail,'revision':c.revision}
 @router.get('/channels')
-def channels(q:str=''):
+def channels(q:str='',country:str='',channel:str='',page:int=Query(1,ge=1),page_size:int=Query(50,ge=1,le=100),paginated:bool=False):
  with Session() as db:
   query=select(Channel)
   if q.strip():query=query.where(Channel.name.ilike(pattern(q.strip()),escape='\\'))
-  return [channel_json(c) for c in db.scalars(query.order_by(Channel.id.desc()))]
+  if country:query=query.where(Channel.country==country)
+  if channel:query=query.where(Channel.channel==channel)
+  total=db.scalar(select(func.count()).select_from(query.subquery())) if paginated else None
+  query=query.order_by(Channel.id.desc())
+  if paginated:query=query.offset((page-1)*page_size).limit(page_size)
+  rows=[channel_json(c) for c in db.scalars(query)]
+  return {'rows':rows,'total':total} if paginated else rows
+@router.get('/channels/{pk}')
+def channel_detail(pk:int):
+ with Session() as db:
+  c=db.get(Channel,pk)
+  if not c:raise HTTPException(404,'渠道不存在')
+  return channel_json(c)
 @router.post('/channels')
 @router.post('/channels/{pk}')
 def save_channel(b:ChannelBody,pk:int|None=None):
  require_admin()
  with Session.begin() as db:
-  c=db.get(Channel,pk) if pk else Channel()
+  c=db.scalar(select(Channel).where(Channel.id==pk).with_for_update()) if pk else Channel(revision=1)
   if not c:raise HTTPException(404,'渠道不存在')
-  c.name=b.name;c.country=b.country;c.channel=b.channel;c.detail=b.model_dump(mode='json',exclude={'name','country','channel'});db.add(c);db.flush();audit(db,'logistics_channel_save',c.id,b.model_dump(mode='json'));return channel_json(c)
+  if pk:
+   if (b.revision is not None and b.revision!=c.revision) or (principal.get().get('token_id') and b.revision is None):raise HTTPException(409,'渠道已更新，请刷新后再修改')
+   c.revision+=1
+  c.name=b.name;c.country=b.country;c.channel=b.channel;c.detail=b.model_dump(mode='json',exclude={'name','country','channel','revision'});db.add(c);db.flush();audit(db,'logistics_channel_save',c.id,b.model_dump(mode='json'));return channel_json(c)
+class ChannelDelete(Body):
+ revision:int|None=Field(default=None,ge=1)
 @router.post('/channels/{pk}/delete')
-def delete_channel(pk:int):
+def delete_channel(pk:int,b:ChannelDelete):
  require_admin()
  with Session.begin() as db:
-  c=db.get(Channel,pk)
+  c=db.scalar(select(Channel).where(Channel.id==pk).with_for_update())
   if not c:raise HTTPException(404,'渠道不存在')
+  if (b.revision is not None and b.revision!=c.revision) or (principal.get().get('token_id') and b.revision is None):raise HTTPException(409,'渠道已更新，请刷新后再删除')
   audit(db,'logistics_channel_delete',pk,channel_json(c));db.delete(c)
  return {'ok':True}
 
@@ -185,6 +204,8 @@ def context(store:str,shipment_id:str,kind:str='invoice'):
 def status():
  with Session() as db:return {'documents':[{'store':d.store,'shipment_id':d.shipment_id,'kind':d.kind} for d in db.scalars(select(Document).where(Document.store.in_(allowed_stores())))],'settlements':[{'store':s.store,'shipment_id':s.shipment_id} for s in db.scalars(select(Settlement).where(Settlement.store.in_(allowed_stores())))]}
 class SettlementBody(Body):
+ revision:int|None=Field(default=None,ge=1)
+ actual_charge_weight:Decimal|None=Field(default=None,gt=0,max_digits=16,decimal_places=4)
  store:str
  shipment_id:str
  channel_id:int
@@ -197,28 +218,57 @@ class SettlementBody(Body):
  miscellaneous:Decimal=Field(default=Decimal(0),ge=0,max_digits=16,decimal_places=2)
  total_override:Decimal|None=Field(default=None,ge=0,max_digits=16,decimal_places=2)
  note:str=Field(default='',max_length=1000)
-@router.post('/settlements')
-@router.post('/settlements/{pk}')
-def save_settlement(b:SettlementBody,pk:int|None=None):
+def settlement_json(row):
+ return {**row.detail,'id':row.id,'store':row.store,'shipment_id':row.shipment_id,'created_at':row.created_at,
+         'status':row.status,'actual_charge_weight':str(row.actual_charge_weight) if row.actual_charge_weight is not None else None,
+         'settled_by':row.settled_by,'settled_at':row.settled_at,'revision':row.revision}
+
+class SettleBody(SettlementBody):
+ revision:int=Field(ge=1)
+ actual_charge_weight:Decimal=Field(gt=0,max_digits=16,decimal_places=4)
+
+def write_settlement(b,pk=None,settle=False):
  require_admin();require_store(b.store)
  with Session.begin() as db:
   db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:k))'),{'k':'settlement:'+b.store+':'+b.shipment_id})
+  row=db.scalar(select(Settlement).where(Settlement.id==pk).with_for_update()) if pk is not None else None
+  if pk is not None and (not row or row.store!=b.store or row.shipment_id!=b.shipment_id):raise HTTPException(404,'结算不存在')
+  if row and b.revision is not None and row.revision!=b.revision:raise HTTPException(409,'记录已更新，请刷新后重试')
+  if settle and row.status=='settled':raise HTTPException(409,'此记录已结算，请刷新查看')
+  existing=db.scalar(select(Settlement).where(Settlement.store==b.store,Settlement.shipment_id==b.shipment_id))
+  if existing and (not row or existing.id!=row.id):raise HTTPException(409,'此货件已有结算记录')
   ctx=shipment_context(db,b.store,b.shipment_id);c=db.get(Channel,b.channel_id)
   if not c:raise HTTPException(422,'请选择物流渠道')
-  row=db.get(Settlement,pk) if pk else None
-  existing=db.scalar(select(Settlement).where(Settlement.store==b.store,Settlement.shipment_id==b.shipment_id))
-  if pk and (not row or row.store!=b.store or row.shipment_id!=b.shipment_id):raise HTTPException(404,'结算不存在')
-  if existing and (not row or existing.id!=row.id):raise HTTPException(409,'此货件已有结算记录')
-  computed=(b.charge_weight*b.unit_price+b.surcharge+b.clearance_fee+b.declaration_fee+b.miscellaneous).quantize(Decimal('.01'))
-  detail={**b.model_dump(mode='json'),'channel':channel_json(c),'weight':ctx['weight'],'boxes':ctx['boxes'],'computed_total':str(computed),'total':str(b.total_override if b.total_override is not None else computed)}
+  posted=settle or bool(row and row.status=='settled')
+  actual=b.actual_charge_weight if b.actual_charge_weight is not None else row.actual_charge_weight if row else None
+  if posted and actual is None:raise HTTPException(422,'请填写实际收费重量')
+  computed=((actual if posted else b.charge_weight)*b.unit_price+b.surcharge+b.clearance_fee+b.declaration_fee+b.miscellaneous).quantize(Decimal('.01'))
+  channel=(row.detail.get('channel') if row and row.detail.get('channel_id')==b.channel_id else None) or channel_json(c)
+  detail={**b.model_dump(mode='json',exclude={'revision','actual_charge_weight'}),'channel':channel,'country':'UK' if ctx['country']=='GB' else ctx['country'],
+          'weight':ctx['weight'],'boxes':ctx['boxes'],'computed_total':str(computed),'total':str(computed if posted or b.total_override is None else b.total_override)}
+  if posted:detail['total_override']=None
   if not row:row=Settlement(store=b.store,shipment_id=b.shipment_id,actor=principal.get()['username']);db.add(row)
-  row.detail=detail;db.flush();audit(db,'logistics_settlement_save',row.id,detail);return {'id':row.id,**detail}
+  else:row.revision+=1
+  row.detail=detail;row.actual_charge_weight=actual
+  if settle:row.status='settled';row.settled_by=principal.get()['username'];row.settled_at=now()
+  db.flush();result=settlement_json(row)
+  audit(db,'logistics_settlement_complete' if settle else 'logistics_settlement_save',row.id,{**detail,'status':row.status,'actual_charge_weight':str(actual) if actual is not None else None,'settled_by':row.settled_by,'settled_at':row.settled_at.isoformat() if row.settled_at else None})
+ # Invalidate after the settlement transaction has committed.
+ from .dashboard_financials import invalidate_cache
+ invalidate_cache()
+ return result
+
+@router.post('/settlements')
+@router.post('/settlements/{pk}')
+def save_settlement(b:SettlementBody,pk:int|None=None):return write_settlement(b,pk)
+@router.post('/settlements/{pk}/settle')
+def settle_settlement(pk:int,b:SettleBody):return write_settlement(b,pk,settle=True)
 @router.get('/settlements')
 def settlements(q:str='',page:int=Query(1,ge=1),page_size:int=Query(30,ge=1,le=100)):
  with Session() as db:
   cond=[Settlement.store.in_(allowed_stores())]
   if q:cond.append(or_(Settlement.shipment_id.ilike(pattern(q),escape='\\'),Settlement.detail['channel']['name'].as_string().ilike(pattern(q),escape='\\')))
-  return {'total':db.scalar(select(func.count()).select_from(Settlement).where(*cond)),'rows':[{'id':s.id,'created_at':s.created_at,**s.detail} for s in db.scalars(select(Settlement).where(*cond).order_by(Settlement.id.desc()).offset((page-1)*page_size).limit(page_size))]}
+  return {'total':db.scalar(select(func.count()).select_from(Settlement).where(*cond)),'rows':[settlement_json(s) for s in db.scalars(select(Settlement).where(*cond).order_by(Settlement.id.desc()).offset((page-1)*page_size).limit(page_size))]}
 
 def workbook(content):
  try:
