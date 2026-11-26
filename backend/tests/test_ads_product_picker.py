@@ -48,3 +48,41 @@ def test_existing_group_membership_includes_paused_but_not_other_groups():
  assert 'paused' in r['existing_skus'] and 'elsewhere' not in r['existing_skus'] and 'archived' not in r['existing_skus']
  assert query(adgroup_id='3',q='elsewhere').json()['rows'][0]['existing_in_group'] is False
  assert query(adgroup_id='missing').status_code==404
+
+
+def test_creation_inventory_for_unadvertised_listing_and_resolve():
+ from datetime import timedelta
+ from app.models import StoreInventory,now
+ seed();at=now()
+ with Session.begin() as db:
+  for sku in ['new-item','zero-item','unknown-item','wrong-asin']:
+   db.add(listing('DemoStoreD','FR',sku))
+  def stock(sku,qty,asin='B0TEST0003'):
+   return {'sellerSku':sku,'asin':asin,'fnSku':'FN-'+sku,'inventoryDetails':{'fulfillableQuantity':qty}}
+  db.add(StoreInventory(store='DemoStoreD',status='succeeded',data={'FR':{'synced_at':at.isoformat(),'rows':[stock('new-item',143),stock('zero-item',0),stock('wrong-asin',88,'B0OTHER001')]}}))
+  db.add(StoreInventory(store='DemoStoreA',status='succeeded',data={'FR':{'synced_at':at.isoformat(),'rows':[stock('unknown-item',999)]}}))
+ response=client.get('/api/advertising/create/products',params={'profile_id':PID,'q':'item','page_size':100});assert response.status_code==200
+ rows={r['sku']:r for r in response.json()['rows']}
+ assert rows['new-item']['available']==143 and rows['new-item']['inventory_synced_at']==at.isoformat()
+ assert rows['zero-item']['available']==0 and rows['unknown-item']['available'] is None
+ mismatch=client.get('/api/advertising/create/products',params={'profile_id':PID,'q':'wrong-asin'}).json()['rows'][0]
+ assert mismatch['available'] is None
+ resolved=client.post('/api/advertising/create/products/resolve',headers={'x-erp-client':'web'},json={'profile_id':PID,'values':['new-item'],'kind':'sku'}).json()
+ assert resolved['rows'][0]['available']==143
+ # Searching again reads the updated inventory snapshot without requiring an existing ad.
+ with Session.begin() as db:
+  inv=db.get(StoreInventory,'DemoStoreD');inv.data={'FR':{'synced_at':(at+timedelta(minutes=1)).isoformat(),'rows':[stock('new-item',96)]}}
+ updated=client.get('/api/advertising/create/products',params={'profile_id':PID,'q':'new-item'}).json()['rows'][0]
+ assert updated['available']==96
+
+
+def test_creation_uses_current_listing_asin_inventory_and_uk_alias():
+ from app.models import now
+ seed()
+ with Session.begin() as db:
+  db.get(AdsProfile,PID).country='GB'
+  l=listing('DemoStoreD','UK','FX-Test',asin='B0CURRENT1');db.add(l);db.flush()
+  db.add(ListingInventory(listing_pk=l.id,data={'asin':'B0CURRENT1','fnSku':'FN-FX-Test','inventoryDetails':{'fulfillableQuantity':12}},synced_at=now()))
+ # Existing ad points at an older ASIN; never attach its old stock to the current listing.
+ r=client.get('/api/advertising/create/products',params={'profile_id':PID,'q':'FX-Test'}).json()
+ assert r['total']==1 and r['rows'][0]['asin']=='B0CURRENT1' and r['rows'][0]['available']==12

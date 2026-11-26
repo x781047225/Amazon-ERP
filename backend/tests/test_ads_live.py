@@ -123,4 +123,99 @@ def test_group_read_failure_does_not_publish_success(setup,monkeypatch):
   def close(self):pass
  monkeypatch.setattr(live,'Client',Fake);live.run(*queued[0])
  assert live.status(PID)['status']=='failed'
- with Session() as db:assert db.get(AdsEntity,(PID,'campaign','1')).data['budget']['budget']==5
+ assert live.status(PID)['campaign_updated_at']
+ with Session() as db:
+  assert db.get(AdsEntity,(PID,'campaign','1')).data['budget']['budget']==99
+  assert db.get(AdsEntity,(PID,'adgroup','3')).state=='ENABLED'
+
+
+def test_full_snapshot_cannot_revert_newer_refresh_or_delete_new_rows(setup):
+ from app.advertising import save_entities
+ started=now()-timedelta(minutes=1)
+ live.save_campaigns(PID,[{'campaignId':'new','state':'ENABLED','name':'New'}],now())
+ save_entities(PID,'campaign',[{'campaignId':'1','state':'PAUSED','budget':{'budget':999}}],started)
+ with Session() as db:
+  assert db.get(AdsEntity,(PID,'campaign','1')).data['budget']['budget']==5
+  assert db.get(AdsEntity,(PID,'campaign','new')).state=='ENABLED'
+  assert db.get(AdsEntity,(PID,'campaign','2')) is not None
+
+
+def test_campaign_is_published_before_groups_finish(setup,monkeypatch):
+ cache,queued=setup;start()
+ class Fake:
+  def __init__(self,p):pass
+  def list(self,kind):
+   if kind=='campaign':return [{'campaignId':'1','state':'ENABLED'}]
+   assert live.status(PID)['status']=='running'
+   assert live.status(PID)['campaign_updated_at']
+   with Session() as db:assert db.get(AdsEntity,(PID,'campaign','1')).state=='ENABLED'
+   return []
+  def close(self):pass
+ monkeypatch.setattr(live,'Client',Fake);live.run(*queued[0])
+ assert live.status(PID)['status']=='succeeded'
+
+
+def test_scoped_ads_refresh_preserves_real_pauses_and_entity_fields(setup,monkeypatch):
+ cache,queued=setup
+ body={'profile_id':PID,'level':'ad','campaign_id':'1','adgroup_id':'3'}
+ assert client.post('/api/advertising/campaign-refresh',json=body,headers=HEAD).status_code==200
+ scope=queued[0][2]
+ calls=[]
+ class Fake:
+  def __init__(self,p):assert p==PID
+  def list(self,kind,filters):
+   calls.append(kind)
+   assert filters['campaignIdFilter']=={'include':['1']}
+   if kind!='campaign':assert filters['adGroupIdFilter']=={'include':['3']}
+   if kind=='campaign':return [{'campaignId':'1','state':'ENABLED'}]
+   if kind=='adgroup':return [{'campaignId':'1','adGroupId':'3','state':'ENABLED'}]
+   return [{'campaignId':'1','adGroupId':'3','adId':'4','sku':'Example-18th','asin':'B0TEST0003','state':'ENABLED','extendedData':{'servingStatus':'AD_STATUS_LIVE'}},{'campaignId':'1','adGroupId':'3','adId':'paused','sku':'Example-16th','state':'PAUSED','extendedData':{'servingStatus':'AD_PAUSED'}}]
+  def close(self):pass
+ monkeypatch.setattr(live,'Client',Fake);live.run(*queued[0])
+ result=client.get('/api/advertising/campaign-refresh',params=body).json()
+ assert result['status']=='succeeded' and result['kind_updated_at']['ad']
+ assert calls==['campaign','adgroup','ad']
+ assert live.status(PID)['status']=='idle' # Separate scope cannot claim a whole profile refresh.
+ from app.ads_serving import delivery
+ with Session() as db:
+  a=db.get(AdsEntity,(PID,'ad','4'));assert a.adgroup_id=='3' and a.name=='Example-18th'
+  assert a.data['asin']=='B0TEST0003' and delivery(a)['servingStatus']=='AD_STATUS_LIVE'
+  assert db.get(AdsEntity,(PID,'ad','paused')).state=='PAUSED'
+  assert db.get(AdsEntity,(PID,'campaign','2')) is not None
+ assert client.post('/api/advertising/campaign-refresh',json=body,headers=HEAD).json()['status']=='succeeded'
+ assert len(queued)==1
+
+
+def test_target_refresh_updates_keywords_and_targets_independently(setup,monkeypatch):
+ cache,queued=setup
+ body={'profile_id':PID,'level':'target','campaign_id':'1'}
+ client.post('/api/advertising/campaign-refresh',json=body,headers=HEAD)
+ class Fake:
+  def __init__(self,p):pass
+  def list(self,kind,filters):
+   if kind=='campaign':return [{'campaignId':'1','state':'ENABLED'}]
+   if kind=='adgroup':return []
+   if kind=='keyword':return [{'campaignId':'1','adGroupId':'3','keywordId':'kw','keywordText':'example','state':'ENABLED','bid':.2}]
+   assert live.status(PID,queued[0][2])['kind_updated_at']['keyword']
+   return [{'campaignId':'1','adGroupId':'3','targetId':'t','expressionType':'AUTO','expression':[{'type':'closeMatch'}],'state':'ENABLED','bid':.3,'extendedData':{'servingStatus':'TARGETING_CLAUSE_STATUS_LIVE'}}]
+  def close(self):pass
+ monkeypatch.setattr(live,'Client',Fake);live.run(*queued[0])
+ assert live.status(PID,queued[0][2])['status']=='succeeded'
+ with Session() as db:
+  k=db.get(AdsEntity,(PID,'keyword','kw'));assert k.name=='example' and k.adgroup_id=='3' and k.data['bid']==.2
+  t=db.get(AdsEntity,(PID,'target','t'));assert t.adgroup_id=='3' and t.data['expression']==[{'type':'closeMatch'}]
+
+
+def test_scope_validation_and_dedup_are_isolated(setup):
+ cache,queued=setup
+ for level in ['ad','target','negative']:
+  body={'profile_id':PID,'level':level,'campaign_id':'1'}
+  assert client.post('/api/advertising/campaign-refresh',json=body,headers=HEAD).json()['status']=='queued'
+  assert client.post('/api/advertising/campaign-refresh',json=body,headers=HEAD).json()['status']=='queued'
+ assert len(queued)==3
+ assert len({live.keys(PID,args[2])[0] for args in queued})==3
+ for scope in [{'campaign_id':'missing'},{'adgroup_id':'missing'},{'campaign_id':'2','adgroup_id':'3'}]:
+  body={'profile_id':PID,'level':'ad',**scope}
+  assert client.post('/api/advertising/campaign-refresh',json=body,headers=HEAD).status_code==404
+  assert client.get('/api/advertising/campaign-refresh',params=body).status_code==404
+ assert client.post('/api/advertising/campaign-refresh',json={'profile_id':PID,'level':'bad'},headers=HEAD).status_code==422

@@ -45,6 +45,8 @@ def listings(q:str='',store:str='',marketplace:str='',sort_period:Literal['today
         rows=list(db.scalars(query));result=listing_business.enrich(db,rows,[listing_service.summary(r,db.get(ListingDraft,r.id)) for r in rows])
         links={i:{'id':pid,'code':code,'name':name} for i,pid,code,name in db.execute(select(ProductLink.listing_pk,LocalProduct.id,LocalProduct.code,LocalProduct.name).join(LocalProduct,LocalProduct.id==ProductLink.product_id).where(ProductLink.listing_pk.in_([r.id for r in rows])))}
         for item in result:item['local_product']=links.get(item['id'])
+        from .listing_public import decorate
+        decorate(rows,result)
         return {'listings':result,'total':total,'sample_count':count,'product_types':list(db.scalars(select(Listing.product_type).distinct())),'stores':allowed_stores(),'markets':list(MARKETS),'page':page,'page_size':page_size,'amazon_writes_enabled':True}
 @router.post('/inventory/refresh')
 def refresh_inventory():
@@ -55,6 +57,18 @@ def refresh_inventory():
 def refresh_arrivals():
     from .listing_arrivals import queue_refresh
     return queue_refresh()
+
+class RatingRead(BaseModel):
+    ids:list[StrictInt]=Field(min_length=1,max_length=100)
+
+@router.post('/ratings/read')
+def read_ratings(body:RatingRead):
+    from .auth import require_store
+    from .listing_public import ratings
+    with Session() as db:
+        rows=list(db.scalars(select(Listing).where(Listing.id.in_(body.ids))))
+        for row in rows:require_store(row.store)
+        return {'rows':ratings(rows)}
 
 @router.get('/{pk}')
 def get_detail(pk:int):

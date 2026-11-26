@@ -152,3 +152,53 @@ def test_product_ad_transport_preserves_identifiers(asin):
  assert len(calls)==1 and calls[0][:2]==('POST','https://ads.test/sp/productAds')
  assert calls[0][2]['json']=={'productAds':[payload]}
  with pytest.raises(AdsError):c.update_one('ad',{'adId':'12','asin':'B0TEST0003'})
+
+
+def test_options_refresh_new_campaign_and_sort_by_creation(monkeypatch):
+ seed();calls=[]
+ class Reader:
+  def __init__(self,*args):pass
+  def close(self):pass
+  def list(self,kind):
+   calls.append(kind)
+   if kind=='campaign':return [
+    {'campaignId':'older','name':'AAA older','state':'ENABLED','targetingType':'MANUAL','extendedData':{'creationDateTime':'2026-10-01T00:00:00Z'}},
+    {'campaignId':'new','name':'圣诞-毛绒玩具 （手动）','state':'PAUSED','targetingType':'MANUAL','extendedData':{'creationDateTime':'2026-11-27T00:00:00Z'}},
+    {'campaignId':'archived','name':'archived','state':'ARCHIVED','targetingType':'MANUAL'}]
+   return [{'campaignId':'new','adGroupId':'new-group','name':'new group','state':'ENABLED','defaultBid':.2,'extendedData':{'creationDateTime':'2026-11-27T00:00:01Z'}}]
+ monkeypatch.setattr(creation,'Client',Reader)
+ before=client.get('/api/advertising/create/options',params={'profile_id':PID}).json()
+ assert not calls and 'new' not in [r['id'] for r in before['campaigns']]
+ result=client.get('/api/advertising/create/options',params={'profile_id':PID,'refresh':True}).json()
+ assert calls==['campaign','adgroup'] and not result['warnings']
+ assert [r['id'] for r in result['campaigns']][:2]==['new','older']
+ assert 'archived' not in [r['id'] for r in result['campaigns']]
+ assert result['campaigns'][0]['targeting']=='MANUAL'
+ assert any(r['id']=='new-group' and r['campaign_id']=='new' for r in result['groups'])
+
+
+def test_options_refresh_failure_keeps_cache_and_checks_access(monkeypatch):
+ seed();calls=[]
+ class Reader:
+  def __init__(self,*args):calls.append('client')
+  def close(self):calls.append('closed')
+  def list(self,kind):raise AdsError('unavailable')
+ monkeypatch.setattr(creation,'Client',Reader)
+ assert client.get('/api/advertising/create/options',params={'profile_id':'other','refresh':True}).status_code==404
+ assert not calls
+ before=client.get('/api/advertising/create/options',params={'profile_id':PID}).json()
+ result=client.get('/api/advertising/create/options',params={'profile_id':PID,'refresh':True}).json()
+ assert result['campaigns']==before['campaigns'] and result['groups']==before['groups']
+ assert len(result['warnings'])==2 and calls==['client','closed']
+
+
+def test_options_use_checkpoint_creation_date_not_sync_date():
+ seed()
+ with Session.begin() as db:
+  for eid in ['local','unknown']:
+   db.add(AdsEntity(profile_id=PID,kind='campaign',entity_id=eid,campaign_id=eid,name=eid,state='ENABLED',data={'targetingType':'MANUAL'}))
+  db.add(AdsChange(id='created',profile_id=PID,kind='create_campaign',entity_id='local',actor='test',status='succeeded',before={'steps':[{'kind':'campaign','id':'local'}]},changes={},created_at=datetime(2026,11,27,tzinfo=ZoneInfo('UTC'))))
+ result=client.get('/api/advertising/create/options',params={'profile_id':PID}).json()
+ assert result['campaigns'][0]['id']=='local'
+ assert result['campaigns'][0]['created_at'].startswith('2026-11-27')
+ assert next(r for r in result['campaigns'] if r['id']=='unknown')['created_at'] is None

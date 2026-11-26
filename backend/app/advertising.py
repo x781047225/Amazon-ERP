@@ -6,6 +6,7 @@ from decimal import Decimal
 from fastapi import APIRouter,HTTPException,Query,Depends
 from pydantic import BaseModel
 from sqlalchemy import select,delete,func,text,or_
+from sqlalchemy.dialects.postgresql import insert
 from .auth import require_advertising_access,allowed_stores,require_store
 from .db import Session
 from .models import AdsProfile,AdsEntity,AdsSync,AdsDay,now
@@ -32,16 +33,19 @@ def save_profile(profile,account):
   p=AdsProfile(id=str(profile['profileId']),account=account,country=profile['countryCode'],currency=profile['currencyCode'],timezone=profile['timezone'],data=profile,synced_at=now());db.merge(p)
  return p.id
 
-def save_entities(profile,kind,rows):
- # Atomic kind replacement after all pages were successfully read.
+def save_entities(profile,kind,rows,started=None):
+ # Publish a complete snapshot without reverting edits or refreshes made during the read.
+ started=started or now()
  values=[];seen=set()
  for row in rows:
   eid=str(row[IDS[kind]])
   if eid in seen:continue
   seen.add(eid);values.append({'profile_id':profile,'kind':kind,'entity_id':eid,'campaign_id':str(row.get('campaignId') or '') or None,'adgroup_id':str(row.get('adGroupId') or '') or None,'name':str(row.get('name') or row.get('keywordText') or row.get('sku') or row.get('asin') or eid),'state':str(row.get('state','UNKNOWN')).upper(),'data':row,'synced_at':now()})
  with Session.begin() as db:
-  db.execute(delete(AdsEntity).where(AdsEntity.profile_id==profile,AdsEntity.kind==kind))
-  if values:db.execute(AdsEntity.__table__.insert(),values)
+  db.execute(delete(AdsEntity).where(AdsEntity.profile_id==profile,AdsEntity.kind==kind,AdsEntity.entity_id.not_in(seen),AdsEntity.synced_at<=started))
+  for offset in range(0,len(values),500):
+   stmt=insert(AdsEntity).values(values[offset:offset+500])
+   db.execute(stmt.on_conflict_do_update(index_elements=['profile_id','kind','entity_id'],set_={k:getattr(stmt.excluded,k) for k in ['campaign_id','adgroup_id','name','state','data','synced_at']},where=AdsEntity.synced_at<=started))
  return len(values)
 
 def create_job(profile,start,end,daily=False,job_id=None,reports_only=False,automatic=False):
@@ -82,7 +86,7 @@ def run_step(jid):
   if phase=='metadata':
    counts={}
    for kind in IDS:
-    counts[kind]=save_entities(profile,kind,c.list(kind));data['counts']=counts;patch_job(jid,data=data)
+    started=now();counts[kind]=save_entities(profile,kind,c.list(kind),started);data['counts']=counts;patch_job(jid,data=data)
    # Check other types without treating an API failure as zero campaigns.
    other={}
    for typ,path,media in [('SB','/sb/v4/campaigns/list','application/vnd.sbcampaignresource.v4+json'),('SD','/sd/campaigns',None)]:

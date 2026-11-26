@@ -68,7 +68,7 @@ def build_daily_plans(start,end,today):
 def run_daily(jid,c,profile,start,end,phase,data):
  if phase=='metadata':
   for kind in IDS:
-   count=save_entities(profile,kind,c.list(kind));data.setdefault('counts',{})[kind]=count;patch_job(jid,data=data)
+   started=now();count=save_entities(profile,kind,c.list(kind),started);data.setdefault('counts',{})[kind]=count;patch_job(jid,data=data)
   patch_job(jid,phase='reports',data=data)
  if 'plans' not in data:
   today=datetime.now(ZoneInfo('Europe/Paris')).date()
@@ -279,7 +279,7 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
    for kind in KINDS[level]:
     for e in bykind[kind].values():
      d=e.data;parent=bykind['campaign'].get(e.campaign_id);group=bykind['adgroup'].get(e.adgroup_id)
-     row={'id':e.entity_id,'key':kind+':'+e.entity_id,'kind':kind,'name':title(d) if level in ['target','negative'] else e.name,'state':e.state,'campaign_id':e.entity_id if level=='campaign' else e.campaign_id,'adgroup_id':e.entity_id if level=='adgroup' else e.adgroup_id,'campaign_name':parent.name if parent else '', 'adgroup_name':group.name if group else '', 'sku':d.get('sku'),'asin':d.get('asin'),'budget':d.get('budget',{}).get('budget'),'default_bid':d.get('defaultBid'),'bid':d.get('bid'),'match_type':d.get('matchType') or d.get('expressionType'),'targeting_type':d.get('targetingType') or (parent.data.get('targetingType') if parent else None),'top_adjustment':next((x.get('percentage') for x in d.get('dynamicBidding',{}).get('placementBidding',[]) if x.get('placement')=='PLACEMENT_TOP'),0),'running':e.state=='ENABLED' and (not parent or parent.state=='ENABLED') and (not group or group.state=='ENABLED'),**(extra.get(e.entity_id,{}) if kind=='ad' else {})}
+     row={'id':e.entity_id,'key':kind+':'+e.entity_id,'kind':kind,'name':title(d) if level in ['target','negative'] else e.name,'state':e.state,'state_updated_at':e.synced_at,'campaign_id':e.entity_id if level=='campaign' else e.campaign_id,'adgroup_id':e.entity_id if level=='adgroup' else e.adgroup_id,'campaign_name':parent.name if parent else '', 'adgroup_name':group.name if group else '', 'sku':d.get('sku'),'asin':d.get('asin'),'budget':d.get('budget',{}).get('budget'),'default_bid':d.get('defaultBid'),'bid':d.get('bid'),'match_type':d.get('matchType') or d.get('expressionType'),'targeting_type':d.get('targetingType') or (parent.data.get('targetingType') if parent else None),'top_adjustment':next((x.get('percentage') for x in d.get('dynamicBidding',{}).get('placementBidding',[]) if x.get('placement')=='PLACEMENT_TOP'),0),'running':e.state=='ENABLED' and (not parent or parent.state=='ENABLED') and (not group or group.state=='ENABLED'),**(extra.get(e.entity_id,{}) if kind=='ad' else {})}
      row['match_type']='NEGATIVE_PRODUCT' if kind=='negative_target' else match_code(row.get('match_type'))
      if kind=='keyword':row['negative_matches']=negative_matches(e.campaign_id,e.adgroup_id,row['name'])
      if level!='negative':row.update(delivery(e,parent,group))

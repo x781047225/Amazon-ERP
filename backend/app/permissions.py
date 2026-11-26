@@ -158,7 +158,7 @@ def enforce(request,p,body):
  keys=route_keys(path,request.query_params,body,request.method)
  action='view' if request.method in ('GET','HEAD','OPTIONS') else 'operate'
  # Read-only calculations still use POST, but do not modify business records.
- if path.endswith('/income-estimate') or path.endswith('/estimate') or path in ('/api/advertising/column-widths','/api/advertising/column-preferences','/api/advertising/campaign-refresh','/api/advertising/target-suggestions/ensure','/api/advertising/term-translations'):action='view'
+ if path.endswith('/income-estimate') or path.endswith('/estimate') or path in ('/api/advertising/column-widths','/api/advertising/column-preferences','/api/advertising/campaign-refresh','/api/advertising/target-suggestions/ensure','/api/advertising/term-translations','/api/listings/ratings/read'):action='view'
  if path.endswith('/search-actions/suggestions'):action='view'
  if path.startswith('/api/todos/') and path.endswith('/seen'):action='view'
  if keys==[]:return False

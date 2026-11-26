@@ -188,9 +188,9 @@ celery.conf.beat_schedule['payout_dispatch']={'task':'erp.payout_dispatch','sche
 
 
 @celery.task(name='erp.ads_current')
-def ads_current_task(profile_id,token):
+def ads_current_task(profile_id,token,scope=None):
     from .ads_live import run
-    run(profile_id,token)
+    run(profile_id,token,scope)
 
 @celery.task(name='erp.ads_bid_prefetch')
 def ads_bid_prefetch(profile_id,group_ids):

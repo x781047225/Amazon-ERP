@@ -1,8 +1,9 @@
 """Confirmed SP creation workflows. Writes are checkpointed and never replayed automatically."""
 import copy, hashlib, json, re, uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Literal
+from types import SimpleNamespace
 from fastapi import BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
@@ -49,13 +50,52 @@ class Creation(Strict):
     negative_keywords: list[Keyword] = Field(default_factory=list, max_length=1000)
     negative_asins: list[str] = Field(default_factory=list, max_length=1000)
 
+def option_created_at(entity, local_dates):
+    value=(entity.data.get('extendedData') or {}).get('creationDateTime')
+    try:
+        stamp=datetime.fromisoformat(str(value).replace('Z','+00:00'))
+        return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp
+    except (ValueError,TypeError):
+        return local_dates.get((entity.kind,entity.entity_id))
+
 @router.get('/create/options')
-def options(profile_id: str):
+def options(profile_id: str, refresh: bool=False):
+    with Session() as db:profile_checked(db,profile_id)
+    warnings=[]
+    if refresh:
+        from .ads_live import save_current
+        c=None
+        try:
+            c=Client(profile_id)
+            for kind,label in [('campaign','广告活动'),('adgroup','广告组')]:
+                try:
+                    started=now()
+                    save_current(profile_id,kind,c.list(kind),started)
+                except AdsError:
+                    warnings.append(label+'列表暂未刷新，正在显示已保存结果，请稍后刷新列表。')
+        except AdsError:
+            warnings.append('暂时无法读取亚马逊活动列表，正在显示已保存结果。')
+        finally:
+            if c:c.close()
     with Session() as db:
         p=profile_checked(db,profile_id)
-        campaigns=[{'id':e.entity_id,'name':e.name,'targeting':e.data.get('targetingType'),'strategy':e.data.get('dynamicBidding',{}).get('strategy','LEGACY_FOR_SALES'),'state':e.state} for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,AdsEntity.kind=='campaign',AdsEntity.state!='ARCHIVED').order_by(AdsEntity.name))]
-        groups=[{'id':e.entity_id,'campaign_id':e.campaign_id,'name':e.name,'default_bid':e.data.get('defaultBid')} for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,AdsEntity.kind=='adgroup',AdsEntity.state!='ARCHIVED').order_by(AdsEntity.name))]
-        return {'groups':groups,'campaigns':campaigns,'today':datetime.now(ZoneInfo(p.timezone)).date().isoformat(),'currency':p.currency,'timezone':p.timezone}
+        local_dates={}
+        for log in db.scalars(select(AdsChange).where(AdsChange.profile_id==profile_id,AdsChange.kind.in_(['create_campaign','create_adgroup'])).order_by(AdsChange.created_at)):
+            # Only checkpointed, actually created objects qualify; previews do not.
+            for step in (log.before or {}).get('steps',[]):
+                if step.get('kind') in ('campaign','adgroup') and step.get('id'):
+                    local_dates.setdefault((step['kind'],str(step['id'])),log.created_at)
+        def records(kind):
+            result=[]
+            for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,AdsEntity.kind==kind,AdsEntity.state!='ARCHIVED')):
+                created=option_created_at(e,local_dates)
+                row={'id':e.entity_id,'name':e.name,'created_at':created.isoformat() if created else None}
+                if kind=='campaign':row.update(targeting=e.data.get('targetingType'),strategy=e.data.get('dynamicBidding',{}).get('strategy','LEGACY_FOR_SALES'),state=e.state)
+                else:row.update(campaign_id=e.campaign_id,default_bid=e.data.get('defaultBid'))
+                result.append(row)
+            result.sort(key=lambda r:(-datetime.fromisoformat(r['created_at']).timestamp() if r['created_at'] else float('inf'),r['name'],r['id']))
+            return result
+        return {'groups':records('adgroup'),'campaigns':records('campaign'),'warnings':warnings,'today':datetime.now(ZoneInfo(p.timezone)).date().isoformat(),'currency':p.currency,'timezone':p.timezone}
 
 @router.get('/create/advanced-options')
 def advanced_options(profile_id: str):
@@ -70,14 +110,18 @@ def advanced_options(profile_id: str):
 
 def product_rows(db,p):
     ads=list(db.scalars(select(AdsEntity).where(AdsEntity.profile_id==p.id,AdsEntity.kind=='ad')))
-    extra=enrich(db,p,ads);rows={}
+    rows={}
     for e in ads:
         sku=e.data.get('sku')
-        if sku:rows[sku]={'sku':sku,'asin':e.data.get('asin',''),'title':'',**extra.get(e.entity_id,{})}
-    for l in db.scalars(select(Listing).where(Listing.store==p.account,Listing.marketplace==p.country)):
+        if sku:rows[sku]={'sku':sku,'asin':e.data.get('asin',''),'title':''}
+    market='UK' if p.country=='GB' else p.country
+    markets=['UK','GB'] if market=='UK' else [market]
+    # Merge the current listing identity before inventory lookup, including unadvertised SKUs.
+    for l in db.scalars(select(Listing).where(Listing.store==p.account,Listing.marketplace.in_(markets)).order_by(Listing.marketplace==market,Listing.id)):
         old=rows.get(l.sku,{})
         rows[l.sku]={**old,'sku':l.sku,'asin':l.asin or old.get('asin',''),'title':l.title,'image':l.image_url or old.get('image')}
-    return list(rows.values())
+    extra=enrich(db,p,[SimpleNamespace(entity_id=sku,data={'sku':sku,'asin':r['asin']}) for sku,r in rows.items()])
+    return [{**row,**extra.get(sku,{}),'image':row.get('image') or extra.get(sku,{}).get('image')} for sku,row in rows.items()]
 
 @router.get('/create/products')
 def products(profile_id:str,q:str='',page:int=Query(1,ge=1),page_size:int=Query(10,ge=1,le=100),compact:bool=False,adgroup_id:str=''):
