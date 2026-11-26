@@ -477,6 +477,22 @@ def update_document(pk:int,b:UpdateDocument):
   audit(db,'purchase_document_update',str(b.request_id),{'anchor':pk,'request':payload,'response':result})
   return result
 
+class EditOrderLine(Body):
+ request_id:UUID
+ revision:int=Field(ge=1)
+ quantity:int=Field(gt=0,le=100000000,strict=True)
+ unit_cost:Decimal=Field(ge=0,le=100000000,max_digits=18,decimal_places=4)
+ extra_cost:Decimal=Field(ge=0,le=100000000,max_digits=18,decimal_places=4)
+ note:str=Field(default='',max_length=1000)
+@router.post('/orders/{pk}/line')
+def edit_order_line(pk:int,b:EditOrderLine):
+ require_admin()
+ with Session.begin() as db:
+  from .shipping import shipping_lock
+  shipping_lock(db);o=get_order(db,pk,True)
+  status='arrived' if o.received==b.quantity else 'waiting' if o.status=='arrived' else o.status
+  return apply_order_update(db,pk,UpdateOrder(**b.model_dump(),status=status,received=o.received,supplier=o.supplier,expected_date=o.expected_date))
+
 @router.post('/orders/{pk}')
 def update_order(pk:int,b:UpdateOrder):
  require_admin();payload=b.model_dump(mode='json')

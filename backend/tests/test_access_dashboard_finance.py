@@ -214,3 +214,44 @@ def test_demostored_member_authorization_and_admin_only_writes():
  assert c.get('/api/advertising/profiles').status_code==403
  assert c.get('/api/advertising/entities',params={'profile_id':pid}).status_code==403
  assert c.post('/api/advertising/column-preferences',json=prefs,headers=HEAD).status_code==403
+
+
+@pytest.mark.parametrize('remember,seconds',[(None,43200),(False,43200),(True,2592000)])
+def test_login_session_duration_and_cookie(remember,seconds,monkeypatch):
+ import hashlib
+ from app.models import LoginSession
+ auth.bootstrap();at=now();monkeypatch.setattr(auth.m,'now',lambda:at)
+ c=TestClient(app,base_url='https://testserver');body={'username':'admin','password':'test-admin-password'}
+ if remember is not None:body['remember_me']=remember
+ response=c.post('/api/auth/login',json=body,headers=HEAD)
+ assert response.status_code==200
+ cookie=response.headers['set-cookie']
+ assert f'Max-Age={seconds}' in cookie and 'HttpOnly' in cookie and 'SameSite=strict' in cookie and 'Secure' in cookie
+ raw=c.cookies.get(auth.COOKIE);key=hashlib.sha256(raw.encode()).hexdigest()
+ with Session() as db:assert db.get(LoginSession,key).expires_at==at+timedelta(seconds=seconds)
+ monkeypatch.setattr(auth.m,'now',lambda:at+timedelta(seconds=seconds-1))
+ assert c.get('/api/auth/me').status_code==200
+ with Session() as db:assert db.get(LoginSession,key).expires_at==at+timedelta(seconds=seconds)
+ monkeypatch.setattr(auth.m,'now',lambda:at+timedelta(seconds=seconds))
+ assert c.get('/api/auth/me').status_code==401
+
+
+def test_remembered_login_logout_revokes_token():
+ import hashlib
+ from app.models import LoginSession
+ auth.bootstrap();c=TestClient(app)
+ response=c.post('/api/auth/login',json={'username':'admin','password':'test-admin-password','remember_me':True},headers=HEAD)
+ assert response.status_code==200
+ raw=c.cookies.get(auth.COOKIE)
+ assert c.post('/api/auth/logout',json={},headers=HEAD).status_code==200
+ with Session() as db:assert db.get(LoginSession,hashlib.sha256(raw.encode()).hexdigest()) is None
+ c.cookies.set(auth.COOKIE,raw)
+ assert c.get('/api/auth/me').status_code==401
+
+
+def test_remembered_login_rejects_bad_credentials_and_non_boolean():
+ from app.models import LoginSession
+ auth.bootstrap();c=TestClient(app)
+ assert c.post('/api/auth/login',json={'username':'admin','password':'wrong','remember_me':True},headers=HEAD).status_code==401
+ assert c.post('/api/auth/login',json={'username':'admin','password':'test-admin-password','remember_me':'false'},headers=HEAD).status_code==422
+ with Session() as db:assert db.scalar(select(func.count()).select_from(LoginSession))==0

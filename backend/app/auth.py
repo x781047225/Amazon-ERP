@@ -13,6 +13,8 @@ from .settings import STORES, STORE_NAMES
 from .amazon import redis
 principal=ContextVar('erp_principal',default=None)
 COOKIE='erp_session'
+SESSION_SECONDS=12*60*60
+REMEMBER_SESSION_SECONDS=30*24*60*60
 router=APIRouter(prefix='/api')
 def hash_password(value):
     salt=secrets.token_hex(16);digest=hashlib.pbkdf2_hmac('sha256',value.encode(),bytes.fromhex(salt),600000).hex()
@@ -121,6 +123,7 @@ def check_write_scope(db,context,instances):
         if isinstance(row,(ShippingTask,PurchasePlan,PurchaseOrder,ShippingAddress,ShippingLabelProfile,StaTask)) and row.store:require_store(row.store)
 
 class Login(BaseModel):
+    remember_me:bool=Field(default=False,strict=True)
     username:str=Field(min_length=1,max_length=64)
     password:str=Field(min_length=1,max_length=128)
 @router.post('/auth/login')
@@ -134,11 +137,12 @@ def login(body:Login,response:Response,request:Request):
         valid=verify_password(body.password,u.password_hash if u else DUMMY)
         if not u or not valid or not u.active:raise HTTPException(401,'账号或密码不正确')
         token=secrets.token_urlsafe(32)
+        lifetime=REMEMBER_SESSION_SECONDS if body.remember_me else SESSION_SECONDS
         db.execute(delete(m.LoginSession).where(m.LoginSession.expires_at<m.now()))
-        db.add(m.LoginSession(token_hash=hashlib.sha256(token.encode()).hexdigest(),user_id=u.id,current_store=u.default_store,expires_at=m.now()+timedelta(hours=12)))
+        db.add(m.LoginSession(token_hash=hashlib.sha256(token.encode()).hexdigest(),user_id=u.id,current_store=u.default_store,expires_at=m.now()+timedelta(seconds=lifetime)))
         result=public_user(u,u.default_store)
     redis.delete(key)
-    response.set_cookie(COOKIE,token,max_age=43200,httponly=True,samesite='strict',secure=request.url.scheme=='https')
+    response.set_cookie(COOKIE,token,max_age=lifetime,httponly=True,samesite='strict',secure=request.url.scheme=='https')
     return result
 @router.get('/auth/me')
 def me():return principal.get()

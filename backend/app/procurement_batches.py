@@ -14,7 +14,7 @@ from .models import now
 from .shipping import shipping_lock
 
 router=APIRouter(prefix='/api/procurement')
-TITLES={'purchase_plan_batch_create':'创建采购计划','purchase_plan_batch_edit':'编辑采购计划',
+TITLES={'purchase_plan_line_edit':'编辑采购计划明细','purchase_plan_line_delete':'删除采购计划明细','purchase_plan_batch_create':'创建采购计划','purchase_plan_batch_edit':'编辑采购计划',
  'purchase_plan_batch_delete':'删除采购计划','purchase_plan_batch_generate':'生成采购单',
  'purchase_plan_batch_processed':'标记已处理','purchase_plan_dispatch':'生成发货计划','purchase_order_deleted':'删除采购单 / 恢复待处理','purchase_plan_batch_merge':'合并采购计划','purchase_plan_batch_export':'导出采购计划'}
 
@@ -42,12 +42,24 @@ class BatchEdit(Selection):
 
 @router.post('/plan-batches/{code}/update')
 def update_batch(code:str,b:BatchEdit):
+ return update_batch_rows(code,b)
+
+@router.post('/plan-batches/{code}/products/{product_id}/update')
+def update_product_rows(code:str,product_id:int,b:BatchEdit):
+ return update_batch_rows(code,b,product_id)
+
+def update_batch_rows(code,b,product_id=None):
  require_admin()
  with Session.begin() as db:
-  shipping_lock(db);rows=batch_rows(db,code,True);unchanged(rows,b.plans)
+  shipping_lock(db);rows=batch_rows(db,code,True)
+  if product_id is not None:
+   rows=[p for p in rows if p.product_id==product_id]
+   if not rows:raise HTTPException(404,'采购计划明细不存在')
+  unchanged(rows,b.plans)
   from .procurement_flow import ensure_plans_unshipped
   ensure_plans_unshipped(db,[p.id for p in rows])
-  validate_buyer(db,b.buyer,[i.store for i in b.items])
+  if product_id is not None and any(i.product_id!=product_id for i in b.items):raise HTTPException(422,'单行编辑不能替换其他标品')
+  if product_id is None:validate_buyer(db,b.buyer,[i.store for i in b.items])
   ids=[i.id for i in b.items if i.id is not None];by_id={p.id:p for p in rows}
   if len(set(ids))!=len(ids) or not set(ids).issubset(by_id):raise HTTPException(409,'计划明细不属于当前批次或存在重复')
   keys=[(i.product_id,i.store,i.warehouse_id,i.country,i.channel) for i in b.items]
@@ -57,25 +69,38 @@ def update_batch(code:str,b:BatchEdit):
   for item in b.items:
    fields=item.model_dump(exclude={'id','revision','buyer'}|({'note'} if item.id is not None and 'note' not in item.model_fields_set else set()))
    if item.id is None:
-    db.add(Plan(batch_code=code,**fields,buyer=b.buyer,created_by=rows[0].created_by,source='manual'))
+    db.add(Plan(batch_code=code,**fields,buyer=b.buyer if product_id is None else rows[0].buyer,created_by=rows[0].created_by,source='manual'))
    else:
     p=by_id[item.id]
     for k,v in fields.items():setattr(p,k,v)
-    p.buyer=b.buyer;p.revision+=1
+    if product_id is None:p.buyer=b.buyer
+    p.revision+=1
   for p in rows:
    if p.id not in ids:db.delete(p)
   db.flush();after=batch_rows(db,code)
-  audit(db,'purchase_plan_batch_edit',code,{'before':before,'after':snapshot(after),'buyer':b.buyer,'quantity':sum(p.quantity for p in after)})
+  if product_id is not None:after=[p for p in after if p.product_id==product_id]
+  audit(db,'purchase_plan_line_edit' if product_id is not None else 'purchase_plan_batch_edit',code,{'before':before,'after':snapshot(after),'buyer':b.buyer,'quantity':sum(p.quantity for p in after)})
  return {'ok':True,'batch_code':code}
 
 @router.post('/plan-batches/{code}/delete')
 def delete_batch(code:str,b:Selection):
+ return delete_batch_rows(code,b)
+
+@router.post('/plan-batches/{code}/products/{product_id}/delete')
+def delete_product_rows(code:str,product_id:int,b:Selection):
+ return delete_batch_rows(code,b,product_id)
+
+def delete_batch_rows(code,b,product_id=None):
  require_admin()
  with Session.begin() as db:
-  shipping_lock(db);rows=batch_rows(db,code,True);unchanged(rows,b.plans)
+  shipping_lock(db);rows=batch_rows(db,code,True)
+  if product_id is not None:
+   rows=[p for p in rows if p.product_id==product_id]
+   if not rows:raise HTTPException(404,'采购计划明细不存在')
+  unchanged(rows,b.plans)
   from .procurement_flow import ensure_plans_unshipped
   ensure_plans_unshipped(db,[p.id for p in rows])
-  audit(db,'purchase_plan_batch_delete',code,{'before':snapshot(rows),'quantity':sum(p.quantity for p in rows)})
+  audit(db,'purchase_plan_line_delete' if product_id is not None else 'purchase_plan_batch_delete',code,{'before':snapshot(rows),'quantity':sum(p.quantity for p in rows)})
   for p in rows:db.delete(p)
  return {'ok':True}
 

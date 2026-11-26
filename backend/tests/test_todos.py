@@ -478,3 +478,52 @@ def test_edit_validation_reassignment_and_images(users):
     assert edit_task(pk,title='CC cannot edit').status_code==403
     users['id']=1;users['permissions']=['todos.view']
     assert edit_task(pk,title='No write access').status_code==403
+
+
+def test_status_multiselect_union_and_privacy(users):
+    ids=[new(title='Task '+state).json()['id'] for state in ('pending','review','completed','returned')]
+    with Session.begin() as db:
+        for pk,state in zip(ids,('pending','review','completed','returned')):
+            t=db.get(Todo,pk);t.status=state
+            if state=='returned':t.deadline=now()-timedelta(days=1)
+    users['id']=2
+    result=client.get(BASE+'?statuses=pending&statuses=review').json()
+    assert {r['id'] for r in result['items']}==set(ids[:2])
+    result=client.get(BASE+'?statuses=returned&statuses=overdue').json()
+    assert result['total']==1 and result['items'][0]['id']==ids[3]
+    assert client.get(BASE+'?status=completed').json()['total']==1
+    assert client.get(BASE+'?statuses=invalid').status_code==422
+    users['id']=3
+    assert client.get(BASE+'?statuses=pending&statuses=completed').json()['total']==0
+
+
+def test_completion_summary_creation_dates_and_categories(users,monkeypatch):
+    from datetime import datetime,timezone
+    from app import todos
+    fixed=datetime(2026,11,26,4,tzinfo=timezone.utc)
+    monkeypatch.setattr(todos,'now',lambda:fixed)
+    def seed(created,creator=2,assignee=1,status='completed'):
+        with Session.begin() as db:
+            db.add(Todo(title='Count test',description='test',instructions='test',creator_id=creator,assignee_id=assignee,status=status,deadline=fixed,created_at=datetime.fromisoformat(created),completed_at=fixed))
+    seed('2026-11-22T16:00:00+00:00') # Monday midnight in Beijing
+    seed('2026-11-26T15:59:59+00:00',creator=1)
+    seed('2026-11-22T15:59:59+00:00') # Previous week
+    seed('2026-10-31T16:00:00+00:00') # November midnight
+    seed('2026-01-01T00:00:00+00:00')
+    seed('2025-12-31T15:59:59+00:00') # Previous year
+    seed('2026-11-26T10:00:00+00:00',status='review')
+    seed('2026-11-26T10:00:00+00:00',creator=1,assignee=2)
+    seed('2026-11-26T10:00:00+00:00',creator=3,assignee=4)
+    week=client.get(BASE+'/completion-summary?period=week').json()
+    assert week=={'completed':1,'self_completed':1,'start':'2026-11-23','end':'2026-11-29'}
+    assert client.get(BASE+'/completion-summary?period=month').json()['completed']==3
+    assert client.get(BASE+'/completion-summary?period=year').json()['completed']==4
+    custom=client.get(BASE+'/completion-summary?period=custom&start=2026-11-26&end=2026-11-26').json()
+    assert custom['completed']==0 and custom['self_completed']==1
+    users['id']=3
+    assert client.get(BASE+'/completion-summary').json()['completed']==0
+
+
+@pytest.mark.parametrize('query',['period=custom','period=custom&start=2026-11-26&end=2026-11-25','period=custom&start=2026-11-26&end=9999-12-31','period=invalid'])
+def test_completion_summary_invalid_ranges(users,query):
+    assert client.get(BASE+'/completion-summary?'+query).status_code==422

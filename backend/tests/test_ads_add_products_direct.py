@@ -44,6 +44,7 @@ def test_acceptance_idempotency_overlap_and_completion(monkeypatch):
  assert submit(body()).status_code==409
  fn,args=queued[0];fn(*args);fn(*args)
  assert len(writes)==2 and all(p['state']=='ENABLED' for p in writes)
+ assert [(p['sku'],p['asin']) for p in writes]==[('FX-Test','B0TEST0003'),('Second','B0TEST0004')]
  assert status(b).json()['status']=='succeeded'
  assert all(i['status']=='succeeded' for i in status(b).json()['items'])
  assert submit(b).status_code==200 and len(queued)==1

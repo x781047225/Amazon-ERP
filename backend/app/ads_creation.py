@@ -303,7 +303,7 @@ def run_creation(identifier):
             if not campaign or campaign.get('state')=='ARCHIVED':raise AdsError('所属广告活动已归档或不存在')
             existing=c.list('ad',{'adGroupIdFilter':{'include':[gid]}})
             if any(e.get('sku') in {r['sku'] for r in plan['products']} and e.get('state')!='ARCHIVED' for e in existing):raise AdsError('广告组中已存在所选商品，请同步后核对')
-            for product in plan['products']:checkpoint('添加商品 '+product['sku'],'ad',{'campaignId':cid,'adGroupId':gid,'sku':product['sku'],'state':plan['state']})
+            for product in plan['products']:checkpoint('添加商品 '+product['sku'],'ad',{'campaignId':cid,'adGroupId':gid,'sku':product['sku'],**({'asin':product['asin']} if product.get('asin') else {}),'state':plan['state']})
             status='succeeded'
             return
         if plan['mode']=='adgroup':
@@ -333,7 +333,7 @@ def run_creation(identifier):
         for t in plan['targets']:checkpoint('创建商品投放 '+t['asin'],'target',{**base,'expressionType':'MANUAL','expression':[{'type':'ASIN_SAME_AS','value':t['asin']}],'bid':t['bid'] or plan['default_bid']})
         for k in plan['negative_keywords']:checkpoint('创建否定关键词 '+k['text'],'negative_keyword',{**base,'keywordText':k['text'],'matchType':k['match']})
         for asin in plan['negative_asins']:checkpoint('创建否定商品 '+asin,'negative_target',{**base,'expression':[{'type':'ASIN_SAME_AS','value':asin}]})
-        for p in plan['products']:checkpoint('添加商品 '+p['sku'],'ad',{**base,'sku':p['sku']})
+        for p in plan['products']:checkpoint('添加商品 '+p['sku'],'ad',{**base,'sku':p['sku'],**({'asin':p['asin']} if p.get('asin') else {})})
         if plan['state']=='ENABLED':
             checkpoint('开启广告组','adgroup',{'adGroupId':gid,'state':'ENABLED'},False)
             if plan['mode']=='campaign':checkpoint('开启广告活动','campaign',{'campaignId':cid,'state':'ENABLED'},False)

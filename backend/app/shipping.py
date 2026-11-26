@@ -335,6 +335,39 @@ def change(pk:int,b:TaskBody):
   t.items=items;reserve_task(db,t);t.packing_id=None;t.packer='';t.status='pending';t.revision+=1;t.updated_at=now();audit(db,'shipping_change',pk,{'before':before,'after':b.model_dump(mode='json')})
  return {'id':pk}
 class Version(Body):revision:int
+class ItemChange(Version):
+ index:int=Field(ge=0,strict=True)
+ quantity:int=Field(ge=0,le=100000,strict=True)
+
+@router.post('/{pk}/item-change')
+def change_item(pk:int,b:ItemChange):
+ require_admin()
+ with Session.begin() as db:
+  shipping_lock(db);t=get_task(db,pk,True)
+  if b.revision!=t.revision:raise HTTPException(409,'发货计划已变更，请刷新后重试')
+  if b.index>=len(t.items):raise HTTPException(409,'该明细不存在，请刷新后重试')
+  if t.lock_inventory or t.reservations:raise HTTPException(409,'请先释放库存再修改明细')
+  old=t.items[b.index];p=db.get(Packing,t.packing_id) if t.packing_id else None
+  packed=next((i['packed'] for i in p.detail['items'] if i['sku']==old['sku']),0) if p else 0
+  if b.quantity<packed:raise HTTPException(409,'计划数量不能小于已装箱量；删除前请先在装箱单中移除该商品')
+  before=[dict(i) for i in t.items]
+  items=[dict(i,quantity=b.quantity) if n==b.index else dict(i) for n,i in enumerate(t.items) if n!=b.index or b.quantity]
+  if not items:
+   delete_task(db,t)
+  else:
+   resize_allocations(db,t,items);t.items=items
+   if p:
+    from .shipping_files import packing_from_boxes
+    boxes=[dict(box,items=[i for i in box['items'] if i['quantity']>0]) for box in p.detail['boxes']]
+    try:raw,d=packing_from_boxes(t,heading(t),boxes)
+    except ValueError as e:raise HTTPException(422,str(e))
+    snapshot=Packing(task_id=t.id,digest=sha256(raw).hexdigest(),filename=number(t)+'-装箱单.xlsx',content=raw,detail=d,actor=actor());db.add(snapshot);db.flush();t.packing_id=snapshot.id
+    t.status='packed' if not d['remaining'] else 'packing'
+   else:t.status='pending'
+   t.revision+=1;t.updated_at=now()
+  audit(db,'shipping_item_change',t.id,{'before':before,'after':items,'message':f"{'删除' if b.quantity==0 else '修改'}明细 {old['code']} / {old.get('sku','')}：{old['quantity']} → {b.quantity}"})
+ return {'ok':True,'deleted':not items}
+
 @router.post('/{pk}/delete')
 def delete(pk:int,b:Version):
  require_admin()
@@ -442,7 +475,7 @@ def listing(q:str='',store:str='',country:str='',channel:str='',warehouse_id:int
 @router.get('/{pk}/detail')
 def detail(pk:int):
  with Session() as db:return data(db,get_task(db,pk),True)
-LOG_TITLES={'shipping_packing_additions':'通过装箱单新增发货计划','shipping_dispatch_complete':'完成发货','shipping_create':'创建发货计划','shipping_change':'变更发货计划','shipping_merge':'合并发货计划','shipping_delete':'删除发货计划','shipping_packing_download':'下载装箱单','shipping_packing':'上传装箱单','shipping_repack':'删除装箱单','shipping_packing_edit':'编辑装箱单','shipping_release_stock':'释放库存','shipping_remainder':'创建剩货计划','shipping_labels':'打印 FNSKU 标签','shipping_stock_lock':'锁定库存','shipping_stock_unlock':'释放库存','shipping_stock_outbound':'确认发货 / 库存出库','shipping_sta_create':'创建 STA 任务','shipping_sta_action':'提交货件操作','shipping_sta_result':'货件操作结果','shipping_box_labels':'下载箱子标签','shipping_manual_outbound':'出库','shipping_stock_return':'撤销出库 / 恢复可用库存','shipping_sta_delete':'删除货件和费用','shipping_sta_complete':'货件追踪完成'}
+LOG_TITLES={'shipping_item_change':'修改发货计划明细','shipping_packing_additions':'通过装箱单新增发货计划','shipping_dispatch_complete':'完成发货','shipping_create':'创建发货计划','shipping_change':'变更发货计划','shipping_merge':'合并发货计划','shipping_delete':'删除发货计划','shipping_packing_download':'下载装箱单','shipping_packing':'上传装箱单','shipping_repack':'删除装箱单','shipping_packing_edit':'编辑装箱单','shipping_release_stock':'释放库存','shipping_remainder':'创建剩货计划','shipping_labels':'打印 FNSKU 标签','shipping_stock_lock':'锁定库存','shipping_stock_unlock':'释放库存','shipping_stock_outbound':'确认发货 / 库存出库','shipping_sta_create':'创建 STA 任务','shipping_sta_action':'提交货件操作','shipping_sta_result':'货件操作结果','shipping_box_labels':'下载箱子标签','shipping_manual_outbound':'出库','shipping_stock_return':'撤销出库 / 恢复可用库存','shipping_sta_delete':'删除货件和费用','shipping_sta_complete':'货件追踪完成'}
 @router.get('/{pk}/logs')
 def logs(pk:int,page:int=Query(1,ge=1),page_size:int=Query(100,ge=1,le=100)):
  with Session() as db:

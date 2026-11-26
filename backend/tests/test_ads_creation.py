@@ -22,6 +22,7 @@ def fake(monkeypatch,fail=None,unknown=False,parent_changed=False,missing_auto=F
    if kind=='target':return [] if missing_auto else [{'targetId':str(i+20),'adGroupId':'11','campaignId':'10','expression':[{'type':k}],'expressionType':'AUTO','state':'ENABLED'} for i,k in enumerate(creation.AUTO)]
    return []
   def update_one(self,kind,payload,create=False):
+   if kind=='ad':assert payload.get('asin')=='B0TEST0003', 'ASIN cannot be empty'
    calls.append((kind,deepcopy(payload),create))
    if kind==fail:raise (AdsUnknown if unknown else AdsError)('模拟失败')
    eid={'campaign':'10','adgroup':'11','ad':'12','keyword':'13','negative_keyword':'14','negative_target':'15','target':'16'}[kind]
@@ -45,7 +46,7 @@ def test_preview_read_only_and_complete_auto_flow(monkeypatch):
  targets=[p for k,p,c in calls if k=='target'];assert len(targets)==4 and targets[0]['bid']==.3 and targets[-1]['state']=='PAUSED'
  assert [k for k,p,c in calls[-2:]]==['adgroup','campaign']
  assert calls[-1][1]['state']=='ENABLED'
- ad=next(p for k,p,c in calls if k=='ad');assert 'asin' not in ad and ad['sku']=='FX-Test'
+ ad=next(p for k,p,c in calls if k=='ad');assert ad['asin']=='B0TEST0003' and ad['sku']=='FX-Test'
  assert confirm(id).status_code==409 and preview().status_code==409
  with Session() as db:
   assert db.get(AdsEntity,(PID,'campaign','10')).state=='ENABLED'
@@ -136,3 +137,18 @@ def test_same_keyword_different_matches_allowed_duplicate_rejected(monkeypatch):
  b['keywords'].append({'text':'GIFT BOX','match':'EXACT','bid':.3})
  assert preview(b).status_code==422
  assert not calls
+
+@pytest.mark.parametrize('asin',['B0TEST0003',''])
+def test_product_ad_transport_preserves_identifiers(asin):
+ from types import SimpleNamespace
+ from app.ads_client import Client
+ c=Client.__new__(Client);c.endpoint='https://ads.test';c.profile='test';c.credentials={'client_id':'test'};c.token=lambda:'fake';calls=[]
+ def request(method,url,**kw):
+  calls.append((method,url,kw))
+  return SimpleNamespace(ok=True,status_code=207,json=lambda:{'productAds':{'success':[{'adId':'12'}],'error':[]}})
+ c.session=SimpleNamespace(request=request)
+ payload={'campaignId':'10','adGroupId':'11','sku':'FX-Test','state':'ENABLED',**({'asin':asin} if asin else {})}
+ assert c.update_one('ad',payload,True)['adId']=='12'
+ assert len(calls)==1 and calls[0][:2]==('POST','https://ads.test/sp/productAds')
+ assert calls[0][2]['json']=={'productAds':[payload]}
+ with pytest.raises(AdsError):c.update_one('ad',{'adId':'12','asin':'B0TEST0003'})

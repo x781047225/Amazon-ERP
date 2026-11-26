@@ -1,5 +1,6 @@
 """Tasks are visible only to their creator, assignee and CC recipients, including images."""
-from datetime import datetime,timedelta
+from datetime import date,datetime,time,timedelta
+from zoneinfo import ZoneInfo
 from typing import Literal
 from uuid import uuid4
 import io,warnings,json
@@ -102,14 +103,33 @@ def summary():
         count=lambda *filters:db.scalar(select(func.count()).select_from(Todo).where(involved(uid),*filters))
         return {'unread':count(unseen(uid)),'review':count(Todo.creator_id==uid,Todo.status=='review'),'pending':count(Todo.assignee_id==uid,Todo.status.in_(['pending','in_progress','returned'])),'overdue':count(Todo.status.notin_(['completed','cancelled']),Todo.deadline<now()),'initiated_unread':count(Todo.creator_id==uid,Todo.creator_seen<Todo.version),'assigned_unread':count(Todo.assignee_id==uid,Todo.assignee_seen<Todo.version),'copied_unread':count(copied(uid),unseen(uid))}
 
+@router.get('/completion-summary')
+def completion_summary(period:Literal['week','month','year','custom']='week',start:date|None=None,end:date|None=None):
+    uid=actor();zone=ZoneInfo('Asia/Shanghai');today=now().astimezone(zone).date()
+    if period=='custom':
+        if start is None or end is None or start>end or end==date.max:raise HTTPException(422,'请选择有效的起止日期')
+    elif period=='week':
+        start=today-timedelta(days=today.weekday());end=start+timedelta(days=6)
+    elif period=='month':
+        start=today.replace(day=1);end=(start.replace(year=start.year+1,month=1) if start.month==12 else start.replace(month=start.month+1))-timedelta(days=1)
+    else:start=today.replace(month=1,day=1);end=today.replace(month=12,day=31)
+    lower=datetime.combine(start,time.min,zone);upper=datetime.combine(end+timedelta(days=1),time.min,zone)
+    with Session() as db:
+        completed,self_completed=db.execute(select(func.count().filter(Todo.creator_id!=uid),func.count().filter(Todo.creator_id==uid)).where(Todo.assignee_id==uid,Todo.status=='completed',Todo.created_at>=lower,Todo.created_at<upper)).one()
+    return {'completed':completed,'self_completed':self_completed,'start':start.isoformat(),'end':end.isoformat()}
+
 @router.get('')
-def listing(view:Literal['initiated','assigned','copied','completed']='assigned',status:Literal['','pending','in_progress','review','returned','completed','cancelled','overdue']='',q:str=Query('',max_length=200),sort:Literal['priority_desc','deadline_desc','updated_desc']='priority_desc',page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100),store:str=Query('',max_length=40)):
+def listing(view:Literal['initiated','assigned','copied','completed']='assigned',status:Literal['','pending','in_progress','review','returned','completed','cancelled','overdue']='',q:str=Query('',max_length=200),sort:Literal['priority_desc','deadline_desc','updated_desc']='priority_desc',page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100),store:str=Query('',max_length=40),statuses:list[Literal['pending','in_progress','review','returned','completed','cancelled','overdue']]=Query(default=[])):
     uid=actor();filters=[Todo.creator_id==uid if view=='initiated' else Todo.assignee_id==uid if view=='assigned' else copied(uid) if view=='copied' else involved(uid)]
     if store:
         require_store(store);filters.append(Todo.store==store)
     if view=='completed':filters.append(Todo.status=='completed')
-    if status=='overdue':filters.extend([Todo.status.notin_(['completed','cancelled']),Todo.deadline<now()])
-    elif status:filters.append(Todo.status==status)
+    selected=set(statuses)|({status} if status else set())
+    if selected:
+        conditions=[]
+        if selected-{'overdue'}:conditions.append(Todo.status.in_(selected-{'overdue'}))
+        if 'overdue' in selected:conditions.append(and_(Todo.status.notin_(['completed','cancelled']),Todo.deadline<now()))
+        filters.append(or_(*conditions))
     if q:filters.append(Todo.title.ilike('%'+q.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%',escape='\\'))
     with Session() as db:
         total=db.scalar(select(func.count()).select_from(Todo).where(*filters))

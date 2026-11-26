@@ -221,23 +221,33 @@ def delete_document(pk:int,b:DeleteDocument):
  with Session.begin() as db:
   shipping_lock(db);lines=document_lines(db,pk,True);versions={x.id:x.revision for x in b.items}
   if len(versions)!=len(b.items) or versions!={o.id:o.revision for o in lines}:raise HTTPException(409,'采购单已变更，请刷新后重试')
-  ids={o.id for o in lines}
-  if any(o.received for o in lines):raise HTTPException(409,'采购单已有到货，不能删除')
-  from .shipping import planned_by_order
-  planned=planned_by_order(db)
-  if any(planned.get(pk,0)>0 for pk in ids):raise HTTPException(409,'采购单已计划数量不为0，请先删除对应发货计划')
-  from .warehouse_models import StockLot
-  for o in lines:
-   if o.pending_lot_id:
-    lot=db.get(StockLot,o.pending_lot_id)
-    if lot:lot.pending=0
-   o.deleted_at=now();o.revision+=1;db.add(Event(request_id=str(uuid4()),order_id=o.id,actor=actor(),kind='deleted',detail={'number':order_number(o)}))
-  plans=list(db.scalars(select(Plan).where(Plan.order_id.in_(ids)).with_for_update()))
-  for p in plans:p.order_id=None;p.revision+=1
-  for code in {p.batch_code for p in plans}:audit(db,'purchase_order_deleted',code,{'order_numbers':list(dict.fromkeys(order_number(o) for o in lines)),'plan_ids':[p.id for p in plans if p.batch_code==code],'message':'删除未到货且未生成发货计划的采购单，来源恢复待处理'})
-  audit(db,'purchase_document_delete',order_number(lines[0]),{'order_ids':sorted(ids),'plan_ids':[p.id for p in plans]})
- return {'ok':True}
+  return delete_order_lines(db,lines)
 
+@router.post('/orders/{pk}/line-delete')
+def delete_order_line(pk:int,b:PlanVersion):
+ require_admin()
+ with Session.begin() as db:
+  shipping_lock(db);line=get_order(db,pk,True)
+  if b.id!=pk or line.revision!=b.revision:raise HTTPException(409,'采购明细已变更，请刷新后重试')
+  return delete_order_lines(db,[line])
+
+def delete_order_lines(db,lines):
+ ids={o.id for o in lines}
+ if any(o.received for o in lines):raise HTTPException(409,'采购单已有到货，不能删除')
+ from .shipping import planned_by_order
+ planned=planned_by_order(db)
+ if any(planned.get(pk,0)>0 for pk in ids):raise HTTPException(409,'采购单已计划数量不为0，请先删除对应发货计划')
+ from .warehouse_models import StockLot
+ for o in lines:
+  if o.pending_lot_id:
+   lot=db.get(StockLot,o.pending_lot_id)
+   if lot:lot.pending=0
+  o.deleted_at=now();o.revision+=1;db.add(Event(request_id=str(uuid4()),order_id=o.id,actor=actor(),kind='deleted',detail={'number':order_number(o)}))
+ plans=list(db.scalars(select(Plan).where(Plan.order_id.in_(ids)).with_for_update()))
+ for p in plans:p.order_id=None;p.revision+=1
+ for code in {p.batch_code for p in plans}:audit(db,'purchase_order_deleted',code,{'order_numbers':list(dict.fromkeys(order_number(o) for o in lines)),'plan_ids':[p.id for p in plans if p.batch_code==code],'message':'删除未到货且未生成发货计划的采购单，来源恢复待处理'})
+ audit(db,'purchase_document_delete',order_number(lines[0]),{'order_ids':sorted(ids),'plan_ids':[p.id for p in plans]})
+ return {'ok':True}
 HEADERS=['标品编码','仓库','店铺','采购数量',*ROUTES.values(),'预计到货时间','供应商','采购单价','其他费用']
 @router.get('/import/template')
 def import_template():
