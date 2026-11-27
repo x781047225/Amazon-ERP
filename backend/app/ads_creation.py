@@ -80,18 +80,19 @@ def options(profile_id: str, refresh: bool=False):
     with Session() as db:
         p=profile_checked(db,profile_id)
         local_dates={}
-        for log in db.scalars(select(AdsChange).where(AdsChange.profile_id==profile_id,AdsChange.kind.in_(['create_campaign','create_adgroup'])).order_by(AdsChange.created_at)):
-            # Only checkpointed, actually created objects qualify; previews do not.
-            for step in (log.before or {}).get('steps',[]):
-                if step.get('kind') in ('campaign','adgroup') and step.get('id'):
-                    local_dates.setdefault((step['kind'],str(step['id'])),log.created_at)
+        # Creation plans can contain every SKU/keyword. Project only step identities and dates.
+        for kind,identifier,created in db.execute(text("SELECT step->>'kind',step->>'id',min(created_at) FROM ads_changes, LATERAL jsonb_array_elements(COALESCE(\"before\"->'steps','[]'::jsonb)) step WHERE profile_id=:profile AND kind IN ('create_campaign','create_adgroup') AND step->>'kind' IN ('campaign','adgroup') AND COALESCE(step->>'id','')<>'' GROUP BY step->>'kind',step->>'id'"),{'profile':profile_id}):
+            local_dates[(kind,identifier)]=created
         def records(kind):
             result=[]
-            for e in db.scalars(select(AdsEntity).where(AdsEntity.profile_id==profile_id,AdsEntity.kind==kind,AdsEntity.state!='ARCHIVED')):
-                created=option_created_at(e,local_dates)
-                row={'id':e.entity_id,'name':e.name,'created_at':created.isoformat() if created else None}
-                if kind=='campaign':row.update(targeting=e.data.get('targetingType'),strategy=e.data.get('dynamicBidding',{}).get('strategy','LEGACY_FOR_SALES'),state=e.state)
-                else:row.update(campaign_id=e.campaign_id,default_bid=e.data.get('defaultBid'))
+            fields=select(AdsEntity.entity_id,AdsEntity.name,AdsEntity.state,AdsEntity.campaign_id,
+                AdsEntity.data['extendedData']['creationDateTime'].as_string(),
+                AdsEntity.data['targetingType'].as_string(),AdsEntity.data['dynamicBidding']['strategy'].as_string(),AdsEntity.data['defaultBid'])
+            for identifier,name,state,campaign_id,created_at,targeting,strategy,default_bid in db.execute(fields.where(AdsEntity.profile_id==profile_id,AdsEntity.kind==kind,AdsEntity.state!='ARCHIVED')):
+                created=option_created_at(SimpleNamespace(kind=kind,entity_id=identifier,data={'extendedData':{'creationDateTime':created_at}}),local_dates)
+                row={'id':identifier,'name':name,'created_at':created.isoformat() if created else None}
+                if kind=='campaign':row.update(targeting=targeting,strategy=strategy or 'LEGACY_FOR_SALES',state=state)
+                else:row.update(campaign_id=campaign_id,default_bid=default_bid)
                 result.append(row)
             result.sort(key=lambda r:(-datetime.fromisoformat(r['created_at']).timestamp() if r['created_at'] else float('inf'),r['name'],r['id']))
             return result
@@ -137,11 +138,8 @@ def products(profile_id:str,q:str='',page:int=Query(1,ge=1),page_size:int=Query(
                 result['existing_skus']=sorted(s for s in existing if s)
                 for row in result['rows']:row['existing_in_group']=row['sku'] in existing
             return result
-        rows=product_rows(db,profile)
-    needle=q.strip().casefold()
-    rows=[r for r in rows if not needle or any(needle in str(r.get(k) or '').casefold() for k in ['sku','asin','fnsku','title','product_name'])]
-    rows.sort(key=lambda r:r['sku'])
-    return {'rows':rows[(page-1)*page_size:page*page_size],'total':len(rows)}
+        from .ads_product_picker import products_page
+        return products_page(db,profile,q,page,page_size,full=True)
 
 class ResolveProducts(Strict):
     profile_id:str

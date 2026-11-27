@@ -20,7 +20,7 @@ def setup(monkeypatch,bid=.25,default=.4):
  monkeypatch.setattr(w,'Client',Fake)
  return data,writes
 
-def preview(kind='campaign',**kw):return client.post('/api/advertising/edit/preview',headers=HEAD,json={'profile_id':PID,'kind':kind,'entity_id':{'campaign':'1','keyword':'6','target':'7'}[kind],**kw})
+def preview(kind='campaign',**kw):return client.post('/api/advertising/edit/preview',headers=HEAD,json={'profile_id':PID,'kind':kind,'entity_id':{'campaign':'1','adgroup':'3','keyword':'6','target':'7'}[kind],**kw})
 def confirm(id,**kw):return client.post('/api/advertising/edit/confirm',headers=HEAD,json={'id':id,**kw})
 @pytest.mark.parametrize('kind,field,direction,pct,expected',[('campaign','dailyBudget','increase',10,8.09),('campaign','dailyBudget','decrease',20,5.88),('keyword','bid','increase',10,.28),('target','bid','decrease',20,.2)])
 def test_percent_from_current_remote_and_confirm(monkeypatch,kind,field,direction,pct,expected):
@@ -44,7 +44,7 @@ def test_inherited_bid_rechecked_and_missing_invalid(monkeypatch):
  assert preview(changes={'dailyBudget':3},percentage={'field':'dailyBudget','direction':'increase','percent':10}).status_code==422
 
 
-@pytest.mark.parametrize('kind',['campaign','keyword','target'])
+@pytest.mark.parametrize('kind',['campaign','adgroup','keyword','target'])
 def test_archive_requires_second_acknowledgement_and_actor(monkeypatch,kind):
  remote,writes=setup(monkeypatch);r=preview(kind,changes={'state':'ARCHIVED'});assert r.status_code==200,r.text
  id=r.json()['id'];assert confirm(id).status_code==422 and not writes
@@ -53,3 +53,22 @@ def test_archive_requires_second_acknowledgement_and_actor(monkeypatch,kind):
  assert writes[0][1]['state']=='ARCHIVED'
  with Session() as db:assert db.get(AdsChange,id).actor=='test-admin'
  assert confirm(id,acknowledge_archive=True).status_code==409
+
+
+def test_adgroup_bulk_archive_requires_ack_and_updates_cache(monkeypatch):
+ import uuid
+ from fastapi import BackgroundTasks
+ from app.models import AdsEntity
+ remote,writes=setup(monkeypatch);queued=[]
+ monkeypatch.setattr(BackgroundTasks,'add_task',lambda self,fn,*args,**kw:queued.append((fn,args)))
+ r=preview('adgroup',changes={'state':'ARCHIVED'});assert r.status_code==200,r.text
+ body={'request_id':str(uuid.uuid4()),'ids':[r.json()['id']]}
+ assert client.post('/api/advertising/edit/bulk-submit',headers=HEAD,json=body).status_code==422
+ assert not queued and not writes
+ body['acknowledge_archive']=True
+ r=client.post('/api/advertising/edit/bulk-submit',headers=HEAD,json=body);assert r.status_code==200,r.text
+ assert r.json()['items'][0]['kind']=='adgroup' and not writes
+ fn,args=queued[0];fn(*args);fn(*args)
+ assert writes==[('adgroup',{'adGroupId':'3','state':'ARCHIVED'})]
+ with Session() as db:assert db.get(AdsEntity,(PID,'adgroup','3')).state=='ARCHIVED'
+ assert client.get('/api/advertising/edit/bulk-status/'+body['request_id']).json()['status']=='succeeded'

@@ -86,3 +86,28 @@ def test_creation_uses_current_listing_asin_inventory_and_uk_alias():
  # Existing ad points at an older ASIN; never attach its old stock to the current listing.
  r=client.get('/api/advertising/create/products',params={'profile_id':PID,'q':'FX-Test'}).json()
  assert r['total']==1 and r['rows'][0]['asin']=='B0CURRENT1' and r['rows'][0]['available']==12
+
+
+def test_full_picker_enriches_only_page_and_searches_title_alias_inventory(monkeypatch):
+ from app import ads_workspace
+ from app.models import StoreInventory,now
+ seed()
+ with Session.begin() as db:
+  for i in range(30):
+   row=listing('DemoStoreD','FR',f'page-{i:02d}')
+   row.title='独特标题' if i==17 else '普通标题'
+   row.listing_data={}
+   db.add(row)
+  db.add(LocalProduct(code='canonical',name='别名商品',source={'normalization':{'aliases':['page-17']}}))
+  db.add(StoreInventory(store='DemoStoreD',status='succeeded',data={'FR':{'synced_at':now().isoformat(),'rows':[{'sellerSku':'page-17','asin':'B0TEST0003','fnSku':'INVENTORY-ONLY','inventoryDetails':{'fulfillableQuantity':23}}]}}))
+ calls=[];original=ads_workspace.enrich
+ def limited(db,p,ads):
+  ads=list(ads);calls.append([a.data['sku'] for a in ads]);assert len(ads)<=5
+  return original(db,p,ads)
+ monkeypatch.setattr(ads_workspace,'enrich',limited)
+ def full(**kwargs):return client.get('/api/advertising/create/products',params={'profile_id':PID,'page_size':5,**kwargs}).json()
+ page=full(q='page-',page=2);assert page['total']==30 and calls[-1]==[f'page-{i:02d}' for i in range(5,10)]
+ for needle in ['独特标题','别名商品','INVENTORY-ONLY']:
+  result=full(q=needle);assert result['total']==1 and result['rows'][0]['sku']=='page-17'
+  assert result['rows'][0]['available']==23
+ count=len(calls);assert full(q='absent')['total']==0 and len(calls)==count

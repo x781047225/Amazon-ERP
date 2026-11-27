@@ -10,10 +10,10 @@ from app.models import AdsEntity
 from test_advertising import seed,save_entities,PID,client
 HEAD={'x-erp-client':'web'}
 
-@pytest.mark.parametrize('kind,id_field,filter_key',[('ad','adId','adIdFilter'),('negative_keyword','keywordId','negativeKeywordIdFilter'),('negative_target','targetId','negativeTargetIdFilter')])
+@pytest.mark.parametrize('kind,id_field,filter_key',[('adgroup','adGroupId','adGroupIdFilter'),('ad','adId','adIdFilter'),('negative_keyword','keywordId','negativeKeywordIdFilter'),('negative_target','targetId','negativeTargetIdFilter')])
 @pytest.mark.parametrize('state',['ENABLED','PAUSED','ARCHIVED'])
 def test_negative_state_preview_confirm_and_cache(monkeypatch,kind,id_field,filter_key,state):
- seed();remote={id_field:'55','campaignId':'1','adGroupId':'3','state':'PAUSED' if state=='ENABLED' else 'ENABLED'};save_entities(PID,kind,[remote]);writes=[]
+ seed();remote={'campaignId':'1','adGroupId':'3',id_field:'55','state':'PAUSED' if state=='ENABLED' else 'ENABLED'};save_entities(PID,kind,[remote]);writes=[]
  class Fake:
   def __init__(self,*a):pass
   def close(self):pass
@@ -33,7 +33,7 @@ def test_negative_state_preview_confirm_and_cache(monkeypatch,kind,id_field,filt
  assert client.post('/api/advertising/edit/confirm',headers=HEAD,json=body).status_code==409
 
 @pytest.mark.parametrize('kind,id_field,filter_key',[
- ('ad','adId','adIdFilter'),('campaign','campaignId','campaignIdFilter'),('keyword','keywordId','keywordIdFilter'),('target','targetId','targetIdFilter'),
+ ('adgroup','adGroupId','adGroupIdFilter'),('ad','adId','adIdFilter'),('campaign','campaignId','campaignIdFilter'),('keyword','keywordId','keywordIdFilter'),('target','targetId','targetIdFilter'),
  ('negative_keyword','keywordId','negativeKeywordIdFilter'),('negative_target','targetId','negativeTargetIdFilter')])
 def test_archive_adapter_uses_dedicated_endpoint(kind,id_field,filter_key):
  c=Client.__new__(Client);c.endpoint='https://ads.test';c.profile='demo';c.credentials={'client_id':'demo'};c.token=lambda:'fake';calls=[]
@@ -53,3 +53,13 @@ def test_archive_adapter_uses_dedicated_endpoint(kind,id_field,filter_key):
 def test_archive_does_not_drop_other_changes():
  c=Client.__new__(Client)
  with pytest.raises(AdsError,match='单独提交'):c.update_one('keyword',{'keywordId':'55','state':'ARCHIVED','bid':.3})
+
+
+def test_adgroup_archive_rejects_mixed_changes_before_remote_read(monkeypatch):
+ def unexpected(*a):raise AssertionError('must reject before remote access')
+ monkeypatch.setattr(w,'Client',unexpected)
+ for changes in ({'state':'ARCHIVED','name':'renamed'},{'state':'ARCHIVED','defaultBid':.3}):
+  r=client.post('/api/advertising/edit/preview',headers=HEAD,json={'profile_id':PID,'kind':'adgroup','entity_id':'55','changes':changes})
+  assert r.status_code==422 and '单独提交' in r.text
+ c=Client.__new__(Client)
+ with pytest.raises(AdsError,match='单独提交'):c.update_one('adgroup',{'adGroupId':'55','state':'ARCHIVED','defaultBid':.3})

@@ -7,7 +7,8 @@ from typing import Literal
 from collections import defaultdict
 from fastapi import HTTPException,Query,Depends,BackgroundTasks
 from pydantic import BaseModel,Field
-from sqlalchemy import select,or_,and_,func,text
+from sqlalchemy import select,or_,and_,func,text,cast,Text
+from sqlalchemy.dialects.postgresql import ARRAY
 from .advertising import router,IDS,REPORTS,defaults,valid_dates,profile_checked,save_entities,patch_job,num,ratios,empty_metrics
 from .ads_client import Client,AdsError,AdsUnknown
 from .models import AdsDay,AdsChange,AdsEntity,AdsSync,AdsProfile,Listing,LocalProduct,ProductLink,now
@@ -120,7 +121,7 @@ def fnskus(value):
  return out
 
 def enrich(db,profile,ads):
- from .models import StoreInventory,ListingInventory
+ from .models import ListingInventory
  ads=list(ads);skus={a.data.get('sku') for a in ads if a.data.get('sku')};result={}
  # Country inventory snapshots describe overlapping European pools: select one, never sum them.
  europe=['DE','FR','IT','ES','NL','BE','PL','SE','IE']
@@ -130,14 +131,14 @@ def enrich(db,profile,ads):
  for l,p,inv in listings:bysku[l.sku].append((l,p,inv))
  # Exact, unambiguous old local product codes are valid aliases; never guess by removing prefixes.
  aliases=defaultdict(dict)
- for p in db.scalars(select(LocalProduct).where(LocalProduct.archived==0)):
+ for p in db.scalars(select(LocalProduct).where(LocalProduct.archived==0,or_(LocalProduct.code.in_(skus),LocalProduct.source['normalization']['aliases'].has_any(cast(list(skus),ARRAY(Text)))))):
   for code in [p.code,*p.source.get('normalization',{}).get('aliases',[])]:
    if code in skus:aliases[code][p.id]=p
- snapshot=db.get(StoreInventory,profile.account);stock=defaultdict(list)
- for market in markets:
-  data=(snapshot.data or {}).get(market,{}) if snapshot else {}
-  for item in data.get('rows',[]):
-   if item.get('sellerSku') in skus:stock[item['sellerSku']].append((market,item,data.get('synced_at')))
+ stock=defaultdict(list)
+ if skus:
+  # Transfer only the requested SKUs, not the store's entire regional JSON snapshots.
+  inventory_rows=db.execute(text("SELECT m.key AS market,item,m.value->>'synced_at' AS at FROM store_inventory, LATERAL jsonb_each(data) m, LATERAL jsonb_array_elements(m.value->'rows') item WHERE store=:store AND m.key=ANY(:markets) AND item->>'sellerSku'=ANY(:skus)"),{'store':profile.account,'markets':markets,'skus':list(skus)})
+  for market,item,at in inventory_rows:stock[item['sellerSku']].append((market,item,at))
  for a in ads:
   sku=a.data.get('sku');asin=a.data.get('asin');candidates=[x for x in bysku[sku] if x[0].asin==asin]
   candidates.sort(key=lambda x:(x[0].marketplace!=profile.country,markets.index(x[0].marketplace)))
@@ -182,7 +183,8 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
  if level not in [*KINDS,'search','logs','placement']:raise HTTPException(422,'无效的广告页面')
  if entity_filter not in ['', 'auto','keyword','product','negative_keyword','negative_product']:raise HTTPException(422,'无效的投放分类')
  if entity_filter and level!=('negative' if entity_filter.startswith('negative') else 'target'):raise HTTPException(422,'投放分类与页面不匹配')
- if search_type not in ['all','sku','asin','fnsku','product_name','name']:raise HTTPException(422,'无效的搜索类型')
+ if search_type not in ['all','sku','asin','fnsku','product_name','name','search_term']:raise HTTPException(422,'无效的搜索类型')
+ if search_type=='search_term' and level!='search':raise HTTPException(422,'用户搜索词筛选仅适用于用户搜索词页面')
  start,end=start or defaults()[0],end or defaults()[1];valid_dates(start,end)
  with Session() as db:
   profile=profile_checked(db,profile_id)
@@ -194,7 +196,7 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
   if level=='logs':needed.update(IDS)
   if level=='search':needed.add('keyword')
   if level in ('target','search'):needed.add('negative_keyword')
-  if needle and search_type!='name':needed.add('ad')
+  if needle and search_type not in ('name','search_term'):needed.add('ad')
   scopes=[]
   for kind in needed:
    terms=[AdsEntity.kind==kind]
@@ -236,6 +238,7 @@ def workspace(profile_id:str,level:str='campaign',campaign_id:str='',adgroup_id:
    if not state_matches(row.get('state'),state):return False
    if match_filter and row.get('match_type') not in match_filter:return False
    if not needle:return True
+   if search_type=='search_term':return needle in str(row.get('name') or '').casefold()
    name_match=search_type in ['all','name'] and needle in ' '.join(str(row.get(k) or '') for k in ['name','campaign_name','adgroup_name']).casefold()
    if name_match:return True
    if level=='ad':return row['id'] in matching_ads
@@ -362,7 +365,8 @@ def workspace_overview(store:str,country:str='',level:str='campaign',q:str='',se
  if level not in [*KINDS,'search','logs','placement']:raise HTTPException(422,'无效的广告页面')
  if entity_filter not in ['', 'auto','keyword','product','negative_keyword','negative_product']:raise HTTPException(422,'无效的投放分类')
  if entity_filter and level!=('negative' if entity_filter.startswith('negative') else 'target'):raise HTTPException(422,'投放分类与页面不匹配')
- if search_type not in ['all','sku','asin','fnsku','product_name','name']:raise HTTPException(422,'无效的搜索类型')
+ if search_type not in ['all','sku','asin','fnsku','product_name','name','search_term']:raise HTTPException(422,'无效的搜索类型')
+ if search_type=='search_term' and level!='search':raise HTTPException(422,'用户搜索词筛选仅适用于用户搜索词页面')
  start,end=start or defaults()[0],end or defaults()[1];valid_dates(start,end)
  with Session() as db:
   profiles=list(db.scalars(select(AdsProfile).where(AdsProfile.account==store).order_by(AdsProfile.country,AdsProfile.id)))
@@ -415,12 +419,13 @@ def clean_changes(body):
  if body.kind=='campaign':validate_campaign(changes)
  if body.kind not in allowed or not changes or not set(changes)<=allowed[body.kind]:raise HTTPException(422,'修改字段不支持')
  for k,v in changes.items():
-  if k=='state' and (v not in ['ENABLED','PAUSED','ARCHIVED'] or (v=='ARCHIVED' and body.kind not in ['campaign','ad','keyword','target','negative_keyword','negative_target'])):raise HTTPException(422,'当前对象不支持此状态')
+  if k=='state' and (v not in ['ENABLED','PAUSED','ARCHIVED'] or (v=='ARCHIVED' and body.kind not in ['campaign','adgroup','ad','keyword','target','negative_keyword','negative_target'])):raise HTTPException(422,'当前对象不支持此状态')
   if k in ['bid','defaultBid']:
    if isinstance(v,bool) or not isinstance(v,(int,float)) or not Decimal(str(v)).is_finite() or not 0<float(v)<=10000:raise HTTPException(422,'竞价须大于0且不超过10000')
   if k in ['name','keywordText'] and (not isinstance(v,str) or not v.strip() or len(v)>250):raise HTTPException(422,'名称或关键词须为1至250个字符')
   if k=='matchType' and v not in ['NEGATIVE_EXACT','NEGATIVE_PHRASE']:raise HTTPException(422,'请选择否定精准或否定词组')
   if k=='asin' and (not isinstance(v,str) or not re.fullmatch('[A-Z0-9]{10}',v)):raise HTTPException(422,'请输入10位ASIN')
+ if changes.get('state')=='ARCHIVED' and set(changes)!={'state'}:raise HTTPException(422,'归档请单独提交，不能同时修改其他字段')
  if body.create and set(changes)!=allowed[body.kind]:raise HTTPException(422,'请填写完整否定条件')
  return {k:v.strip() if isinstance(v,str) else v for k,v in changes.items()}
 def remote_one(c,kind,eid):

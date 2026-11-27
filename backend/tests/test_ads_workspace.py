@@ -219,3 +219,23 @@ def test_scoped_group_enrichment_and_target_counts(monkeypatch):
  assert not captured
  groups=query(level='adgroup',adgroup_id='3').json()['rows']
  assert len(groups)==1 and groups[0]['product_count']==1 and groups[0]['target_count']==1
+
+
+def test_search_term_filter_does_not_expand_matches_from_sku_or_group(monkeypatch):
+ seed()
+ save_entities(PID,'ad',[{'adId':'4','campaignId':'1','adGroupId':'3','state':'ENABLED','sku':'YS-Ribbon-Red','asin':'B0TEST0003'}])
+ save_entities(PID,'adgroup',[{'adGroupId':'3','campaignId':'1','state':'ENABLED','name':'Red ribbon group','defaultBid':.2}])
+ d=date(2026,10,24)
+ persist_days(PID,'search',d,d,[{'date':str(d),'campaignId':'1','adGroupId':'3','keywordId':'5','searchTerm':term,'cost':i+1,'clicks':i+2,'sales7d':10,'impressions':20} for i,term in enumerate(['gold ribbon','red ribbon','wide ribbon','Red satin ribbon'])])
+ assert query(level='search',q='red',search_type='all').json()['total']==4
+ from app import ads_workspace
+ monkeypatch.setattr(ads_workspace,'enrich',lambda *a:(_ for _ in ()).throw(AssertionError('term-only filter must not scan inventory')))
+ for search in ['red','RED',' red ']:
+  response=query(level='search',q=search,search_type='search_term').json()
+  assert response['total']==2 and {r['name'] for r in response['rows']}=={'red ribbon','Red satin ribbon'}
+  assert response['summary']['cost']==6 and sum(day['cost'] for day in response['trend'])==6
+ assert query(level='search',q='blue',search_type='search_term').json()['total']==0
+ assert query(level='search',q='red',search_type='search_term',adgroup_id='other').json()['total']==0
+ assert query(level='campaign',q='red',search_type='search_term').status_code==422
+ overview=client.get('/api/advertising/workspace-overview',params={'store':'DemoStoreD','country':'FR','level':'search','q':'red','search_type':'search_term','start':'2026-10-24','end':'2026-10-30'}).json()
+ assert overview['total']==2 and overview['summaries']['EUR']['cost']==6

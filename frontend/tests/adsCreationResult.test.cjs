@@ -1,0 +1,21 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {parse,compileScript}=require('@vue/compiler-sfc'),ts=require('typescript');
+const source=fs.readFileSync(require('node:path').resolve(__dirname,'../src/AdsCreatePage.vue'),'utf8');
+const code=ts.transpileModule(compileScript(parse(source).descriptor,{id:'creation-result-test'}).content,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+const watches=[],calls=[];
+const vue={defineComponent:o=>o,ref:value=>({value}),computed:f=>({get value(){return f()}}),watch:(get,run)=>watches.push({get,run}),onMounted:()=>{},onUnmounted:()=>{},nextTick:()=>Promise.resolve()};
+const mod={exports:{}};
+vm.runInNewContext(code,{module:mod,exports:mod.exports,URLSearchParams,setTimeout,clearTimeout,setInterval,clearInterval,require:n=>n==='vue'?vue:n==='./tableWidths'?{useTableWidths:()=>({})}:n==='element-plus'?{ElMessage:{},ElMessageBox:{}}:{}});
+const ctx=mod.exports.default.setup({mode:'campaign',profileId:'demo'},{expose:()=>{},emit:()=>{}});
+ctx.resultHeading.value={getClientRects:()=>[{}],focus:options=>calls.push(['focus',options.preventScroll]),scrollIntoView:options=>calls.push(['scroll',options.block,options.behavior])};
+(async()=>{
+ await ctx.revealResult();assert.equal(calls.length,0,'closing preview without submission must retain editing position');
+ ctx.result.value={status:'sending'};ctx.previewOpen.value=true;
+ await ctx.revealResult();assert.equal(calls.length,0,'do not move focus while confirmation is open');
+ ctx.previewOpen.value=false;await ctx.revealResult();assert.deepEqual(calls,[['focus',true],['scroll','start','instant']]);
+ const resultWatch=watches.find(w=>typeof w.get()==='boolean');assert.ok(resultWatch);
+ assert.equal(resultWatch.get(),true);ctx.result.value={status:'succeeded'};assert.equal(resultWatch.get(),true,'polling must not retrigger result entry');
+ ctx.resultHeading.value.getClientRects=()=>[];calls.length=0;
+ await ctx.revealResult();assert.equal(calls.length,0,'background tab must not change the active page scroll');
+ console.log('PASS: result entry focus/scroll, preview cancellation, confirmation focus trap, polling stability, background tab guard');
+})().catch(e=>{console.error(e);process.exitCode=1});

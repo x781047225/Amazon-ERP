@@ -3,6 +3,7 @@ import {ref,computed,onMounted,onBeforeUnmount} from 'vue'
 import {ElMessage} from 'element-plus'
 import {api} from './session'
 import {actualCpc} from './adsSearchPricing'
+import {destinationKey,destinationProfiles,mergeDestinationOptions} from './adsDestinationOptions'
 import {keywordError} from './adsKeywordValidation'
 import {submitSearchKeywords} from './adsSearchJobs'
 import AdsProductImage from './AdsProductImage.vue'
@@ -18,6 +19,11 @@ const campaigns=computed(()=>options.value.campaigns.filter((c:any)=>c.targeting
 const filteredCampaigns=computed(()=>campaigns.value.filter((c:any)=>campaignSearch(c.name).includes(campaignSearch(campaignQuery.value))))
 function filterCampaigns(query:string){campaignQuery.value=query}
 const groups=computed(()=>options.value.groups.filter((g:any)=>g.campaign_id===cid.value))
+const targetProfile=computed(()=>options.value.groups.find((g:any)=>g.id===gid.value)?.profile_id||options.value.campaigns.find((c:any)=>c.id===cid.value)?.profile_id||pid.value)
+const targetGroup=computed(()=>options.value.groups.find((g:any)=>g.id===gid.value)?.entity_id||'')
+const optionsLoading=ref(false)
+const siteProfiles=computed(()=>props.profiles.filter((p:any)=>{const peers=destinationProfiles(props.profiles,p.id);return p.id===(peers.some((v:any)=>v.id===pid.value)?pid.value:peers[0]?.id)}))
+function campaignLabel(c:any){return campaigns.value.filter((v:any)=>v.name===c.name).length>1?c.name+' · 账户'+c.profile_id.slice(-4):c.name}
 const currency=computed(()=>props.profiles.find(p=>p.id===pid.value)?.currency||'')
 const norm=(v:string)=>v.trim().replace(/\s+/g,' ').toLowerCase()
 const isAsin=(v:string)=>/^[A-Z0-9]{10}$/i.test(v)
@@ -36,42 +42,62 @@ function removeManualKeyword(text:string){manualTerms.value=manualTerms.value.fi
 const invalidKeywords=computed(()=>[...new Map(entries.value.filter(e=>!e.exists&&keywordError(e.text)).map(e=>[norm(e.text),{text:e.text,error:keywordError(e.text)}])).values()])
 function removeInvalidKeywords(){excludedTerms.value.push(...invalidKeywords.value.map(e=>norm(e.text)));rebuild();error.value=''}
 const hasNegativeKeywords=computed(()=>props.rows.some(r=>!isAsin(r.name)))
-const canSubmit=computed(()=>!reading.value&&!busy.value&&(props.mode==='negative'?(props.rows.length>0&&(!hasNegativeKeywords.value||negativeMatches.value.length>0)):(gid.value&&matches.value.length&&!invalidKeywords.value.length&&(!props.manualDestination||!manualText.value.trim())&&entries.value.some(e=>!e.exists))))
+const canSubmit=computed(()=>!reading.value&&!busy.value&&(props.mode==='negative'?(props.rows.length>0&&(!hasNegativeKeywords.value||negativeMatches.value.length>0)):(targetGroup.value&&matches.value.length&&!invalidKeywords.value.length&&(!props.manualDestination||!manualText.value.trim())&&entries.value.some(e=>!e.exists))))
 let request=0,suggestionRequest=0,optionsRequest=0
-let suggestionController:AbortController|undefined
-onBeforeUnmount(()=>{request++;optionsRequest++;suggestionRequest++;suggestionController?.abort()})
-async function refreshOptions(){
- const version=++optionsRequest,profile=pid.value;refreshing.value=true;optionsWarning.value=''
- try{const data=await api('/advertising/create/options?'+new URLSearchParams({profile_id:profile,refresh:'true'}));if(version!==optionsRequest||profile!==pid.value)return;options.value=data;optionsWarning.value=(data.warnings||[]).join(' ')
- if(props.manualDestination&&!cid.value){const destination=props.manualDestination;if(campaigns.value.some((c:any)=>c.id===destination.campaignId)){cid.value=destination.campaignId!;if(groups.value.some((g:any)=>g.id===destination.adgroupId)){gid.value=destination.adgroupId!;await loadContext()}}}
- }
- catch{if(version===optionsRequest)optionsWarning.value='活动列表暂未刷新，请稍后重试。'}
- finally{if(version===optionsRequest)refreshing.value=false}
+let suggestionController:AbortController|undefined,contextController:AbortController|undefined
+onBeforeUnmount(()=>{request++;optionsRequest++;suggestionRequest++;suggestionController?.abort();contextController?.abort()})
+const optionSources=new Map<string,any>()
+const optionControllers=new Set<AbortController>()
+onBeforeUnmount(()=>{for(const controller of optionControllers)controller.abort()})
+async function fetchOptions(refresh=false){
+ const version=++optionsRequest,profile=pid.value
+ for(const controller of optionControllers)controller.abort()
+ refreshing.value=refresh;optionsLoading.value=!refresh
+ optionsWarning.value='';const warnings:string[]=[]
+ await Promise.all(destinationProfiles(props.profiles,profile).map(async p=>{
+  const controller=new AbortController();optionControllers.add(controller)
+  const timer=setTimeout(()=>controller.abort(),refresh?20000:12000)
+  try{
+   const data=await api('/advertising/create/options?'+new URLSearchParams({profile_id:p.id,...(refresh?{refresh:'true'}:{})}),undefined,{signal:controller.signal})
+   if(version!==optionsRequest||profile!==pid.value)return
+   optionSources.set(p.id,data);options.value=mergeDestinationOptions(optionSources)
+   if(cid.value.startsWith(p.id+':')&&!campaigns.value.some((c:any)=>c.id===cid.value)){cid.value='';changeCampaign()}
+   else if(gid.value.startsWith(p.id+':')&&!groups.value.some((g:any)=>g.id===gid.value)){changeCampaign()}
+   warnings.push(...(data.warnings||[]))
+   // Each account becomes selectable as soon as it arrives; another slow account cannot block it.
+   const destination=props.manualDestination
+   const sources=props.rows.filter(v=>v.profile_id===p.id)
+   const same=sources.length>0&&sources.length===props.rows.length&&sources.every(v=>v.adgroup_id===sources[0].adgroup_id)
+   const campaign=destination?destinationKey(destination.profileId,destination.campaignId||''):same?destinationKey(p.id,sources[0].campaign_id):''
+   const group=destination?destinationKey(destination.profileId,destination.adgroupId||''):same?destinationKey(p.id,sources[0].adgroup_id):''
+   if(!cid.value&&campaigns.value.some((c:any)=>c.id===campaign)){
+    cid.value=campaign
+    if(groups.value.some((g:any)=>g.id===group)){gid.value=group;void loadContext()}
+   }
+  }catch{if(version===optionsRequest)warnings.push('部分活动列表暂未取得，请点击刷新活动列表重试。')}
+  finally{clearTimeout(timer);optionControllers.delete(controller)}
+ }))
+ if(version===optionsRequest){optionsLoading.value=false;refreshing.value=false;optionsWarning.value=[...new Set(warnings)].join(' ')}
 }
+async function refreshOptions(){await fetchOptions(true)}
 function rebuild(){
  const old=new Map(entries.value.map(e=>[key(e),e]));const terms=props.manualDestination?manualTerms.value:[...new Map(props.rows.map(r=>[norm(r.name),r.name.trim().replace(/\s+/g,' ')])).values()];const existing=new Set((context.value.existing||[]).map((e:any)=>key(e)))
  entries.value=terms.filter(text=>!excludedTerms.value.includes(norm(text))).flatMap(text=>matches.value.map(match=>{const prior=old.get(key({text,match}));return {text,match,bid:prior?.bid??context.value.default_bid,suggestion:prior?.suggestion,cpc:actualCpc(props.rows.filter(r=>norm(r.name)===norm(text)),currency.value,props.profiles),exists:existing.has(key({text,match}))}}));selected.value=[]
 }
-async function loadOptions(){optionsRequest++;options.value={campaigns:[],groups:[]};campaignQuery.value='';optionsWarning.value='';const r=++request;suggestionRequest++;suggesting.value=false;reading.value=true;error.value='';gid.value='';cid.value='';context.value={};entries.value=[]
- try{const data=await api('/advertising/create/options?'+new URLSearchParams({profile_id:pid.value}));if(r!==request)return;options.value=data
- const sources=props.rows.filter(v=>v.profile_id===pid.value);const same=sources.length===props.rows.length&&sources.every(v=>v.adgroup_id===sources[0]?.adgroup_id)
- if(props.manualDestination){
-  const destination=props.manualDestination;if(campaigns.value.some((c:any)=>c.id===destination.campaignId)){cid.value=destination.campaignId!;if(groups.value.some((g:any)=>g.id===destination.adgroupId))gid.value=destination.adgroupId!}
- }else if(same&&campaigns.value.some((c:any)=>c.id===sources[0].campaign_id)){cid.value=sources[0].campaign_id;gid.value=sources[0].adgroup_id}
- }catch(e){if(r===request)error.value=(e as Error).message}finally{if(r===request)reading.value=false}
- if(r!==request)return
- void refreshOptions()
- if(gid.value)await loadContext()
+async function loadOptions(){
+ request++;suggestionRequest++;suggestionController?.abort();contextController?.abort();suggesting.value=false;reading.value=false
+ optionSources.clear();options.value={campaigns:[],groups:[]};campaignQuery.value='';optionsWarning.value='';error.value='';warning.value='';gid.value='';cid.value='';context.value={};entries.value=[];rebuild()
+ await fetchOptions()
 }
-async function loadContext(){const r=++request;suggestionRequest++;suggesting.value=false;reading.value=true;error.value='';warning.value='';context.value={};entries.value=[]
- try{const data=await api('/advertising/search-actions/context?'+new URLSearchParams({profile_id:pid.value,adgroup_id:gid.value}));if(r!==request)return;context.value=data;rebuild()}
- catch(e){if(r===request)error.value=(e as Error).message}finally{if(r===request)reading.value=false}
+async function loadContext(){contextController?.abort();const controller=new AbortController();contextController=controller;const timer=setTimeout(()=>controller.abort(),12000);const r=++request;suggestionRequest++;suggesting.value=false;reading.value=true;error.value='';warning.value='';context.value={};entries.value=[]
+ try{const data=await api('/advertising/search-actions/context?'+new URLSearchParams({profile_id:targetProfile.value,adgroup_id:targetGroup.value}),undefined,{signal:controller.signal});if(r!==request)return;context.value=data;rebuild()}
+ catch(e){if(r===request)error.value=(e as Error).message}finally{clearTimeout(timer);if(r===request)reading.value=false}
  if(r===request&&entries.value.length)void suggestions()
 }
-function changeCampaign(){request++;gid.value='';context.value={};entries.value=[];reading.value=false;suggesting.value=false}
+function changeCampaign(){contextController?.abort();suggestionController?.abort();request++;gid.value='';context.value={};entries.value=[];rebuild();reading.value=false;suggesting.value=false}
 async function changeMatches(){rebuild();if(gid.value&&entries.value.length)await suggestions()}
 async function suggestions(){const valid=entries.value.filter(e=>!keywordError(e.text));if(!gid.value||!valid.length)return;suggestionController?.abort();const controller=new AbortController();suggestionController=controller;let timedOut=false;const timeout=setTimeout(()=>{timedOut=true;controller.abort()},30000);const r=request,s=++suggestionRequest;suggesting.value=true;warning.value=''
- try{const data=await api('/advertising/search-actions/suggestions',{profile_id:pid.value,adgroup_id:gid.value,mode:'keyword',items:valid.map(e=>({text:e.text,match:e.match}))},{signal:controller.signal});if(r!==request||s!==suggestionRequest)return
+ try{const data=await api('/advertising/search-actions/suggestions',{profile_id:targetProfile.value,adgroup_id:targetGroup.value,mode:'keyword',items:valid.map(e=>({text:e.text,match:e.match}))},{signal:controller.signal});if(r!==request||s!==suggestionRequest)return
  const suggestions=new Map(data.items.map((i:any)=>[key(i),i.suggestion]));for(const e of entries.value)e.suggestion=suggestions.get(key(e))
  }catch(e){if(r===request&&s===suggestionRequest)warning.value=timedOut?'建议竞价读取超时，请点击“刷新建议竞价”重试；已填写竞价保持不变。':'建议竞价暂未取得，可点击“刷新建议竞价”重试，也可使用默认或自定义竞价。'+(e as Error).message}finally{clearTimeout(timeout);if(r===request&&s===suggestionRequest)suggesting.value=false}
 }
@@ -89,8 +115,8 @@ function submitKeywords(){
  if(items.length>300){error.value='单次最多添加300项关键词与匹配类型组合，请减少选择';return}
  if(items.some(e=>e.bid==null||!Number.isFinite(e.bid)||e.bid<.01||e.bid>10000)){error.value='请给每个关键词填写0.01至10000之间的竞价';return}
  busy.value=true
- const profile=props.profiles.find(p=>p.id===pid.value)
- submitSearchKeywords({profile_id:pid.value,adgroup_id:gid.value,mode:'keyword',items},`${profile?.account} / ${profile?.country} · ${groups.value.find((g:any)=>g.id===gid.value)?.name}`)
+ const profile=props.profiles.find(p=>p.id===targetProfile.value)
+ submitSearchKeywords({profile_id:targetProfile.value,adgroup_id:targetGroup.value,mode:'keyword',items},`${profile?.account} / ${profile?.country} · ${groups.value.find((g:any)=>g.id===gid.value)?.name}`)
  emit('close')
 }
 function submitNegatives(){
@@ -114,8 +140,8 @@ onMounted(()=>{if(props.mode==='keyword')void loadOptions()})
 <el-alert v-if="error" :title="error" type="error" :closable="false"/>
 <template v-if="mode==='keyword'">
 <el-alert v-if="invalidKeywords.length" type="error" :closable="false" class="keyword-validation" title="有无效关键词，请先处理后再提交"><div v-for="item in invalidKeywords" :key="item.text">{{item.text}}：{{item.error}}</div><el-button type="danger" plain size="small" @click="removeInvalidKeywords">移除无效关键词</el-button></el-alert>
-<div class="destination"><el-select v-model="pid" aria-label="投放店铺站点" filterable :disabled="busy||!!manualDestination?.campaignId" @change="loadOptions"><el-option v-for="p in profiles" :key="p.id" :value="p.id" :label="p.account+' / '+p.country+' · '+p.currency"/></el-select><el-select v-model="cid" placeholder="选择手动广告活动" aria-label="目标广告活动" filterable :filter-method="filterCampaigns" @visible-change="(open:boolean)=>{if(open)campaignQuery=''}" :disabled="reading||!!manualDestination?.campaignId" @change="changeCampaign"><el-option v-for="c in filteredCampaigns" :key="c.id" :value="c.id" :label="c.name"/></el-select><el-select v-model="gid" placeholder="选择广告组" aria-label="目标广告组" filterable :disabled="reading||!cid||!!manualDestination?.adgroupId" @change="loadContext"><el-option v-for="g in groups" :key="g.id" :value="g.id" :label="g.name"/></el-select></div>
-<div><el-button link :loading="refreshing" @click="refreshOptions">刷新活动列表</el-button><span class="muted">按创建时间从新到旧排列</span></div>
+<div class="destination"><el-select v-model="pid" aria-label="投放店铺站点" filterable :disabled="busy||!!manualDestination?.campaignId" @change="loadOptions"><el-option v-for="p in siteProfiles" :key="p.id" :value="p.id" :label="p.account+' / '+p.country+' · '+p.currency"/></el-select><el-select v-model="cid" placeholder="选择手动广告活动" aria-label="目标广告活动" filterable :filter-method="filterCampaigns" @visible-change="(open:boolean)=>{if(open)campaignQuery=''}" :loading="optionsLoading&&!campaigns.length" :disabled="!!manualDestination?.campaignId" @change="changeCampaign"><el-option v-for="c in filteredCampaigns" :key="c.id" :value="c.id" :label="campaignLabel(c)"/></el-select><el-select v-model="gid" placeholder="选择广告组" aria-label="目标广告组" filterable :disabled="!cid||!!manualDestination?.adgroupId" @change="loadContext"><el-option v-for="g in groups" :key="g.id" :value="g.id" :label="g.name"/></el-select></div>
+<div><el-button link :loading="refreshing" :disabled="optionsLoading" @click="refreshOptions">刷新活动列表</el-button><span class="muted">按创建时间从新到旧排列</span></div>
 <el-alert v-if="optionsWarning" :title="optionsWarning" type="warning" :closable="false"/>
 <p class="muted">默认使用目标广告组当前默认竞价：{{context.default_bid??'未同步'}} {{currency}}。已存在的匹配类型不会重复添加。</p>
 <el-checkbox-group :disabled="reading" v-model="matches" @change="changeMatches"><el-checkbox v-for="m in ['EXACT','PHRASE','BROAD']" :key="m" :value="m">{{names[m]}}</el-checkbox></el-checkbox-group>
