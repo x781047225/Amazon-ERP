@@ -154,10 +154,11 @@ async function loadOrders(background=false){
  if(background&&orderRequests>0)return
  const id=++requestId;orderRequests++
  if(!background){loading.value=true;error.value=''}
- const params=new URLSearchParams({...filters,page:String(page.value),page_size:String(pageSize.value)})
+ const normalizedFilters=Object.fromEntries(Object.entries(filters).map(([key,value])=>[key,value??'']))
+ const params=new URLSearchParams({...normalizedFilters,page:String(page.value),page_size:String(pageSize.value)})
  params.set('days',String(orderDays.value));params.set('sort',orderSort.value)
  try{
-  const [data,today]=await Promise.all([api('/orders?'+params),api('/order-overview?'+new URLSearchParams({store:filters.store,marketplace:filters.marketplace,currency:displayCurrency.value}))])
+  const [data,today]=await Promise.all([api('/orders?'+params),api('/order-overview?'+new URLSearchParams({store:filters.store??'',marketplace:filters.marketplace??'',currency:displayCurrency.value}))])
   if(id!==requestId)return
   if(JSON.stringify(todayOverview.value)!==JSON.stringify(today))todayOverview.value=today
   if(JSON.stringify(orders.value)!==JSON.stringify(data.orders))orders.value=data.orders
@@ -238,9 +239,9 @@ async function logout(){try{await ElMessageBox.confirm('退出会清除本次会
      <div class="panel-head"><div><h2>全部订单 <span class="count-badge">{{total.toLocaleString()}}</span></h2><span class="muted">{{summary.units.toLocaleString()}} 件商品</span></div><span class="last-sync">最近整次同步完成：{{time(orderSync?.last_success_at||null)}}<br v-if="orderSync?.last_segment_at"/><span v-if="orderSync?.last_segment_at">最近分段完成：{{time(orderSync.last_segment_at)}}</span></span></div>
      <form class="filters order-filters" @submit.prevent="search">
       <el-input v-model="filters.q" placeholder="搜索订单号 / SKU / ASIN / 商品名" :prefix-icon="Search" clearable class="keyword" @clear="search"/>
-      <el-select v-model="filters.store" placeholder="全部店铺" clearable><el-option v-for="s in options.stores" :key="s" :label="s" :value="s"/></el-select>
-      <el-select v-model="filters.marketplace" placeholder="全部站点" clearable><el-option v-for="m in options.markets" :key="m" :label="(names[m]||m)+' · '+m" :value="m"/></el-select>
-      <el-select v-model="filters.status" placeholder="全部状态" clearable><el-option v-for="(v,k) in statuses" :key="k" :label="v" :value="k"/></el-select>
+      <el-select v-model="filters.store" :value-on-clear="''" placeholder="全部店铺" clearable><el-option v-for="s in options.stores" :key="s" :label="s" :value="s"/></el-select>
+      <el-select v-model="filters.marketplace" :value-on-clear="''" placeholder="全部站点" clearable><el-option v-for="m in options.markets" :key="m" :label="(names[m]||m)+' · '+m" :value="m"/></el-select>
+      <el-select v-model="filters.status" :value-on-clear="''" placeholder="全部状态" clearable><el-option v-for="(v,k) in statuses" :key="k" :label="v" :value="k"/></el-select>
 
       <el-select v-model="orderDays" aria-label="订单日期范围" @change="search"><el-option v-for="d in [1,3,7,14,30,90,180,365]" :key="d" :value="d" :label="`最近${d}天`"/></el-select><el-select v-model="orderSort" aria-label="订单排序" style="flex-basis:180px;width:180px" @change="search"><el-option value="date" label="按订单日期降序"/><el-option value="quantity" label="按销量降序"/></el-select>
       <el-button type="primary" native-type="submit" :icon="Search">查询</el-button><el-button @click="reset">重置</el-button><el-button :icon="Refresh" @click="refresh">刷新页面</el-button>

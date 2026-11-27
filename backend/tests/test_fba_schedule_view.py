@@ -73,3 +73,19 @@ def test_legacy_schedules_are_retired():
     tasks.scheduled_orders();tasks.scheduled_finance();tasks.scheduled_listings();tasks.scheduled_inventory();fba_tasks.scheduled_shipments()
     with Session() as db:
         for model in (SyncJob,FinanceJob,FbaJob):assert list(db.scalars(select(model)))==[]
+
+
+def test_multi_status_filter_totals_pagination_and_legacy():
+    ids=[seed('MULTI-'+str(i),[('SKU-A','FN',qty,0)]) for i,qty in enumerate([10,20,30])]
+    with Session.begin() as db:
+        for pk,status in zip(ids,['SHIPPED','RECEIVING','CLOSED']):
+            db.get(Shipment,pk).status=status
+    params={'status':'SHIPPED,RECEIVING,SHIPPED','q':'SKU-A','store':'DemoStoreB','marketplace':'FR','page_size':1}
+    result=client.get('/api/fba/shipments',params=params).json()
+    assert result['total']==2 and result['summary']['shipped']==30
+    assert len(result['shipments'])==1
+    second=client.get('/api/fba/shipments',params={**params,'page':2}).json()
+    assert {result['shipments'][0]['status'],second['shipments'][0]['status']}=={'SHIPPED','RECEIVING'}
+    assert client.get('/api/fba/shipments',params={'status':'SHIPPED'}).json()['total']==1
+    assert client.get('/api/fba/shipments',params={'status':''}).json()['total']==3
+    assert client.get('/api/fba/shipments',params={**params,'store':'DemoStoreA'}).json()['total']==0

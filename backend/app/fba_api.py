@@ -46,7 +46,8 @@ def shipments(store:str='',marketplace:str='',status:str='',q:str='',dispatch_st
     if dispatch_end:conditions.append(Shipment.dispatched_on<=dispatch_end)
     if store:conditions.append(Shipment.store==store)
     if shipment_id:conditions.append(Shipment.shipment_id==shipment_id)
-    if status:conditions.append(Shipment.status==status)
+    selected_statuses={value.strip() for value in status.split(',') if value.strip()}
+    if selected_statuses:conditions.append(Shipment.status.in_(selected_statuses))
     if marketplace:conditions.append(exists(select(ShipmentMarket.shipment_pk).where(ShipmentMarket.shipment_pk==Shipment.id,ShipmentMarket.marketplace==marketplace)))
     if remaining_only:conditions.append(Shipment.remaining>0)
     if anomaly_only:conditions.append(or_(Shipment.over_received>0,Shipment.decreased>0,Shipment.sync_error.is_not(None)))
