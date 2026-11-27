@@ -37,7 +37,7 @@ async function refreshOptions(){if(!can('products.products'))return;const [o,p]=
 const linkedDialog=ref(false),linkedRows=ref<any[]>([]),linkedTotal=ref(0),linkedPage=ref(1),linkedPageSize=ref(25),linkedId=ref(0),linkedBusy=ref(false)
 async function showLinks(row:any){linkedId.value=row.id;linkedPage.value=1;focusedProduct.value=row.code;linkedDialog.value=true;await loadLinks()}
 async function loadLinks(){linkedBusy.value=true;try{const d=await api('/products/listings?'+new URLSearchParams({product_id:String(linkedId.value),state:'all',page:String(linkedPage.value),page_size:String(linkedPageSize.value)}));linkedRows.value=d.rows;linkedTotal.value=d.total}catch(e){ElMessage.error((e as Error).message)}finally{linkedBusy.value=false}}
-const emit=defineEmits(['open-product','open-customs'])
+const emit=defineEmits(['open-product','copy-product','open-customs'])
 const customsLibrary=ref<{refresh:()=>void}|null>(null)
 function edit(row?:any){emit('open-product',row?.id)}
 defineExpose({canLeave:async()=>{if(bulkKind.value){ElMessage.info('请先关闭批量修改窗口');return false}return true},refresh:()=>{load();refreshOptions();customsLibrary.value?.refresh()}})
@@ -72,7 +72,7 @@ onMounted(async()=>{try{await refreshOptions()}catch(e){error.value=(e as Error)
    <el-table-column :column-key="'column-9'" label="已关联 SKU" :width="tableWidths.width('table-1', 'column-9', '100')"><template #default="{row}"><el-button link type="primary" @click="showLinks(row)">{{row.linked_count}} 项</el-button></template></el-table-column>
    <el-table-column column-key="created_at" label="创建时间" :width="tableWidths.width('table-1','created_at',180)"><template #default="{row}">{{time(row.created_at)}}</template></el-table-column>
    <el-table-column column-key="created_by" label="创建人" :width="tableWidths.width('table-1','created_by',120)"><template #default="{row}">{{row.created_by||'未记录'}}</template></el-table-column>
-   <el-table-column :column-key="'column-10'" label="操作" :width="tableWidths.width('table-1', 'column-10', '180')" fixed="right"><template #default="{row}"><el-button link type="primary" @click="edit(row)">{{admin&&!row.archived?'编辑':'查看'}}</el-button><el-button v-if="admin" :disabled="!!row.merged_into" link :type="row.archived?'primary':'danger'" @click="archiveProduct(row,!!row.archived)">{{row.merged_into?'已归并':row.archived?'恢复':'删除'}}</el-button><el-button link type="primary" @click="logRow=row">日志</el-button></template></el-table-column>
+   <el-table-column :column-key="'column-10'" label="操作" :width="tableWidths.width('table-1', 'column-10', '230')" fixed="right"><template #default="{row}"><el-button v-if="admin&&!row.archived" link type="primary" @click="emit('copy-product',row.id)">复制</el-button><el-button link type="primary" @click="edit(row)">{{admin&&!row.archived?'编辑':'查看'}}</el-button><el-button v-if="admin" :disabled="!!row.merged_into" link :type="row.archived?'primary':'danger'" @click="archiveProduct(row,!!row.archived)">{{row.merged_into?'已归并':row.archived?'恢复':'删除'}}</el-button><el-button link type="primary" @click="logRow=row">日志</el-button></template></el-table-column>
   </el-table></template>
   <div class="catalog-footer"><small>标品档案跨店铺共用；关联数仅统计你有权限的店铺。</small><AppPagination v-model:current-page="page" :total="total" @change="load" v-model:page-size="pageSize"/></div>
  </section>
