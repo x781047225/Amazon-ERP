@@ -137,8 +137,8 @@ def labels_pdf(items,profile,country,title,task_number,separators=True):
      line+=ch
    if line:rows.append(line.rstrip())
   return rows
- def fit(sections,width,height):
-  for size in [6,5.7,5.4,5.1,4.8,4.5,4.2,4.0]:
+ def fit(sections,width,height,sizes=(7,6.7,6.4,6.1,5.8,5.5,5.2,4.9,4.6,4.3,4.0)):
+  for size in sizes:
    rows=[line for s in sections for line in lines(s,size,width)]
    if len(rows)*size*1.12<=height:return size,rows
   raise ValueError('标签文字过长，50×50mm内无法清晰完整排下，请精简标签地址格式后重试（不会截断内容）')
@@ -148,17 +148,18 @@ def labels_pdf(items,profile,country,title,task_number,separators=True):
   if col==2:c.showPage();col=0
   x=col*50*mm;col+=1;return x
  def body(i):
-  x=newlabel();left=x+1*mm;width=48*mm
-  # The middle 20mm band (40% of each 50mm label) is reserved for barcode and human-readable FNSKU.
-  barcode=createBarcodeDrawing('Code128',value=i['fnsku'],barHeight=17*mm,barWidth=.28*mm,humanReadable=False,quiet=True,lquiet=3*mm,rquiet=3*mm)
-  if barcode.width>width:raise ValueError('条码超出标签宽度')
-  renderPDF.draw(barcode,c,x+(50*mm-barcode.width)/2,13*mm)
-  c.setFont('ERPLabel',5.5);c.drawCentredString(x+25*mm,10.5*mm,i['fnsku'])
+  x=newlabel();left=x+2*mm;width=46*mm
+  # Keep module width unchanged; lower the barcode 3mm and reserve more room for the larger text.
+  barcode=createBarcodeDrawing('Code128',value=i['fnsku'],barHeight=15*mm,barWidth=.28*mm,humanReadable=False,quiet=True,lquiet=3*mm,rquiet=3*mm)
+  # Barcode drawing includes 3mm quiet zones; its black bars retain over 4mm side clearance.
+  if barcode.width>48*mm:raise ValueError('条码超出标签宽度')
+  renderPDF.draw(barcode,c,x+(50*mm-barcode.width)/2,10*mm)
+  c.setFont('ERPLabel',5.5);c.drawCentredString(x+25*mm,8*mm,i['fnsku'])
   rep='UK | REP' if country=='UK' else 'EU | REP'
   sections=['SKU: '+i['sku'],rep+' '+profile['representative_company'],'Address: '+profile['representative_address'],'Email: '+profile['representative_email'],'Manufacturer: '+profile['manufacturer_company'],'Address: '+profile['manufacturer_address'],'Email: '+profile['manufacturer_email']]
-  size,ls=fit(sections,width,18*mm);y=49*mm-size;c.setFont('ERPLabel',size)
+  size,ls=fit(sections,width,22*mm);y=48*mm-size;c.setFont('ERPLabel',size)
   # Use spare body height for slightly more breathing room without reducing text size.
-  leading=min(size*1.18,18*mm/max(1,len(ls)))
+  leading=min(size*1.18,(22*mm-size)/max(1,len(ls)-1))
   for line in ls:
    prefix=next((p for p in ('Manufacturer:',rep) if line.startswith(p)),None)
    if prefix:
@@ -168,16 +169,16 @@ def labels_pdf(items,profile,country,title,task_number,separators=True):
     c.setFont('ERPLabelBold' if line==rep else 'ERPLabel',size)
     c.drawString(left,y,line)
    y-=leading
-  # Five 8mm squares have 1.25mm gaps and 2.5mm outer margins; preserve image proportions.
+  # Five 5mm icon slots, 2mm gaps, centered with 2mm bottom clearance.
   icons=['ukca.jpg','ce.jpg','age14.jpg','recycle.jpg','made-china.jpg'] if profile.get('show_marks',True) else ['made-china.jpg']
   for n,icon in enumerate(icons):
-   slot=x+(2.5+n*9.25)*mm if len(icons)==5 else x+21*mm
-   c.drawImage(str(ROOT/'assets/shipping'/icon),slot,1*mm,width=8*mm,height=8*mm,preserveAspectRatio=True,anchor='c',mask='auto')
+   slot=x+(8.5+n*7)*mm if len(icons)==5 else x+22.5*mm
+   c.drawImage(str(ROOT/'assets/shipping'/icon),slot,2*mm,width=5*mm,height=5*mm,preserveAspectRatio=True,anchor='c',mask='auto')
 
  def separator(i,kind):
-  x=newlabel();left=x+2*mm;c.setFont('ERPLabel',10);c.drawString(left,44*mm,kind)
+  x=newlabel();left=x+2*mm;c.setFont('ERPLabel',12);c.drawString(left,44*mm,kind)
   sections=[title,task_number,'FNSKU: '+i['fnsku'],'SKU: '+i['sku'],'品名: '+i['name'],'数量: '+str(i['quantity'])]
-  size,ls=fit(sections,46*mm,36*mm);y=38*mm;c.setFont('ERPLabel',size)
+  size,ls=fit(sections,46*mm,36*mm,sizes=(8,7.7,7.4,7.1,6.8,6.5,6.2,6.0));y=38*mm;c.setFont('ERPLabel',size)
   for line in ls:c.drawString(left,y,line);y-=size*1.12
  for i in items:
   if not i['quantity']:continue
